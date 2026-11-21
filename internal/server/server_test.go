@@ -1929,3 +1929,73 @@ func TestFileVersionControlAndNodeHealthTelemetryAPI(t *testing.T) {
 		t.Fatalf("expected populated node telemetry fields, got %+v", n)
 	}
 }
+
+func TestClusterWorkerVersionManagementAndAutoSync(t *testing.T) {
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Entry-Master",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	workerSrv, workerMgr, _, workerTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Worker-Sub",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+
+	// Configure updater on both Entry and Worker.
+	entryUpd, err := updater.NewManager(t.TempDir(), "tester/LFH")
+	if err != nil {
+		t.Fatalf("entry NewManager: %v", err)
+	}
+	entrySrv.SetUpdater(entryUpd)
+
+	workerUpdDir := t.TempDir()
+	workerUpd, err := updater.NewManager(workerUpdDir, "tester/LFH")
+	if err != nil {
+		t.Fatalf("worker NewManager: %v", err)
+	}
+	workerSrv.SetUpdater(workerUpd)
+
+	if err := workerMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker JoinEntryCluster: %v", err)
+	}
+	if err := workerMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker SendHeartbeatNow: %v", err)
+	}
+
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+
+	// 1. Toggle auto_sync_workers off and back on via /api/admin/cluster/upgrade-nodes
+	toggleOff := false
+	offBody, _ := json.Marshal(map[string]any{"auto_sync_workers": toggleOff})
+	offRes, err := adminClient.Post(entryTS.URL+"/api/admin/cluster/upgrade-nodes", "application/json", bytes.NewReader(offBody))
+	if err != nil {
+		t.Fatalf("POST upgrade-nodes toggle off: %v", err)
+	}
+	offRes.Body.Close()
+	if offRes.StatusCode != http.StatusOK || entryMgr.AutoSyncWorkers() {
+		t.Fatalf("expected AutoSyncWorkers=false after toggle off")
+	}
+
+	toggleOn := true
+	onBody, _ := json.Marshal(map[string]any{"auto_sync_workers": toggleOn})
+	onRes, _ := adminClient.Post(entryTS.URL+"/api/admin/cluster/upgrade-nodes", "application/json", bytes.NewReader(onBody))
+	onRes.Body.Close()
+	if !entryMgr.AutoSyncWorkers() {
+		t.Fatalf("expected AutoSyncWorkers=true after toggle on")
+	}
+
+	// 2. Verify GET /api/cluster/download-binary serves a valid non-empty binary with SHA-256 header
+	dlBinRes, err := adminClient.Get(entryTS.URL + "/api/cluster/download-binary")
+	if err != nil {
+		t.Fatalf("GET /api/cluster/download-binary: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, dlBinRes.Body)
+	dlBinRes.Body.Close()
+	if dlBinRes.StatusCode != http.StatusOK || dlBinRes.Header.Get("X-LFH-Binary-SHA256") == "" {
+		t.Fatalf("expected 200 and X-LFH-Binary-SHA256 header from download-binary, status=%d", dlBinRes.StatusCode)
+	}
+	_ = workerTS
+}

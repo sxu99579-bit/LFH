@@ -28,7 +28,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.6</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.7</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -106,7 +106,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.6</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.7</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
@@ -355,6 +355,7 @@
             </div>
             <div class="page-panel-actions">
               <span class="live-sync-pill connected"><span class="live-dot"></span><span>3秒自动采样</span></span>
+              <button id="btn-health-sync-versions" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">同步全部分节点版本</button>
               <button id="btn-health-open-cluster-settings" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">集群组网设置</button>
               <button id="btn-health-refresh" class="btn btn-primary btn-sm" type="button">立即刷新采样</button>
             </div>
@@ -680,15 +681,19 @@
               </div>
             </div>
             <div class="cluster-hint-bar">
-              <span class="switch-desc">节点在线时实时汇总展示该节点上的文件；离线超过 12 秒自动隐藏。可将任意在线从节点切换为主节点、移出节点，或在从节点打开 <code>/worker</code> 单独退出集群。</span>
-              <button id="btn-refresh-cluster" class="btn btn-ghost btn-xs" type="button">刷新节点状态</button>
+              <span class="switch-desc">主节点版本更新后会自动同步更新所有在线分节点；也可在此单独或批量管理分节点版本、切换主节点及移出节点。</span>
+              <div class="row-actions">
+                <a class="btn btn-ghost btn-xs" href="/api/cluster/download-binary" download title="直接从本机下载主节点当前版本可执行程序">下载主节点程序</a>
+                <button id="btn-sync-all-worker-versions" class="btn btn-primary btn-xs" type="button">一键同步分节点版本</button>
+                <button id="btn-refresh-cluster" class="btn btn-ghost btn-xs" type="button">刷新节点状态</button>
+              </div>
             </div>
             <div class="admin-table-wrap">
               <table class="files-table">
                 <thead>
                   <tr>
                     <th>节点名称 / 地址</th>
-                    <th>角色</th>
+                    <th>角色 / 版本</th>
                     <th>系统</th>
                     <th>在线状态</th>
                     <th>文件 / 已用</th>
@@ -756,7 +761,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.6</strong>
+                  <strong id="upd-cur-version">V0.11.21.7</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>
@@ -802,9 +807,22 @@
                 <span class="toggle-slider"></span>
               </label>
             </div>
+            <div class="switch-row" style="margin-top:12px;">
+              <div>
+                <div style="font-size:13.5px;font-weight:600;">主节点版本更新时自动同步更新所有分节点</div>
+                <div class="switch-desc">开启后，每当主节点升级或检测到在线分节点版本低于主节点时，自动通过局域网直推主节点程序并热重启分节点</div>
+              </div>
+              <label class="toggle-switch" title="开关分节点版本自动跟随主节点同步">
+                <input id="toggle-auto-sync-workers" type="checkbox" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
             <div class="policy-actions" style="margin-top:12px;">
               <span class="switch-desc">升级过程会先验证 SHA256 与可启动性，再平滑接管端口不中断正在下载/上传的连接</span>
-              <button id="btn-save-update-config" class="btn btn-primary btn-sm" type="button">保存升级配置</button>
+              <div class="row-actions">
+                <button id="btn-update-sync-workers" class="btn btn-ghost btn-sm" type="button">立即同步所有分节点版本</button>
+                <button id="btn-save-update-config" class="btn btn-primary btn-sm" type="button">保存升级配置</button>
+              </div>
             </div>
           </div>
         </div>

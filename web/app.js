@@ -18,7 +18,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.6",
+  appVersion: "V0.11.21.7",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -645,7 +645,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.6";
+  const ver = state.appVersion || "V0.11.21.7";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -2628,6 +2628,59 @@ function gaugeBarClass(pct) {
   return "ok";
 }
 
+function compareVersionsClient(a, b) {
+  const parse = (raw) =>
+    String(raw || "")
+      .trim()
+      .replace(/^[vV]+/, "")
+      .split(/[.-]/)
+      .map((s) => parseInt(s, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const va = pa[i] || 0;
+    const vb = pb[i] || 0;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+  }
+  return 0;
+}
+
+async function syncClusterNodeVersions(nodeID, nodeName) {
+  const isSingle = Boolean(nodeID && nodeID !== "all");
+  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.21.7";
+  const label = isSingle ? `分节点「${nodeName || nodeID}」` : "所有在线分节点";
+  try {
+    const data = await api("/api/admin/cluster/upgrade-nodes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: isSingle ? nodeID : "all" }),
+    });
+    if (data.pool) state.pool = data.pool;
+    renderAdminCluster();
+    renderPoolStatus();
+    renderNodeSummary();
+    if (state.workspacePage === "health") renderNodeHealthPage();
+    if (isSingle) {
+      const first = Array.isArray(data.results) && data.results[0];
+      showToast(first?.message || `已向 ${label} 推送版本 ${entryVer}`, "success");
+    } else if (data.total_targets === 0) {
+      showToast("当前没有需要同步的在线分节点", "info");
+    } else if (data.first_error && data.synced === 0) {
+      showToast(data.first_error, "error");
+    } else {
+      showToast(
+        `已向 ${data.synced}/${data.total_targets} 个在线分节点同步版本 ${entryVer}${data.first_error ? "（部分节点提示：" + data.first_error + "）" : ""}`,
+        data.first_error ? "info" : "success"
+      );
+    }
+    setTimeout(() => loadCluster(), 1600);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
 function switchWorkspacePage(page) {
   const valid = page === "analytics" || page === "health" ? page : "files";
   state.workspacePage = valid;
@@ -2638,8 +2691,12 @@ function switchWorkspacePage(page) {
   if ($("page-analytics")) $("page-analytics").classList.toggle("hidden", valid !== "analytics");
   if ($("page-health")) $("page-health").classList.toggle("hidden", valid !== "health");
 
+  const isAdmin = Boolean(state.user && state.user.role === "admin");
   if ($("btn-health-open-cluster-settings")) {
-    $("btn-health-open-cluster-settings").classList.toggle("hidden", !(state.user && state.user.role === "admin"));
+    $("btn-health-open-cluster-settings").classList.toggle("hidden", !isAdmin);
+  }
+  if ($("btn-health-sync-versions")) {
+    $("btn-health-sync-versions").classList.toggle("hidden", !isAdmin);
   }
 
   if (state.healthTimer) {
@@ -3025,7 +3082,18 @@ function renderNodeHealthPage() {
       const wErr = Number(n.io_write_errors || 0);
       const totErr = Number(n.io_total_errors || rErr + wErr);
       const syncTime = n.last_sync_at || n.last_seen;
-      const nodeVer = n.version || (n.is_self ? state.appVersion : "V0.11.21.4");
+      const entryVer = pool?.entry_version || state.appVersion || "V0.11.21.7";
+      const nodeVer = n.version || (n.is_self ? entryVer : "V0.11.21.4");
+      const isBehind = !n.is_self && compareVersionsClient(nodeVer, entryVer) < 0;
+      const isAdmin = Boolean(state.user && state.user.role === "admin");
+      const verStatusHtml = n.is_self
+        ? `<span class="status-pill status-ok">主本机基准版本</span>`
+        : isBehind
+        ? `<span class="status-pill status-warn">待同步 → ${escapeHtml(entryVer)}</span>`
+        : `<span class="status-pill status-ok">与主版本同步</span>`;
+      const syncActionBtn = !n.is_self && n.online && isAdmin
+        ? `<button type="button" class="btn ${isBehind ? "btn-primary" : "btn-ghost"} btn-xs" data-sync-node-version="${escapeHtml(n.node_id)}" data-node-name="${escapeHtml(n.node_name)}">${isBehind ? `同步至 ${escapeHtml(entryVer)}` : "重新同步版本"}</button>`
+        : "";
       const roleBadge = n.role === "entry"
         ? `<span class="status-pill status-ok">主节点 (Entry)</span>`
         : `<span class="cat-tag">从节点 (Worker)</span>`;
@@ -3046,7 +3114,11 @@ function renderNodeHealthPage() {
               </div>
               <div class="health-node-url">${escapeHtml(n.http_url || "本机直连")} · ${escapeHtml(n.os || "-")}/${escapeHtml(n.arch || "-")} · 文件数 ${Number(n.file_count || 0)} 个</div>
             </div>
-            <span class="ver-badge">${escapeHtml(nodeVer)}</span>
+            <div class="row-actions" style="align-items:center;">
+              <span class="ver-badge">${escapeHtml(nodeVer)}</span>
+              ${verStatusHtml}
+              ${syncActionBtn}
+            </div>
           </div>
 
           <div class="health-gauge-grid">
@@ -3526,7 +3598,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.6";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.7";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -3692,19 +3764,28 @@ function renderAdminCluster() {
     const total = Number(state.pool.total_nodes || (state.pool.nodes ? state.pool.nodes.length : 1));
     dissolveBtn.classList.toggle("hidden", total <= 1);
   }
+  if ($("toggle-auto-sync-workers")) {
+    $("toggle-auto-sync-workers").checked = state.pool.auto_sync_workers !== false;
+  }
 
+  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.21.7";
   const tbody = $("cluster-nodes-tbody");
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
     const q = splitQuotaUnit(n.quota_bytes);
     const nid = escapeHtml(n.node_id);
     const nnameAttr = escapeHtml(n.node_name || n.node_id || "");
+    const nodeVer = n.version || (n.is_self ? entryVer : "V0.11.21.4");
+    const isBehind = !n.is_self && compareVersionsClient(nodeVer, entryVer) < 0;
     const statusPill = n.online
       ? `<span class="status-pill status-ok">在线</span>`
       : `<span class="status-pill status-off">离线 (${escapeHtml(formatRelativeTime(n.last_seen))})</span>`;
     const fileInfo = n.online
       ? `${Number(n.file_count || 0)} 个文件 · ${formatSize(n.used_bytes)}`
       : `<span style="color:var(--muted)">文件已隐藏</span>`;
+    const syncVerBtn = !n.is_self && n.online
+      ? `<button class="btn ${isBehind ? "btn-primary" : "btn-ghost"} btn-xs" type="button" data-sync-node-version="${nid}" data-node-name="${nnameAttr}" title="将主节点当前版本 (${escapeHtml(entryVer)}) 同步推送至该分节点">${isBehind ? "同步版本" : "重推版本"}</button>`
+      : "";
     const promoteBtn = n.online && n.role !== "entry"
       ? `<button class="btn btn-ghost btn-xs" type="button" data-promote-node="${nid}" data-node-name="${nnameAttr}" title="将该在线节点设为集群主节点">设为主节点</button>`
       : "";
@@ -3719,7 +3800,10 @@ function renderAdminCluster() {
         <div><strong>${escapeHtml(n.node_name)}</strong>${n.is_self ? ' <span class="cat-tag">本机</span>' : ""}</div>
         ${n.http_url ? `<div class="node-url-sub">${escapeHtml(n.http_url)}</div>` : ""}
       </td>
-      <td>${n.role === "entry" ? '<span class="status-pill status-ok">主入口</span>' : '<span class="cat-tag">扩容节点</span>'}</td>
+      <td>
+        <div>${n.role === "entry" ? '<span class="status-pill status-ok">主入口</span>' : '<span class="cat-tag">扩容节点</span>'}</div>
+        <div style="margin-top:4px;"><span class="ver-badge">${escapeHtml(nodeVer)}</span>${isBehind ? ` <span class="status-pill status-warn" style="font-size:10.5px;">待同步</span>` : ""}</div>
+      </td>
       <td>${escapeHtml(n.os)}/${escapeHtml(n.arch)}</td>
       <td>${statusPill}</td>
       <td>${fileInfo}</td>
@@ -3735,6 +3819,7 @@ function renderAdminCluster() {
       </td>
       <td>
         <div class="row-actions">
+          ${syncVerBtn}
           ${promoteBtn}
           <button class="btn btn-primary btn-xs" type="button" data-save-quota="${nid}" ${n.online ? "" : "disabled"}>保存配额</button>
           ${removeBtn}
@@ -4486,6 +4571,40 @@ function bindEvents() {
   if ($("btn-health-open-cluster-settings")) {
     $("btn-health-open-cluster-settings").onclick = () => openSettingsModal("cluster");
   }
+  if ($("btn-health-sync-versions")) {
+    $("btn-health-sync-versions").onclick = () => syncClusterNodeVersions("all", "");
+  }
+  if ($("btn-sync-all-worker-versions")) {
+    $("btn-sync-all-worker-versions").onclick = () => syncClusterNodeVersions("all", "");
+  }
+  if ($("btn-update-sync-workers")) {
+    $("btn-update-sync-workers").onclick = () => syncClusterNodeVersions("all", "");
+  }
+  if ($("toggle-auto-sync-workers")) {
+    $("toggle-auto-sync-workers").onchange = async (e) => {
+      const enabled = Boolean(e.target.checked);
+      try {
+        const data = await api("/api/admin/cluster/upgrade-nodes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auto_sync_workers: enabled }),
+        });
+        if (data.pool) state.pool = data.pool;
+        showToast(enabled ? "已开启：主版本更新时自动同步更新所有分节点" : "已关闭分节点自动版本同步", "success");
+      } catch (err) {
+        e.target.checked = !enabled;
+        showToast(err.message, "error");
+      }
+    };
+  }
+  if ($("health-page-body")) {
+    $("health-page-body").onclick = (e) => {
+      const syncBtn = e.target.closest("[data-sync-node-version]");
+      if (syncBtn) {
+        syncClusterNodeVersions(syncBtn.dataset.syncNodeVersion, syncBtn.dataset.nodeName);
+      }
+    };
+  }
   if ($("analytics-page-body")) {
     $("analytics-page-body").onclick = (e) => {
       const verBtn = e.target.closest("[data-open-version-id]");
@@ -4837,6 +4956,17 @@ function bindEvents() {
   };
 
   $("cluster-nodes-tbody").onclick = async (e) => {
+    const syncVerBtn = e.target.closest("[data-sync-node-version]");
+    if (syncVerBtn) {
+      syncVerBtn.disabled = true;
+      try {
+        await syncClusterNodeVersions(syncVerBtn.dataset.syncNodeVersion, syncVerBtn.dataset.nodeName);
+      } finally {
+        syncVerBtn.disabled = false;
+      }
+      return;
+    }
+
     const promoteBtn = e.target.closest("[data-promote-node]");
     if (promoteBtn) {
       const nodeID = promoteBtn.dataset.promoteNode;

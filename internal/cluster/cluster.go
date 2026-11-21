@@ -60,11 +60,12 @@ type Config struct {
 	QuotaGB       float64 `json:"quota_gb"`
 	ExposeIP      string  `json:"expose_ip,omitempty"`
 	Port          string  `json:"port,omitempty"`
-	EntryHint     string            `json:"entry_hint,omitempty"`
-	StorageDir    string            `json:"storage_dir,omitempty"`
-	PrimaryNodeID string            `json:"primary_node_id,omitempty"`
-	EvictedPeers  map[string]string `json:"evicted_peers,omitempty"`
-	DiscoveryPort int               `json:"discovery_port"`
+	EntryHint       string            `json:"entry_hint,omitempty"`
+	StorageDir      string            `json:"storage_dir,omitempty"`
+	PrimaryNodeID   string            `json:"primary_node_id,omitempty"`
+	EvictedPeers    map[string]string `json:"evicted_peers,omitempty"`
+	AutoSyncWorkers *bool             `json:"auto_sync_workers,omitempty"`
+	DiscoveryPort   int               `json:"discovery_port"`
 }
 
 type Options struct {
@@ -140,6 +141,8 @@ type NodeStatus struct {
 
 type PoolSummary struct {
 	EntryURL        string       `json:"entry_url"`
+	EntryVersion    string       `json:"entry_version,omitempty"`
+	AutoSyncWorkers bool         `json:"auto_sync_workers"`
 	PrimaryNodeID   string       `json:"primary_node_id,omitempty"`
 	TotalNodes      int          `json:"total_nodes"`
 	OnlineNodes     int          `json:"online_nodes"`
@@ -190,29 +193,33 @@ func newDirectClusterClient(timeout time.Duration) *http.Client {
 }
 
 type peerRecord struct {
-	status     NodeStatus
-	files      []storage.FileRecord
-	wasOnline  bool
-	lastProbed time.Time
+	status          NodeStatus
+	files           []storage.FileRecord
+	wasOnline       bool
+	lastProbed      time.Time
+	lastUpgradeSync time.Time
 }
 
 type Manager struct {
-	mu                 sync.RWMutex
-	cfgPath            string
-	cfg                Config
-	store              *storage.Store
-	selfURL            string
-	discoveredEntryURL string
-	peers              map[string]*peerRecord
-	discovered         map[string]DiscoveredNode
-	apiClient          *http.Client
-	streamClient       *http.Client
-	hbTrigger          chan struct{}
-	parentCtx          context.Context
-	loopCancel         context.CancelFunc
-	onPeerChange       func(nodeName string, online bool)
-	lastHBLatencyMs    float64
-	lastSyncAt         time.Time
+	mu                  sync.RWMutex
+	cfgPath             string
+	cfg                 Config
+	store               *storage.Store
+	selfURL             string
+	discoveredEntryURL  string
+	peers               map[string]*peerRecord
+	discovered          map[string]DiscoveredNode
+	apiClient           *http.Client
+	streamClient        *http.Client
+	hbTrigger           chan struct{}
+	parentCtx           context.Context
+	loopCancel          context.CancelFunc
+	onPeerChange        func(nodeName string, online bool)
+	onPeerVersionSync   func(peer NodeStatus)
+	onEntryVersionAhead func(entryURL, entryVersion string)
+	lastSelfSyncAttempt time.Time
+	lastHBLatencyMs     float64
+	lastSyncAt          time.Time
 }
 
 func ParseQuotaBytes(input string) (int64, error) {
@@ -682,8 +689,10 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	}
 	prev, exists := m.peers[n.NodeID]
 	var lastProbed time.Time
+	var lastUpgradeSync time.Time
 	if exists {
 		lastProbed = prev.lastProbed
+		lastUpgradeSync = prev.lastUpgradeSync
 		if n.Version == "" {
 			n.Version = prev.status.Version
 		}
@@ -708,10 +717,23 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	if needProbe {
 		lastProbed = now
 	}
+	autoSyncEnabled := m.cfg.AutoSyncWorkers == nil || *m.cfg.AutoSyncWorkers
+	syncCb := m.onPeerVersionSync
+	needVersionSync := m.cfg.Role == RoleEntry &&
+		autoSyncEnabled &&
+		syncCb != nil &&
+		n.HTTPURL != "" &&
+		n.Version != "" &&
+		compareClusterVersions(n.Version, version.Version) < 0 &&
+		now.Sub(lastUpgradeSync) > 25*time.Second
+	if needVersionSync {
+		lastUpgradeSync = now
+	}
 	changed := !exists ||
 		!prev.wasOnline ||
 		now.Sub(prev.status.LastSeen) > PeerTimeout ||
 		prev.status.NodeName != n.NodeName ||
+		prev.status.Version != n.Version ||
 		prev.status.QuotaBytes != n.QuotaBytes ||
 		prev.status.UsedBytes != n.UsedBytes ||
 		prev.status.FileCount != n.FileCount ||
@@ -730,14 +752,18 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		}
 	}
 	m.peers[n.NodeID] = &peerRecord{
-		status:     n,
-		files:      files,
-		wasOnline:  true,
-		lastProbed: lastProbed,
+		status:          n,
+		files:           files,
+		wasOnline:       true,
+		lastProbed:      lastProbed,
+		lastUpgradeSync: lastUpgradeSync,
 	}
 	m.mu.Unlock()
 	if needProbe {
 		go m.refreshPeerTelemetry(n.NodeID, n.HTTPURL)
+	}
+	if needVersionSync {
+		go syncCb(n)
 	}
 	return changed
 }
@@ -766,23 +792,236 @@ func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&info)
 
+	var syncCb func(peer NodeStatus)
+	var peerSnap NodeStatus
 	m.mu.Lock()
 	if p, ok := m.peers[nodeID]; ok {
 		p.status.NetLatencyMs = rttMs
 		if p.status.HeartbeatLatencyMs <= 0 {
 			p.status.HeartbeatLatencyMs = rttMs
 		}
-		if info.Version != "" && p.status.Version == "" {
+		if info.Version != "" {
 			p.status.Version = info.Version
+		}
+		autoSyncEnabled := m.cfg.AutoSyncWorkers == nil || *m.cfg.AutoSyncWorkers
+		if m.cfg.Role == RoleEntry &&
+			autoSyncEnabled &&
+			m.onPeerVersionSync != nil &&
+			p.status.Version != "" &&
+			compareClusterVersions(p.status.Version, version.Version) < 0 &&
+			time.Since(p.lastUpgradeSync) > 25*time.Second {
+			p.lastUpgradeSync = time.Now()
+			syncCb = m.onPeerVersionSync
+			peerSnap = p.status
 		}
 	}
 	m.mu.Unlock()
+	if syncCb != nil {
+		go syncCb(peerSnap)
+	}
 }
 
 func (m *Manager) SetOnPeerChange(fn func(nodeName string, online bool)) {
 	m.mu.Lock()
 	m.onPeerChange = fn
 	m.mu.Unlock()
+}
+
+func (m *Manager) SetOnPeerVersionSync(fn func(peer NodeStatus)) {
+	m.mu.Lock()
+	m.onPeerVersionSync = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetOnEntryVersionAhead(fn func(entryURL, entryVersion string)) {
+	m.mu.Lock()
+	m.onEntryVersionAhead = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) AutoSyncWorkers() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cfg.AutoSyncWorkers == nil {
+		return true
+	}
+	return *m.cfg.AutoSyncWorkers
+}
+
+func (m *Manager) SetAutoSyncWorkers(enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	val := enabled
+	m.cfg.AutoSyncWorkers = &val
+	return m.saveLocked()
+}
+
+func compareClusterVersions(a, b string) int {
+	pa := parseClusterVerParts(a)
+	pb := parseClusterVerParts(b)
+	n := max(len(pa), len(pb))
+	for i := 0; i < n; i++ {
+		var va, vb int
+		if i < len(pa) {
+			va = pa[i]
+		}
+		if i < len(pb) {
+			vb = pb[i]
+		}
+		if va < vb {
+			return -1
+		}
+		if va > vb {
+			return 1
+		}
+	}
+	return 0
+}
+
+func parseClusterVerParts(raw string) []int {
+	s := strings.TrimLeft(strings.TrimSpace(raw), "vV")
+	if idx := strings.IndexAny(s, "-+"); idx >= 0 {
+		s = s[:idx]
+	}
+	if s == "" {
+		return []int{0}
+	}
+	segs := strings.Split(s, ".")
+	out := make([]int, 0, len(segs))
+	for _, seg := range segs {
+		digits := ""
+		for _, r := range strings.TrimSpace(seg) {
+			if r >= '0' && r <= '9' {
+				digits += string(r)
+			} else {
+				break
+			}
+		}
+		v, _ := strconv.Atoi(digits)
+		out = append(out, v)
+	}
+	return out
+}
+
+// PushBinaryToPeer pushes a verified binary directly over LAN to an online worker peer for zero-downtime hot upgrade.
+func (m *Manager) PushBinaryToPeer(peer NodeStatus, binPath, sha256Hex, targetVersion string) error {
+	peerURL := strings.TrimRight(strings.TrimSpace(peer.HTTPURL), "/")
+	if peerURL == "" {
+		return errors.New("目标从节点缺少有效 HTTP 地址")
+	}
+	f, err := os.Open(binPath)
+	if err != nil {
+		return fmt.Errorf("打开主节点二进制程序失败: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, peerURL+"/internal/cluster/upgrade-binary", f)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = info.Size()
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-LFH-Target-Version", targetVersion)
+	req.Header.Set("X-LFH-Binary-SHA256", sha256Hex)
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := newDirectClusterClient(90 * time.Second).Do(req)
+	if err != nil {
+		return fmt.Errorf("推送新版本到节点 %s 失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		curVer := peer.Version
+		if curVer == "" {
+			curVer = "V0.11.21.4"
+		}
+		return fmt.Errorf("节点 %s 当前运行旧版 (%s)，尚未内置远程版本热接收接口；请先在该电脑替换一次新版程序后即可开启永久自动同步", peer.NodeName, curVer)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return errors.New(errBody.Error)
+		}
+		return fmt.Errorf("节点 %s 返回状态 %d: %s", peer.NodeName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+// TriggerPeerGitHubUpgrade instructs an online worker peer (e.g. different OS/Arch) to upgrade from GitHub Release.
+func (m *Manager) TriggerPeerGitHubUpgrade(peer NodeStatus, repo, proxyURL, targetVersion string) error {
+	peerURL := strings.TrimRight(strings.TrimSpace(peer.HTTPURL), "/")
+	if peerURL == "" {
+		return errors.New("目标从节点缺少有效 HTTP 地址")
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"repo":           repo,
+		"proxy_url":      proxyURL,
+		"target_version": targetVersion,
+	})
+	req, err := http.NewRequest(http.MethodPost, peerURL+"/internal/cluster/upgrade", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := newDirectClusterClient(25 * time.Second).Do(req)
+	if err != nil {
+		return fmt.Errorf("触发节点 %s 在线升级失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		curVer := peer.Version
+		if curVer == "" {
+			curVer = "V0.11.21.4"
+		}
+		return fmt.Errorf("节点 %s 当前运行旧版 (%s)，请先在该电脑更新至 V0.11.21.7+ 后即可自动同步版本", peer.NodeName, curVer)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return errors.New(errBody.Error)
+		}
+		return fmt.Errorf("节点 %s 升级失败 (%d)", peer.NodeName, resp.StatusCode)
+	}
+	return nil
+}
+
+// PullBinaryFromEntry downloads the matching platform binary directly from the Primary node over LAN.
+func (m *Manager) PullBinaryFromEntry(entryURL string) (io.ReadCloser, string, string, error) {
+	cleanEntry := strings.TrimRight(strings.TrimSpace(entryURL), "/")
+	if cleanEntry == "" {
+		cleanEntry = strings.TrimRight(strings.TrimSpace(m.EntryURL()), "/")
+	}
+	if cleanEntry == "" {
+		return nil, "", "", errors.New("未找到主节点地址")
+	}
+	target := fmt.Sprintf("%s/internal/cluster/binary?os=%s&arch=%s", cleanEntry, runtime.GOOS, runtime.GOARCH)
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := newDirectClusterClient(90 * time.Second).Do(req)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = resp.Body.Close()
+		return nil, "", "", fmt.Errorf("从主节点拉取二进制程序失败 (HTTP %d)", resp.StatusCode)
+	}
+	return resp.Body, resp.Header.Get("X-LFH-Target-Version"), resp.Header.Get("X-LFH-Binary-SHA256"), nil
 }
 
 // SetPeerLastSeenForTest adjusts a peer's recorded heartbeat time for offline/recovery testing.
@@ -867,10 +1106,12 @@ func (m *Manager) PoolSummary() PoolSummary {
 	}
 
 	summary := PoolSummary{
-		EntryURL:      entryURL,
-		PrimaryNodeID: primaryID,
-		TotalNodes:    len(nodes),
-		Nodes:         nodes,
+		EntryURL:        entryURL,
+		EntryVersion:    version.Version,
+		AutoSyncWorkers: m.AutoSyncWorkers(),
+		PrimaryNodeID:   primaryID,
+		TotalNodes:      len(nodes),
+		Nodes:           nodes,
 	}
 	for _, n := range nodes {
 		if n.Online {
@@ -2338,14 +2579,36 @@ func (m *Manager) SendHeartbeatNow() error {
 	m.mu.Unlock()
 
 	var ack struct {
-		OK       bool   `json:"ok"`
-		EntryURL string `json:"entry_url"`
+		OK              bool   `json:"ok"`
+		EntryURL        string `json:"entry_url"`
+		EntryVersion    string `json:"entry_version"`
+		AutoSyncWorkers bool   `json:"auto_sync_workers"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&ack) == nil && ack.EntryURL != "" {
+	if json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&ack) == nil {
 		clean := strings.TrimRight(strings.TrimSpace(ack.EntryURL), "/")
+		var aheadCb func(entryURL, entryVersion string)
+		var targetEntry string
 		m.mu.Lock()
-		m.discoveredEntryURL = clean
+		if clean != "" {
+			m.discoveredEntryURL = clean
+		}
+		targetEntry = clean
+		if targetEntry == "" {
+			targetEntry = strings.TrimRight(entryURL, "/")
+		}
+		if m.cfg.Role == RoleWorker &&
+			ack.AutoSyncWorkers &&
+			ack.EntryVersion != "" &&
+			compareClusterVersions(version.Version, ack.EntryVersion) < 0 &&
+			time.Since(m.lastSelfSyncAttempt) > 25*time.Second &&
+			m.onEntryVersionAhead != nil {
+			m.lastSelfSyncAttempt = time.Now()
+			aheadCb = m.onEntryVersionAhead
+		}
 		m.mu.Unlock()
+		if aheadCb != nil {
+			go aheadCb(targetEntry, ack.EntryVersion)
+		}
 	}
 	return nil
 }

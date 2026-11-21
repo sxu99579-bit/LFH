@@ -74,6 +74,14 @@ func (s *Server) SetUpdater(u *updater.Manager) {
 	s.mu.Lock()
 	s.updater = u
 	s.mu.Unlock()
+	if s.cluster != nil {
+		s.cluster.SetOnPeerVersionSync(func(peer cluster.NodeStatus) {
+			_, _ = s.syncSinglePeerVersion(peer)
+		})
+		s.cluster.SetOnEntryVersionAhead(func(entryURL, entryVersion string) {
+			_ = s.pullAndInstallFromEntry(entryURL, entryVersion)
+		})
+	}
 }
 
 func (s *Server) getUpdater() *updater.Manager {
@@ -186,12 +194,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/promote", s.requireClusterAuth(s.handleClusterPromote))
 	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
 	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
+	mux.HandleFunc("GET /internal/cluster/binary", s.requireClusterAuth(s.handleClusterGetBinary))
+	mux.HandleFunc("POST /internal/cluster/upgrade-binary", s.requireClusterAuth(s.handleClusterUpgradeBinary))
+	mux.HandleFunc("POST /internal/cluster/upgrade", s.requireClusterAuth(s.handleClusterUpgrade))
 
 	// Public & user-facing endpoints
 	mux.HandleFunc("GET /api/info", s.handleInfo)
 	mux.HandleFunc("POST /api/cluster/adopt", s.handleClusterAdopt)
 	mux.HandleFunc("GET /worker", s.handleWorkerPage)
 	mux.HandleFunc("POST /api/cluster/leave-self", s.handleClusterLeaveSelf)
+	mux.HandleFunc("GET /api/cluster/download-binary", s.handleDownloadClusterBinary)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
@@ -206,6 +218,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/cluster/join", s.requireAdmin(s.handleAdminClusterJoin))
 	mux.HandleFunc("POST /api/admin/cluster/promote", s.requireAdmin(s.handleAdminClusterPromote))
 	mux.HandleFunc("POST /api/admin/cluster/leave", s.requireAdmin(s.handleAdminClusterLeave))
+	mux.HandleFunc("POST /api/admin/cluster/upgrade-nodes", s.requireAdmin(s.handleAdminClusterUpgradeNodes))
 	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{nodeID}", s.requireAdmin(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
@@ -252,7 +265,8 @@ func (s *Server) Handler() http.Handler {
 			r.URL.Path == "/api/info" ||
 			r.URL.Path == "/api/cluster/adopt" ||
 			r.URL.Path == "/worker" ||
-			r.URL.Path == "/api/cluster/leave-self" {
+			r.URL.Path == "/api/cluster/leave-self" ||
+			r.URL.Path == "/api/cluster/download-binary" {
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -332,8 +346,10 @@ func (s *Server) handleClusterHeartbeat(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"entry_url": s.cluster.EntryURL(),
+		"ok":                true,
+		"entry_url":         s.cluster.EntryURL(),
+		"entry_version":     version.Version,
+		"auto_sync_workers": s.cluster.AutoSyncWorkers(),
 	})
 }
 
@@ -1416,6 +1432,308 @@ func (s *Server) handleAdminClusterLeave(w http.ResponseWriter, r *http.Request,
 		"detached":       detached,
 		"cluster_secret": s.cluster.Secret(),
 		"pool":           s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+type peerUpgradeResult struct {
+	NodeID        string `json:"node_id"`
+	NodeName      string `json:"node_name"`
+	FromVersion   string `json:"from_version"`
+	TargetVersion string `json:"target_version"`
+	Method        string `json:"method"`
+	OK            bool   `json:"ok"`
+	Message       string `json:"message,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+func (s *Server) resolveLocalPlatformBinary(targetOS, targetArch string) (string, string, int64, error) {
+	if u := s.getUpdater(); u != nil {
+		return u.LocalBinaryForPlatform(targetOS, targetArch)
+	}
+	goos := strings.ToLower(strings.TrimSpace(targetOS))
+	goarch := strings.ToLower(strings.TrimSpace(targetArch))
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	if goos == runtime.GOOS && goarch == runtime.GOARCH {
+		if exePath, err := os.Executable(); err == nil && exePath != "" {
+			if f, oErr := os.Open(exePath); oErr == nil {
+				h := sha256.New()
+				n, cErr := io.Copy(h, f)
+				_ = f.Close()
+				if cErr == nil && n > 0 {
+					return exePath, hex.EncodeToString(h.Sum(nil)), n, nil
+				}
+			}
+		}
+	}
+	return "", "", 0, fmt.Errorf("未找到 %s/%s 的本地安装包", goos, goarch)
+}
+
+func (s *Server) syncSinglePeerVersion(peer cluster.NodeStatus) (peerUpgradeResult, error) {
+	targetVer := version.Version
+	res := peerUpgradeResult{
+		NodeID:        peer.NodeID,
+		NodeName:      peer.NodeName,
+		FromVersion:   peer.Version,
+		TargetVersion: targetVer,
+	}
+	if !peer.Online {
+		res.Error = "节点当前离线，无法同步版本"
+		return res, errors.New(res.Error)
+	}
+
+	if binPath, shaHex, _, err := s.resolveLocalPlatformBinary(peer.OS, peer.Arch); err == nil && binPath != "" {
+		res.Method = "lan_binary_push"
+		if pushErr := s.cluster.PushBinaryToPeer(peer, binPath, shaHex, targetVer); pushErr != nil {
+			res.Error = pushErr.Error()
+			return res, pushErr
+		}
+		res.OK = true
+		res.Message = fmt.Sprintf("已通过局域网直推主节点版本 %s 至 %s，节点正在平滑热重启", targetVer, peer.NodeName)
+		return res, nil
+	}
+
+	repo := version.DefaultRepo
+	proxyURL := ""
+	if u := s.getUpdater(); u != nil {
+		st := u.Status()
+		if st.Repo != "" {
+			repo = st.Repo
+		}
+		proxyURL = st.ProxyURL
+	}
+	res.Method = "github_release"
+	if ghErr := s.cluster.TriggerPeerGitHubUpgrade(peer, repo, proxyURL, targetVer); ghErr != nil {
+		res.Error = ghErr.Error()
+		return res, ghErr
+	}
+	res.OK = true
+	res.Message = fmt.Sprintf("已指令异构节点 %s (%s/%s) 在线同步升级至 %s", peer.NodeName, peer.OS, peer.Arch, targetVer)
+	return res, nil
+}
+
+func (s *Server) pullAndInstallFromEntry(entryURL, targetVersion string) error {
+	u := s.getUpdater()
+	if u == nil {
+		return errors.New("updater not configured")
+	}
+	rc, verHeader, shaHeader, err := s.cluster.PullBinaryFromEntry(entryURL)
+	if err == nil && rc != nil {
+		defer rc.Close()
+		ver := strings.TrimSpace(verHeader)
+		if ver == "" {
+			ver = targetVersion
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		return u.ApplyBinaryStream(ctx, rc, ver, shaHeader, false)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if _, cErr := u.CheckNow(ctx); cErr != nil {
+		return cErr
+	}
+	return u.ApplyUpdateSync(ctx)
+}
+
+func (s *Server) handleClusterGetBinary(w http.ResponseWriter, r *http.Request) {
+	targetOS := r.URL.Query().Get("os")
+	targetArch := r.URL.Query().Get("arch")
+	binPath, shaHex, _, err := s.resolveLocalPlatformBinary(targetOS, targetArch)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	f, err := os.Open(binPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-LFH-Target-Version", version.Version)
+	w.Header().Set("X-LFH-Binary-SHA256", shaHex)
+	http.ServeContent(w, r, filepath.Base(binPath), info.ModTime(), f)
+}
+
+func (s *Server) handleClusterUpgradeBinary(w http.ResponseWriter, r *http.Request) {
+	u := s.getUpdater()
+	if u == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "当前节点未启用在线升级模块"})
+		return
+	}
+	targetVer := strings.TrimSpace(r.Header.Get("X-LFH-Target-Version"))
+	if targetVer == "" {
+		targetVer = version.Version
+	}
+	expectedSHA := strings.TrimSpace(r.Header.Get("X-LFH-Binary-SHA256"))
+	if err := u.ApplyBinaryStream(r.Context(), io.LimitReader(r.Body, 256<<20), targetVer, expectedSHA, true); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"version": targetVer,
+	})
+}
+
+func (s *Server) handleClusterUpgrade(w http.ResponseWriter, r *http.Request) {
+	u := s.getUpdater()
+	if u == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "当前节点未启用在线升级模块"})
+		return
+	}
+	var req struct {
+		Repo          string `json:"repo"`
+		ProxyURL      string `json:"proxy_url"`
+		TargetVersion string `json:"target_version"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Repo != "" || req.ProxyURL != "" {
+		_, _ = u.UpdateConfig(req.Repo, req.ProxyURL, nil)
+	}
+	if _, err := u.CheckNow(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	st, err := u.StartApplyAsync()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"status": st,
+	})
+}
+
+func (s *Server) handleDownloadClusterBinary(w http.ResponseWriter, r *http.Request) {
+	targetOS := r.URL.Query().Get("os")
+	targetArch := r.URL.Query().Get("arch")
+	binPath, shaHex, _, err := s.resolveLocalPlatformBinary(targetOS, targetArch)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	f, err := os.Open(binPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	dlName := "lfh"
+	goos := strings.ToLower(strings.TrimSpace(targetOS))
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goos == "windows" {
+		dlName = "lfh.exe"
+	} else if targetArch != "" {
+		dlName = fmt.Sprintf("lfh-%s-%s", goos, strings.ToLower(strings.TrimSpace(targetArch)))
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+dlName+"\"")
+	w.Header().Set("X-LFH-Target-Version", version.Version)
+	w.Header().Set("X-LFH-Binary-SHA256", shaHex)
+	http.ServeContent(w, r, dlName, info.ModTime(), f)
+}
+
+func (s *Server) handleAdminClusterUpgradeNodes(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID          string `json:"node_id"`
+		AutoSyncWorkers *bool  `json:"auto_sync_workers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if req.AutoSyncWorkers != nil {
+		if err := s.cluster.SetAutoSyncWorkers(*req.AutoSyncWorkers); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if strings.TrimSpace(req.NodeID) == "" && req.NodeID != "all" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":                true,
+				"auto_sync_workers": s.cluster.AutoSyncWorkers(),
+				"pool":              s.cluster.PoolSummaryForRole(true),
+			})
+			return
+		}
+	}
+
+	targetID := strings.TrimSpace(req.NodeID)
+	pool := s.cluster.PoolSummaryForRole(true)
+	var targets []cluster.NodeStatus
+	for _, n := range pool.Nodes {
+		if n.IsSelf {
+			continue
+		}
+		if targetID != "" && targetID != "all" {
+			if n.NodeID == targetID {
+				targets = append(targets, n)
+			}
+			continue
+		}
+		if n.Online {
+			targets = append(targets, n)
+		}
+	}
+
+	if targetID != "" && targetID != "all" && len(targets) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "未找到指定的分节点"})
+		return
+	}
+
+	results := make([]peerUpgradeResult, 0, len(targets))
+	syncedCount := 0
+	var firstErr string
+	for _, peer := range targets {
+		res, err := s.syncSinglePeerVersion(peer)
+		results = append(results, res)
+		if err == nil && res.OK {
+			syncedCount++
+		} else if firstErr == "" && err != nil {
+			firstErr = err.Error()
+		}
+	}
+
+	if targetID != "" && targetID != "all" && syncedCount == 0 && firstErr != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   firstErr,
+			"results": results,
+			"pool":    s.cluster.PoolSummaryForRole(true),
+		})
+		return
+	}
+
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: s.cluster.NodeName(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"synced":            syncedCount,
+		"total_targets":     len(targets),
+		"entry_version":     version.Version,
+		"auto_sync_workers": s.cluster.AutoSyncWorkers(),
+		"results":           results,
+		"first_error":       firstErr,
+		"pool":              s.cluster.PoolSummaryForRole(true),
 	})
 }
 

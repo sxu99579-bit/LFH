@@ -34,6 +34,7 @@ func TestCompareVersions(t *testing.T) {
 		{"V0.11.21.4", "V0.11.21.3", 1},
 		{"V0.11.21.5", "V0.11.21.4", 1},
 		{"V0.11.21.6", "V0.11.21.5", 1},
+		{"V0.11.21.7", "V0.11.21.6", 1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersions(tc.a, tc.b); got != tc.want {
@@ -208,5 +209,50 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 	gotCur, _ = os.ReadFile(fakeExe)
 	if string(gotCur) != string(newBytes) {
 		t.Fatalf("expected fakeExe replaced with new binary, got %q", string(gotCur))
+	}
+}
+
+func TestApplyBinaryStreamAndLocalBinaryForPlatform(t *testing.T) {
+	dir := t.TempDir()
+	fakeExe := filepath.Join(dir, "lfh.exe")
+	origBytes := []byte("OLD-WORKER-BIN")
+	if err := os.WriteFile(fakeExe, origBytes, 0755); err != nil {
+		t.Fatalf("write fakeExe: %v", err)
+	}
+	mgr, err := NewManager(dir, "tester/LFH")
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mgr.exePathFn = func() (string, error) { return fakeExe, nil }
+	mgr.verifyFn = func(ctx context.Context, binPath string) error { return nil }
+
+	p, shaHex, sz, err := mgr.LocalBinaryForPlatform(runtime.GOOS, runtime.GOARCH)
+	if err != nil || p != fakeExe || sz != int64(len(origBytes)) || shaHex == "" {
+		t.Fatalf("LocalBinaryForPlatform mismatch: p=%q sha=%q sz=%d err=%v", p, shaHex, sz, err)
+	}
+
+	pushed := []byte("PRIMARY-PUSHED-BINARY-V0.11.21.7")
+	sum := sha256.Sum256(pushed)
+	pushedSHA := hex.EncodeToString(sum[:])
+
+	// Wrong SHA must fail and preserve original file.
+	if err := mgr.ApplyBinaryStream(context.Background(), strings.NewReader(string(pushed)), "V0.11.21.7", "deadbeef", false); err == nil {
+		t.Fatalf("expected error on wrong SHA")
+	}
+
+	var handedVer string
+	mgr.handoffFn = func(exePath, backupPath, targetVersion string) error {
+		handedVer = targetVersion
+		return nil
+	}
+	if err := mgr.ApplyBinaryStream(context.Background(), strings.NewReader(string(pushed)), "V0.11.21.7", pushedSHA, false); err != nil {
+		t.Fatalf("ApplyBinaryStream failed: %v", err)
+	}
+	if handedVer != "V0.11.21.7" {
+		t.Fatalf("expected handoff version V0.11.21.7, got %q", handedVer)
+	}
+	got, _ := os.ReadFile(fakeExe)
+	if string(got) != string(pushed) {
+		t.Fatalf("expected fakeExe updated to pushed payload, got %q", string(got))
 	}
 }

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.6</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.7</code>
 </p>
 
 ---
@@ -65,7 +65,7 @@ docker compose logs lfh
 也可以直接使用 `docker build` / `docker run` 手动运行：
 
 ```bash
-docker build -t lfh:V0.11.21.6 .
+docker build -t lfh:V0.11.21.7 .
 
 docker run -d \
   --name lfh \
@@ -73,7 +73,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/lfh-data:/data \
-  lfh:V0.11.21.6 -data /data -port 8080 -expose-ip 192.168.1.100
+  lfh:V0.11.21.7 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---

@@ -563,6 +563,176 @@ func (m *Manager) ApplyUpdateSync(ctx context.Context) error {
 	return m.applyUpdateLocked(ctx)
 }
 
+// LocalBinaryForPlatform locates a local binary matching targetOS/targetArch (self executable or dist/ build) and returns its path, SHA-256, and size.
+func (m *Manager) LocalBinaryForPlatform(targetOS, targetArch string) (string, string, int64, error) {
+	goos := strings.ToLower(strings.TrimSpace(targetOS))
+	goarch := strings.ToLower(strings.TrimSpace(targetArch))
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+
+	m.mu.RLock()
+	exeFn := m.exePathFn
+	m.mu.RUnlock()
+
+	var candidates []string
+	if goos == runtime.GOOS && goarch == runtime.GOARCH && exeFn != nil {
+		if exePath, err := exeFn(); err == nil && exePath != "" {
+			if resolved, rErr := filepath.EvalSymlinks(exePath); rErr == nil && resolved != "" {
+				exePath = resolved
+			}
+			candidates = append(candidates, exePath)
+		}
+	}
+
+	assetName := fmt.Sprintf("lfh-%s-%s", goos, goarch)
+	if goos == "windows" {
+		assetName += ".exe"
+	}
+	candidates = append(candidates, filepath.Join("dist", assetName))
+	if exeFn != nil {
+		if exePath, err := exeFn(); err == nil && exePath != "" {
+			candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "dist", assetName))
+		}
+	}
+	if goos == "windows" && goarch == "amd64" {
+		candidates = append(candidates, "lfh.exe")
+	}
+
+	for _, p := range candidates {
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() || info.Size() <= 0 {
+			continue
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		h := sha256.New()
+		n, copyErr := io.Copy(h, f)
+		_ = f.Close()
+		if copyErr != nil || n <= 0 {
+			continue
+		}
+		return p, hex.EncodeToString(h.Sum(nil)), n, nil
+	}
+	return "", "", 0, fmt.Errorf("未找到适用于 %s/%s 的本地二进制安装包", goos, goarch)
+}
+
+// ApplyBinaryStream verifies, installs, and triggers hot-handoff from a binary stream pushed or pulled from the cluster primary node.
+func (m *Manager) ApplyBinaryStream(ctx context.Context, r io.Reader, targetVersion, expectedSHA256 string, asyncHandoff bool) error {
+	if !m.opMu.TryLock() {
+		return errors.New("节点正在执行升级操作，请稍候")
+	}
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			m.opMu.Unlock()
+		}
+	}()
+
+	m.mu.RLock()
+	exeFn := m.exePathFn
+	verifyFn := m.verifyFn
+	handoffFn := m.handoffFn
+	m.mu.RUnlock()
+
+	exePath, err := exeFn()
+	if err != nil {
+		return m.failApply(fmt.Errorf("获取当前程序路径失败: %w", err))
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil && resolved != "" {
+		exePath = resolved
+	}
+
+	tmpDir, err := os.MkdirTemp("", "lfh-cluster-sync-*")
+	if err != nil {
+		return m.failApply(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpBin := filepath.Join(tmpDir, "lfh-sync.bin")
+	out, err := os.OpenFile(tmpBin, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return m.failApply(err)
+	}
+	m.setProgress("downloading", 25, "正在接收主节点同步版本 "+targetVersion+"...")
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(out, hasher), r)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return m.failApply(fmt.Errorf("接收同步程序失败: %w", copyErr))
+	}
+	if closeErr != nil {
+		return m.failApply(closeErr)
+	}
+	if written <= 0 {
+		return m.failApply(errors.New("接收到的升级程序内容为空"))
+	}
+
+	actualSHA := hex.EncodeToString(hasher.Sum(nil))
+	cleanExpected := strings.ToLower(strings.TrimSpace(expectedSHA256))
+	if cleanExpected != "" && !strings.EqualFold(actualSHA, cleanExpected) {
+		return m.failApply(fmt.Errorf("同步程序 SHA-256 校验不一致 (期望 %s，实际 %s)", cleanExpected, actualSHA))
+	}
+
+	newPath := exePath + ".new"
+	backupPath := exePath + ".old"
+	_ = os.Remove(newPath)
+	if err := copyFile(tmpBin, newPath, 0755); err != nil {
+		return m.failApply(fmt.Errorf("写入新版本文件失败: %w", err))
+	}
+
+	m.setProgress("verifying", 90, "正在校验同步版本可启动性...")
+	if verifyFn != nil {
+		if err := verifyFn(ctx, newPath); err != nil {
+			_ = os.Remove(newPath)
+			return m.failApply(fmt.Errorf("新版本自检失败: %w", err))
+		}
+	}
+
+	m.setProgress("swapping", 96, "正在原子替换可执行程序...")
+	_ = os.Remove(backupPath)
+	if err := os.Rename(exePath, backupPath); err != nil {
+		_ = os.Remove(newPath)
+		return m.failApply(fmt.Errorf("备份原程序失败: %w", err))
+	}
+	if err := os.Rename(newPath, exePath); err != nil {
+		_ = os.Rename(backupPath, exePath)
+		_ = os.Remove(newPath)
+		return m.failApply(fmt.Errorf("替换新版本程序失败: %w", err))
+	}
+
+	m.setProgress("restarting", 99, "正在平滑切换至主节点版本 "+targetVersion+"...")
+	if handoffFn != nil {
+		if asyncHandoff {
+			unlocked = true
+			go func() {
+				defer m.opMu.Unlock()
+				time.Sleep(150 * time.Millisecond)
+				if err := handoffFn(exePath, backupPath, targetVersion); err != nil {
+					_ = os.Remove(exePath)
+					_ = os.Rename(backupPath, exePath)
+					_ = m.failApply(fmt.Errorf("热切换新版本失败，已回滚: %w", err))
+					return
+				}
+				m.setProgress("done", 100, "已同步至版本 "+targetVersion)
+			}()
+			return nil
+		}
+		if err := handoffFn(exePath, backupPath, targetVersion); err != nil {
+			_ = os.Remove(exePath)
+			_ = os.Rename(backupPath, exePath)
+			return m.failApply(fmt.Errorf("热切换新版本失败，已回滚: %w", err))
+		}
+	}
+	m.setProgress("done", 100, "已同步至版本 "+targetVersion)
+	return nil
+}
+
 func (m *Manager) applyUpdateLocked(ctx context.Context) error {
 	m.mu.RLock()
 	st := m.status
