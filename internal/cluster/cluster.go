@@ -60,9 +60,11 @@ type Config struct {
 	QuotaGB       float64 `json:"quota_gb"`
 	ExposeIP      string  `json:"expose_ip,omitempty"`
 	Port          string  `json:"port,omitempty"`
-	EntryHint     string  `json:"entry_hint,omitempty"`
-	StorageDir    string  `json:"storage_dir,omitempty"`
-	DiscoveryPort int     `json:"discovery_port"`
+	EntryHint     string            `json:"entry_hint,omitempty"`
+	StorageDir    string            `json:"storage_dir,omitempty"`
+	PrimaryNodeID string            `json:"primary_node_id,omitempty"`
+	EvictedPeers  map[string]string `json:"evicted_peers,omitempty"`
+	DiscoveryPort int               `json:"discovery_port"`
 }
 
 type Options struct {
@@ -106,6 +108,7 @@ type NodeStatus struct {
 
 type PoolSummary struct {
 	EntryURL        string       `json:"entry_url"`
+	PrimaryNodeID   string       `json:"primary_node_id,omitempty"`
 	TotalNodes      int          `json:"total_nodes"`
 	OnlineNodes     int          `json:"online_nodes"`
 	TotalQuotaBytes int64        `json:"total_quota_bytes"`
@@ -542,6 +545,29 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	}
 
 	m.mu.Lock()
+	if len(m.cfg.EvictedPeers) > 0 {
+		if _, evicted := m.cfg.EvictedPeers[n.NodeID]; evicted {
+			if n.HTTPURL != "" {
+				m.discovered[n.NodeID] = DiscoveredNode{
+					NodeID:        n.NodeID,
+					NodeName:      n.NodeName,
+					Role:          n.Role,
+					OS:            n.OS,
+					Arch:          n.Arch,
+					URL:           n.HTTPURL,
+					QuotaBytes:    n.QuotaBytes,
+					UsedBytes:     n.UsedBytes,
+					FileCount:     n.FileCount,
+					Online:        true,
+					AlreadyInPool: false,
+					Source:        "udp",
+					LastSeen:      now,
+				}
+			}
+			m.mu.Unlock()
+			return false
+		}
+	}
 	prev, exists := m.peers[n.NodeID]
 	changed := !exists ||
 		!prev.wasOnline ||
@@ -592,12 +618,23 @@ func (m *Manager) PoolSummary() PoolSummary {
 	now := time.Now()
 
 	m.mu.RLock()
+	role := m.cfg.Role
 	entryURL := m.selfURL
-	if m.cfg.Role == RoleWorker {
+	if role == RoleWorker {
 		if m.discoveredEntryURL != "" {
 			entryURL = m.discoveredEntryURL
 		} else {
 			entryURL = m.cfg.EntryHint
+		}
+	}
+	primaryID := strings.TrimSpace(m.cfg.PrimaryNodeID)
+	if role == RoleEntry {
+		if primaryID != "" && primaryID != self.NodeID {
+			if _, ok := m.peers[primaryID]; !ok {
+				primaryID = self.NodeID
+			}
+		} else {
+			primaryID = self.NodeID
 		}
 	}
 	peers := make([]NodeStatus, 0, len(m.peers))
@@ -605,11 +642,29 @@ func (m *Manager) PoolSummary() PoolSummary {
 		st := p.status
 		st.IsSelf = false
 		st.Online = now.Sub(st.LastSeen) <= PeerTimeout
+		if role == RoleEntry {
+			if st.NodeID == primaryID {
+				st.Role = RoleEntry
+			} else {
+				st.Role = RoleWorker
+			}
+		}
 		peers = append(peers, st)
 	}
 	m.mu.RUnlock()
 
+	if role == RoleEntry {
+		if primaryID == self.NodeID {
+			self.Role = RoleEntry
+		} else {
+			self.Role = RoleWorker
+		}
+	}
+
 	sort.Slice(peers, func(i, j int) bool {
+		if (peers[i].NodeID == primaryID) != (peers[j].NodeID == primaryID) {
+			return peers[i].NodeID == primaryID
+		}
 		if peers[i].Online != peers[j].Online {
 			return peers[i].Online
 		}
@@ -620,13 +675,20 @@ func (m *Manager) PoolSummary() PoolSummary {
 	})
 
 	nodes := make([]NodeStatus, 0, 1+len(peers))
-	nodes = append(nodes, self)
-	nodes = append(nodes, peers...)
+	if role == RoleEntry && primaryID != self.NodeID && len(peers) > 0 && peers[0].NodeID == primaryID {
+		nodes = append(nodes, peers[0])
+		nodes = append(nodes, self)
+		nodes = append(nodes, peers[1:]...)
+	} else {
+		nodes = append(nodes, self)
+		nodes = append(nodes, peers...)
+	}
 
 	summary := PoolSummary{
-		EntryURL:   entryURL,
-		TotalNodes: len(nodes),
-		Nodes:      nodes,
+		EntryURL:      entryURL,
+		PrimaryNodeID: primaryID,
+		TotalNodes:    len(nodes),
+		Nodes:         nodes,
 	}
 	for _, n := range nodes {
 		if n.Online {
@@ -786,6 +848,10 @@ func (m *Manager) SelectUploadTarget(preferredNodeID string, fileSize int64) (No
 		}
 		if n.FreeBytes != best.FreeBytes {
 			if n.FreeBytes > best.FreeBytes {
+				best = n
+			}
+		} else if (n.Role == RoleEntry) != (best.Role == RoleEntry) {
+			if n.Role == RoleEntry {
 				best = n
 			}
 		} else if n.IsSelf && !best.IsSelf {
@@ -1382,12 +1448,34 @@ func (m *Manager) AdoptPeer(peerURL, targetAdminUser, targetAdminPass, targetAut
 		return NodeStatus{}, errors.New("不能纳管当前本机主节点")
 	}
 
+	// Clear any prior eviction block for this peer URL before triggering its test heartbeat.
+	m.mu.Lock()
+	if len(m.cfg.EvictedPeers) > 0 {
+		for id, u := range m.cfg.EvictedPeers {
+			if strings.EqualFold(strings.TrimRight(u, "/"), cleanPeer) {
+				delete(m.cfg.EvictedPeers, id)
+			}
+		}
+		for id, dn := range m.discovered {
+			if strings.EqualFold(strings.TrimRight(dn.URL, "/"), cleanPeer) {
+				delete(m.cfg.EvictedPeers, id)
+			}
+		}
+		_ = m.saveLocked()
+	}
+	m.mu.Unlock()
+
+	authSecret := strings.TrimSpace(targetAuthSecret)
+	if strings.TrimSpace(targetAdminUser) == "" && authSecret == "" {
+		authSecret = m.Secret()
+	}
+
 	reqBody := map[string]any{
 		"entry_url":          entryURL,
 		"cluster_secret":     m.Secret(),
 		"target_admin_user":  strings.TrimSpace(targetAdminUser),
 		"target_admin_pass":  targetAdminPass,
-		"target_auth_secret": strings.TrimSpace(targetAuthSecret),
+		"target_auth_secret": authSecret,
 		"quota_text":         strings.TrimSpace(quotaText),
 	}
 	raw, _ := json.Marshal(reqBody)
@@ -1424,6 +1512,10 @@ func (m *Manager) AdoptPeer(peerURL, targetAdminUser, targetAdminPass, targetAut
 	}
 
 	m.mu.Lock()
+	if len(m.cfg.EvictedPeers) > 0 {
+		delete(m.cfg.EvictedPeers, out.Node.NodeID)
+		_ = m.saveLocked()
+	}
 	if dn, ok := m.discovered[out.Node.NodeID]; ok {
 		dn.AlreadyInPool = true
 		dn.Role = RoleWorker
@@ -1450,6 +1542,10 @@ func (m *Manager) RemovePeer(nodeID string) error {
 		return errors.New("节点当前在线，请先停止该节点服务后再移除")
 	}
 	delete(m.peers, cleanID)
+	if m.cfg.PrimaryNodeID == cleanID {
+		m.cfg.PrimaryNodeID = ""
+		_ = m.saveLocked()
+	}
 	if dn, exists := m.discovered[cleanID]; exists {
 		dn.AlreadyInPool = false
 		m.discovered[cleanID] = dn
@@ -1469,9 +1565,11 @@ func (m *Manager) PromoteSelfToEntry(clusterSecret string) (NodeStatus, error) {
 	oldRole := m.cfg.Role
 	oldHint := m.cfg.EntryHint
 	oldDiscEntry := m.discoveredEntryURL
+	oldPrimary := m.cfg.PrimaryNodeID
 
 	m.cfg.Role = RoleEntry
 	m.cfg.EntryHint = ""
+	m.cfg.PrimaryNodeID = ""
 	m.discoveredEntryURL = ""
 	if m.peers == nil {
 		m.peers = make(map[string]*peerRecord)
@@ -1479,6 +1577,7 @@ func (m *Manager) PromoteSelfToEntry(clusterSecret string) (NodeStatus, error) {
 	if err := m.saveLocked(); err != nil {
 		m.cfg.Role = oldRole
 		m.cfg.EntryHint = oldHint
+		m.cfg.PrimaryNodeID = oldPrimary
 		m.discoveredEntryURL = oldDiscEntry
 		m.mu.Unlock()
 		return NodeStatus{}, err
@@ -1502,11 +1601,13 @@ func (m *Manager) RepointEntry(newEntryURL string) error {
 	}
 	oldRole := m.cfg.Role
 	oldHint := m.cfg.EntryHint
+	oldPrimary := m.cfg.PrimaryNodeID
 	oldDiscEntry := m.discoveredEntryURL
 	oldPeers := m.peers
 
 	m.cfg.Role = RoleWorker
 	m.cfg.EntryHint = cleanURL
+	m.cfg.PrimaryNodeID = ""
 	m.discoveredEntryURL = cleanURL
 	m.peers = make(map[string]*peerRecord)
 	for id, dn := range m.discovered {
@@ -1516,6 +1617,7 @@ func (m *Manager) RepointEntry(newEntryURL string) error {
 	if err := m.saveLocked(); err != nil {
 		m.cfg.Role = oldRole
 		m.cfg.EntryHint = oldHint
+		m.cfg.PrimaryNodeID = oldPrimary
 		m.discoveredEntryURL = oldDiscEntry
 		m.peers = oldPeers
 		m.mu.Unlock()
@@ -1540,12 +1642,16 @@ func (m *Manager) LeaveCluster() (NodeStatus, error) {
 	m.mu.Lock()
 	oldRole := m.cfg.Role
 	oldHint := m.cfg.EntryHint
+	oldPrimary := m.cfg.PrimaryNodeID
+	oldEvicted := m.cfg.EvictedPeers
 	oldDiscEntry := m.discoveredEntryURL
 	oldSecret := m.cfg.ClusterSecret
 	oldPeers := m.peers
 
 	m.cfg.Role = RoleEntry
 	m.cfg.EntryHint = ""
+	m.cfg.PrimaryNodeID = ""
+	m.cfg.EvictedPeers = nil
 	m.discoveredEntryURL = ""
 	m.cfg.ClusterSecret = newSecret
 	m.peers = make(map[string]*peerRecord)
@@ -1556,6 +1662,8 @@ func (m *Manager) LeaveCluster() (NodeStatus, error) {
 	if err := m.saveLocked(); err != nil {
 		m.cfg.Role = oldRole
 		m.cfg.EntryHint = oldHint
+		m.cfg.PrimaryNodeID = oldPrimary
+		m.cfg.EvictedPeers = oldEvicted
 		m.discoveredEntryURL = oldDiscEntry
 		m.cfg.ClusterSecret = oldSecret
 		m.peers = oldPeers
@@ -1620,16 +1728,46 @@ func (m *Manager) EvictPeer(nodeID string) (bool, string, error) {
 	notified := false
 	if isOnline {
 		if err := m.SendLeaveToPeer(peer); err != nil {
-			return false, peerName, fmt.Errorf("通知在线节点 %s 退出集群失败: %w", peerName, err)
+			// Legacy <= V0.11.21.4 peers return HTTP 404 for /internal/cluster/leave; evict locally and block heartbeats.
+			if !strings.Contains(err.Error(), "HTTP 404") && !strings.Contains(err.Error(), "HTTP 405") {
+				return false, peerName, fmt.Errorf("通知在线节点 %s 退出集群失败: %w", peerName, err)
+			}
+		} else {
+			notified = true
 		}
-		notified = true
 	}
 
 	m.mu.Lock()
 	delete(m.peers, cleanID)
+	if m.cfg.PrimaryNodeID == cleanID {
+		m.cfg.PrimaryNodeID = ""
+	}
+	if !notified && isOnline {
+		if m.cfg.EvictedPeers == nil {
+			m.cfg.EvictedPeers = make(map[string]string)
+		}
+		m.cfg.EvictedPeers[cleanID] = strings.TrimRight(peer.HTTPURL, "/")
+	}
+	_ = m.saveLocked()
 	if dn, exists := m.discovered[cleanID]; exists {
 		dn.AlreadyInPool = false
 		m.discovered[cleanID] = dn
+	} else if strings.TrimSpace(peer.HTTPURL) != "" {
+		m.discovered[cleanID] = DiscoveredNode{
+			NodeID:        peer.NodeID,
+			NodeName:      peer.NodeName,
+			Role:          peer.Role,
+			OS:            peer.OS,
+			Arch:          peer.Arch,
+			URL:           strings.TrimRight(peer.HTTPURL, "/"),
+			QuotaBytes:    peer.QuotaBytes,
+			UsedBytes:     peer.UsedBytes,
+			FileCount:     peer.FileCount,
+			Online:        isOnline,
+			AlreadyInPool: false,
+			Source:        "udp",
+			LastSeen:      now,
+		}
 	}
 	cb := m.onPeerChange
 	m.mu.Unlock()
@@ -1668,14 +1806,31 @@ func (m *Manager) DissolveCluster() (int, error) {
 	return detached, nil
 }
 
-// PromotePeer transfers cluster entry authority and auth state to an online worker node, repoints other workers, and demotes self.
+// PromotePeer transfers cluster entry authority and auth state to an online worker node (or designates primary node for legacy workers).
 func (m *Manager) PromotePeer(targetNodeID string, authSnapshot []byte) (string, NodeStatus, error) {
 	if m.Role() != RoleEntry {
 		return "", NodeStatus{}, errors.New("当前节点不是主入口节点")
 	}
 	cleanTarget := strings.TrimSpace(targetNodeID)
-	if cleanTarget == "" || cleanTarget == m.NodeID() {
-		return "", NodeStatus{}, errors.New("请选择其他在线从节点作为新主节点")
+	if cleanTarget == "" {
+		return "", NodeStatus{}, errors.New("请选择要设为主节点的在线节点")
+	}
+	if cleanTarget == m.NodeID() {
+		m.mu.Lock()
+		m.cfg.PrimaryNodeID = m.cfg.NodeID
+		err := m.saveLocked()
+		cb := m.onPeerChange
+		selfName := m.cfg.NodeName
+		m.mu.Unlock()
+		if err != nil {
+			return "", NodeStatus{}, err
+		}
+		if cb != nil {
+			cb(selfName, true)
+		}
+		self := m.SelfStatus()
+		self.Role = RoleEntry
+		return m.EntryURL(), self, nil
 	}
 	if len(authSnapshot) == 0 {
 		return "", NodeStatus{}, errors.New("账号权限快照为空，无法迁移主节点")
@@ -1734,6 +1889,24 @@ func (m *Manager) PromotePeer(targetNodeID string, authSnapshot []byte) (string,
 	}
 	defer promoteResp.Body.Close()
 	rawPromoteResp, _ := io.ReadAll(io.LimitReader(promoteResp.Body, 1<<20))
+	if promoteResp.StatusCode == http.StatusNotFound || promoteResp.StatusCode == http.StatusMethodNotAllowed {
+		// Compatible fallback for older (<= V0.11.21.4) worker nodes: designate target as cluster Primary Node in-place.
+		m.mu.Lock()
+		m.cfg.PrimaryNodeID = cleanTarget
+		saveErr := m.saveLocked()
+		cb := m.onPeerChange
+		m.mu.Unlock()
+		if saveErr != nil {
+			return "", NodeStatus{}, saveErr
+		}
+		if cb != nil {
+			cb(targetPeer.NodeName, true)
+		}
+		promoted := targetPeer
+		promoted.Role = RoleEntry
+		promoted.Online = true
+		return m.EntryURL(), promoted, nil
+	}
 	if promoteResp.StatusCode >= 300 {
 		return "", NodeStatus{}, fmt.Errorf("目标节点升主失败 (HTTP %d): %s", promoteResp.StatusCode, strings.TrimSpace(string(rawPromoteResp)))
 	}

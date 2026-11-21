@@ -907,11 +907,11 @@ function startLiveSync() {
 
     if (ev.kind === "entry_switched") {
       const nextURL = String(ev.entry_url || "").trim();
-      showToast(`主节点已切换至 ${ev.node_name || nextURL || "新主入口"}，正在跳转...`, "info");
       if (nextURL && !nextURL.startsWith(location.origin)) {
+        showToast(`主节点已切换至 ${ev.node_name || nextURL || "新主入口"}，正在跳转...`, "info");
         setTimeout(() => { location.href = nextURL; }, 1200);
       } else {
-        setTimeout(() => { location.reload(); }, 800);
+        scheduleAutoRefresh();
       }
       return;
     }
@@ -2954,8 +2954,8 @@ function renderAdminCluster() {
     const fileInfo = n.online
       ? `${Number(n.file_count || 0)} 个文件 · ${formatSize(n.used_bytes)}`
       : `<span style="color:var(--muted)">文件已隐藏</span>`;
-    const promoteBtn = !n.is_self && n.online
-      ? `<button class="btn btn-ghost btn-xs" type="button" data-promote-node="${nid}" data-node-name="${nnameAttr}" title="将该在线节点切换为集群主入口节点">设为主节点</button>`
+    const promoteBtn = n.online && n.role !== "entry"
+      ? `<button class="btn btn-ghost btn-xs" type="button" data-promote-node="${nid}" data-node-name="${nnameAttr}" title="将该在线节点设为集群主节点">设为主节点</button>`
       : "";
     const removeBtn = !n.is_self
       ? (n.online
@@ -3960,22 +3960,25 @@ function bindEvents() {
     if (promoteBtn) {
       const nodeID = promoteBtn.dataset.promoteNode;
       const nodeName = promoteBtn.dataset.nodeName || nodeID;
-      if (!confirm(`确定将「${nodeName}」设为新的集群主节点吗？\n\n操作后：\n1. 所有账号、密码与权限规则将迁移到新主节点\n2. 本机将切换为从节点并保留所有本地文件\n3. 界面将自动跳转到新主节点入口`)) return;
+      if (!confirm(`确定将「${nodeName}」设为集群主节点吗？\n\n操作后各节点上的本地文件均会完整保留。`)) return;
       promoteBtn.disabled = true;
       try {
         const data = await api("/api/admin/cluster/promote", {
           method: "POST",
           body: JSON.stringify({ target_node_id: nodeID })
         });
-        showToast(`主节点已切换至「${nodeName}」，正在跳转...`, "success");
+        state.pool = data.pool || state.pool;
+        renderAdminCluster();
+        renderPoolStatus();
+        renderNodeSummary();
+        renderUploadTargetSelect();
         const nextURL = String(data.new_entry_url || "").trim();
-        setTimeout(() => {
-          if (nextURL && !nextURL.startsWith(location.origin)) {
-            location.href = nextURL;
-          } else {
-            location.reload();
-          }
-        }, 700);
+        if (nextURL && !nextURL.startsWith(location.origin)) {
+          showToast(`主节点已切换至「${nodeName}」，正在跳转...`, "success");
+          setTimeout(() => { location.href = nextURL; }, 700);
+        } else {
+          showToast(`已将「${nodeName}」设为主节点`, "success");
+        }
       } catch (err) {
         promoteBtn.disabled = false;
         showToast(err.message, "error");

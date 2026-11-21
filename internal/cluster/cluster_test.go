@@ -530,3 +530,79 @@ func TestEvictPeerOnlineAndOffline(t *testing.T) {
 		t.Fatalf("expected error evicting self node")
 	}
 }
+
+func TestLegacyPeerPromoteAndEvictFallbackOn404(t *testing.T) {
+	secret := "legacy-compat-secret"
+	// Legacy V0.11.21.4 peer returns 404 on /internal/cluster/promote and /internal/cluster/leave.
+	legacySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer legacySrv.Close()
+
+	entryDir := t.TempDir()
+	entryStore, err := storage.NewStore(entryDir)
+	if err != nil {
+		t.Fatalf("entry NewStore: %v", err)
+	}
+	entryMgr, err := NewManager(entryDir, entryStore, Options{
+		Role:             RoleEntry,
+		NodeName:         "Entry-Laptop",
+		ClusterSecret:    secret,
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:18080",
+	})
+	if err != nil {
+		t.Fatalf("entry NewManager: %v", err)
+	}
+
+	hb := HeartbeatPayload{
+		Node: NodeStatus{
+			NodeID:     "legacy-peer",
+			NodeName:   "DESKTOP-LEGACY",
+			Role:       RoleWorker,
+			HTTPURL:    legacySrv.URL,
+			QuotaBytes: 50 * GB,
+		},
+	}
+	entryMgr.HandleHeartbeat(hb)
+
+	// 1. PromotePeer against legacy 404 peer designates it as PrimaryNodeID in-place without error.
+	entryURL, promoted, err := entryMgr.PromotePeer("legacy-peer", []byte(`{"users":{}}`))
+	if err != nil {
+		t.Fatalf("expected PromotePeer fallback on 404 to succeed, got: %v", err)
+	}
+	if entryURL != "http://127.0.0.1:18080" || promoted.Role != RoleEntry {
+		t.Fatalf("unexpected PromotePeer fallback result: url=%q node=%+v", entryURL, promoted)
+	}
+	pool := entryMgr.PoolSummary()
+	if pool.PrimaryNodeID != "legacy-peer" || len(pool.Nodes) != 2 || pool.Nodes[0].NodeID != "legacy-peer" || pool.Nodes[0].Role != RoleEntry || pool.Nodes[1].Role != RoleWorker {
+		t.Fatalf("expected legacy-peer listed first as entry and self as worker: %+v", pool)
+	}
+
+	// 2. PromotePeer targeting self switches PrimaryNodeID back to self.
+	_, selfPromoted, err := entryMgr.PromotePeer(entryMgr.NodeID(), nil)
+	if err != nil || selfPromoted.Role != RoleEntry {
+		t.Fatalf("PromotePeer(self) failed: node=%+v err=%v", selfPromoted, err)
+	}
+	poolBack := entryMgr.PoolSummary()
+	if poolBack.PrimaryNodeID != entryMgr.NodeID() || poolBack.Nodes[0].NodeID != entryMgr.NodeID() || poolBack.Nodes[0].Role != RoleEntry || poolBack.Nodes[1].Role != RoleWorker {
+		t.Fatalf("expected self restored as entry: %+v", poolBack)
+	}
+
+	// 3. EvictPeer against legacy 404 peer succeeds and blocks subsequent heartbeats while keeping it in discovered list.
+	notified, peerName, err := entryMgr.EvictPeer("legacy-peer")
+	if err != nil || notified || peerName != "DESKTOP-LEGACY" {
+		t.Fatalf("expected EvictPeer fallback on 404 to succeed: notified=%v name=%q err=%v", notified, peerName, err)
+	}
+	if got := len(entryMgr.PoolSummary().Nodes); got != 1 {
+		t.Fatalf("expected 1 node after evicting legacy peer, got %d", got)
+	}
+	if entryMgr.HandleHeartbeat(hb) || len(entryMgr.PoolSummary().Nodes) != 1 {
+		t.Fatalf("expected background heartbeat from evicted legacy peer to be ignored")
+	}
+	disc := entryMgr.PassiveDiscoveredNodes()
+	if len(disc) != 1 || disc[0].NodeID != "legacy-peer" || disc[0].AlreadyInPool {
+		t.Fatalf("expected evicted legacy peer visible in discovered list as not in pool: %+v", disc)
+	}
+}
