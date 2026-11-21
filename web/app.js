@@ -18,8 +18,14 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21",
+  appVersion: "V0.11.21.2",
   updateStatus: null,
+  selectableUsers: [],
+  uploadAllowedUsers: [],
+  accessModalMode: "upload",
+  accessModalFileId: null,
+  accessModalIsCustom: false,
+  accessDraftSet: new Set(),
   viewMode: "list",
   chartMetric: "count",
   autoRefresh: true,
@@ -604,7 +610,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21";
+  const ver = state.appVersion || "V0.11.21.2";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -858,6 +864,30 @@ function startLiveSync() {
       return;
     }
 
+    if (ev.kind === "role_change") {
+      if (state.user && ev.uploader === state.user.username) {
+        api("/api/me")
+          .then((d) => {
+            if (d.user) {
+              onLoggedIn(d.user, d.pending_users || 0);
+              if (d.update_status) applyUpdateStatus(d.update_status);
+              showToast(
+                d.user.role === "admin" ? "您已被授予管理员权限" : "您的管理员权限已被收回",
+                "info"
+              );
+            }
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    if (ev.kind === "access") {
+      loadFiles();
+      loadSummary();
+      return;
+    }
+
     scheduleAutoRefresh();
     if (!state.isUploadingSelf) {
       const who = ev.uploader || "其他设备";
@@ -953,6 +983,10 @@ function onLoggedIn(user, pendingCount = 0) {
     switchSettingsTab("general");
   }
   updatePendingBadges(pendingCount);
+
+  state.uploadAllowedUsers = [];
+  updateUploadAccessButton();
+  loadSelectableUsers();
 
   renderAccessAddresses();
   applyViewMode(state.viewMode);
@@ -1312,6 +1346,9 @@ function buildRecordMeta(rec) {
     ? `<a class="btn btn-ghost btn-xs" href="/api/files/${rec.id}/download">下载</a>`
     : `<button class="btn btn-ghost btn-xs" type="button" disabled title="节点离线">离线</button>`;
   const canDel = state.user && (state.user.role === "admin" || state.user.username === rec.uploader);
+  const accessBtn = canDel
+    ? `<button class="btn btn-ghost btn-xs" type="button" data-action="access" data-id="${rec.id}" title="指定哪些用户可见与下载">${Array.isArray(rec.allowed_users) && rec.allowed_users.length > 0 ? "权限*" : "权限"}</button>`
+    : "";
   const delBtn = canDel
     ? `<button class="btn btn-danger btn-xs" data-action="delete" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"}>删除</button>`
     : "";
@@ -1320,13 +1357,22 @@ function buildRecordMeta(rec) {
     ? `<button type="button" class="folder-chip" data-filter-folder="${escapeHtml(rec.folder_path)}" title="点击按此文件夹搜索">${WIN_FOLDER_ICON_SVG}<span>${escapeHtml(rec.folder_path)}</span></button>`
     : "";
 
+  const restrictedCount = Array.isArray(rec.allowed_users) ? rec.allowed_users.length : 0;
+  const accessBadgeHtml = restrictedCount > 0
+    ? `<span class="access-badge" title="仅指定用户可下载：${escapeHtml(rec.allowed_users.join(", "))}">🔒 指定 ${restrictedCount} 人可下载</span>`
+    : "";
+
+  const adminPathHtml = state.user && state.user.role === "admin" && rec.storage_dir
+    ? `<div class="admin-path-sub" title="文件当前存储位置：${escapeHtml(rec.storage_dir)}">目录：${escapeHtml(rec.storage_dir)}</div>`
+    : "";
+
   const nodeCellHtml = rec.node_id
     ? `<button type="button" class="node-pill ${online ? "" : "offline"}" data-filter-node="${escapeHtml(rec.node_id)}" title="点击按此存储节点筛选">
         <span class="node-dot ${online ? "online" : "offline"}"></span>
         <span>${escapeHtml(rec.node_name || rec.node_id)}</span>
         <span class="node-os-tag">${escapeHtml(rec.node_os || "")}</span>
-      </button>`
-    : `<span style="color:var(--muted)">本机</span>`;
+      </button>${adminPathHtml}`
+    : `<span style="color:var(--muted)">本机</span>${adminPathHtml}`;
 
   const devCellHtml = rec.device_fp
     ? `<div class="dev-cell" title="${escapeHtml(rec.device_detail || "")}">
@@ -1345,9 +1391,11 @@ function buildRecordMeta(rec) {
     canPrev,
     previewBtn,
     propsBtn,
+    accessBtn,
     dlHtml,
     delBtn,
     folderHtml,
+    accessBadgeHtml,
     nodeCellHtml,
     devCellHtml,
   };
@@ -1375,6 +1423,7 @@ function renderFilesTable() {
             <span class="file-main-name">${escapeHtml(rec.name)}</span>
           </div>
           ${meta.folderHtml}
+          ${meta.accessBadgeHtml}
         </div>
       </td>
       <td data-label="分类"><span class="cat-tag">${escapeHtml(categoryNames[rec.category] || rec.category)}</span></td>
@@ -1387,6 +1436,7 @@ function renderFilesTable() {
         <div class="row-actions">
           ${meta.previewBtn}
           ${meta.propsBtn}
+          ${meta.accessBtn}
           ${meta.dlHtml}
           ${meta.delBtn}
         </div>
@@ -1436,6 +1486,7 @@ function renderFilesGrid() {
       <div class="file-card-body">
         <div class="file-card-title" title="${escapeHtml(rec.name)}">${escapeHtml(rec.name)}</div>
         ${meta.folderHtml}
+        ${meta.accessBadgeHtml}
         <div class="file-card-meta">
           <span>${formatSize(rec.size)}</span>
           <span>·</span>
@@ -1451,6 +1502,7 @@ function renderFilesGrid() {
       <div class="file-card-actions">
         ${meta.previewBtn}
         ${meta.propsBtn}
+        ${meta.accessBtn}
         ${meta.dlHtml}
         ${meta.delBtn}
       </div>
@@ -1772,6 +1824,9 @@ function sendUploadBatchXHR(items, targetNode, onProgress) {
       formData.append("relative_paths", item.relativePath || item.file.name);
     }
     formData.append("target_node", targetNode);
+    if (Array.isArray(state.uploadAllowedUsers) && state.uploadAllowedUsers.length > 0) {
+      formData.append("allowed_users", JSON.stringify(state.uploadAllowedUsers));
+    }
     formData.append("device_fp", state.device.fp || "");
     formData.append("device_name", state.device.name || "");
     formData.append("device_detail", state.device.detail || "");
@@ -2254,6 +2309,159 @@ function closePreview() {
   $("preview-body").innerHTML = "";
 }
 
+function updateUploadAccessButton() {
+  const btn = $("btn-upload-access");
+  if (!btn) return;
+  const cnt = Array.isArray(state.uploadAllowedUsers) ? state.uploadAllowedUsers.length : 0;
+  if (cnt === 0) {
+    btn.textContent = "可见：全部用户 ▾";
+    btn.classList.remove("restricted");
+  } else {
+    btn.textContent = `🔒 仅指定 ${cnt} 人 ▾`;
+    btn.classList.add("restricted");
+  }
+}
+
+async function loadSelectableUsers() {
+  try {
+    const data = await api("/api/users/selectable");
+    if (Array.isArray(data.users)) {
+      state.selectableUsers = data.users;
+    }
+  } catch {}
+}
+
+function updateAccessModeUI() {
+  const isCustom = state.accessModalIsCustom;
+  if ($("access-mode-all")) $("access-mode-all").classList.toggle("active", !isCustom);
+  if ($("access-mode-custom")) $("access-mode-custom").classList.toggle("active", isCustom);
+  if ($("access-custom-panel")) $("access-custom-panel").classList.toggle("hidden", !isCustom);
+  const hint = $("access-summary-hint");
+  if (hint) {
+    if (!isCustom) {
+      hint.textContent = "当前设置：全部系统用户可见并可下载";
+    } else {
+      const cnt = state.accessDraftSet.size;
+      hint.textContent = cnt > 0
+        ? `已指定 ${cnt} 个用户可下载（上传者与管理员默认可见，其余用户完全隐藏）`
+        : "请至少勾选 1 个允许下载的系统用户";
+    }
+  }
+}
+
+function renderAccessModalUsers() {
+  const container = $("access-users-list");
+  if (!container) return;
+  const q = ($("access-user-search")?.value || "").trim().toLowerCase();
+  const list = (state.selectableUsers || []).filter((u) => {
+    if (!q) return true;
+    return u.username.toLowerCase().includes(q);
+  });
+  if (list.length === 0) {
+    container.innerHTML = `<div style="color:var(--muted);font-size:12.5px;padding:8px;">未找到匹配的正常用户</div>`;
+    updateAccessModeUI();
+    return;
+  }
+  container.innerHTML = "";
+  for (const u of list) {
+    const checked = state.accessDraftSet.has(u.username);
+    const isSelf = state.user && u.username === state.user.username;
+    const item = document.createElement("label");
+    item.className = "access-user-item";
+    item.innerHTML = `
+      <input type="checkbox" value="${escapeHtml(u.username)}" ${checked ? "checked" : ""} />
+      <span class="access-user-name">${escapeHtml(u.username)}</span>
+      ${isSelf ? '<span class="cat-tag">自己</span>' : u.role === "admin" ? '<span class="status-pill status-ok">管理员</span>' : ""}
+    `;
+    const cb = item.querySelector("input");
+    cb.onchange = () => {
+      if (cb.checked) state.accessDraftSet.add(u.username);
+      else state.accessDraftSet.delete(u.username);
+      updateAccessModeUI();
+    };
+    container.appendChild(item);
+  }
+  updateAccessModeUI();
+}
+
+async function openUploadAccessPicker() {
+  state.accessModalMode = "upload";
+  state.accessModalFileId = null;
+  const existing = Array.isArray(state.uploadAllowedUsers) ? state.uploadAllowedUsers : [];
+  state.accessModalIsCustom = existing.length > 0;
+  state.accessDraftSet = new Set(existing);
+  if ($("access-modal-title")) $("access-modal-title").textContent = "设置上传文件可见与下载权限";
+  if ($("access-user-search")) $("access-user-search").value = "";
+  $("access-modal").classList.remove("hidden");
+  await loadSelectableUsers();
+  renderAccessModalUsers();
+}
+
+async function openFileAccessPicker(rec) {
+  if (!rec) return;
+  state.accessModalMode = "file";
+  state.accessModalFileId = rec.id;
+  const existing = Array.isArray(rec.allowed_users) ? rec.allowed_users : [];
+  state.accessModalIsCustom = existing.length > 0;
+  state.accessDraftSet = new Set(existing);
+  if ($("access-modal-title")) $("access-modal-title").textContent = `权限设置 — ${rec.name}`;
+  if ($("access-user-search")) $("access-user-search").value = "";
+  $("access-modal").classList.remove("hidden");
+  await loadSelectableUsers();
+  renderAccessModalUsers();
+}
+
+function closeAccessPicker() {
+  $("access-modal").classList.add("hidden");
+}
+
+async function saveAccessPicker() {
+  let selected = [];
+  if (state.accessModalIsCustom) {
+    selected = [...state.accessDraftSet].sort();
+    if (selected.length === 0) {
+      showToast("请选择至少一名可下载用户，或切换为「全部系统用户可见」", "error");
+      return;
+    }
+  }
+
+  if (state.accessModalMode === "upload") {
+    state.uploadAllowedUsers = selected;
+    updateUploadAccessButton();
+    closeAccessPicker();
+    showToast(
+      selected.length === 0
+        ? "已设为所有系统用户可见"
+        : `已限定仅 ${selected.length} 名指定用户可下载`,
+      "success"
+    );
+    return;
+  }
+
+  const fileID = state.accessModalFileId;
+  if (!fileID) return;
+  try {
+    const data = await api(`/api/files/${fileID}/access`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ allowed_users: selected }),
+    });
+    closeAccessPicker();
+    showToast(
+      selected.length === 0
+        ? "已变更为全部系统用户可见"
+        : `权限已更新：仅 ${selected.length} 名指定用户可下载`,
+      "success"
+    );
+    await refreshAll();
+    if ($("props-modal") && !$("props-modal").classList.contains("hidden") && data.file && data.file.id === fileID) {
+      openFileProperties(fileID);
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
 function closeFileProperties() {
   state.propsReqSeq = (state.propsReqSeq || 0) + 1;
   $("props-modal").classList.add("hidden");
@@ -2265,22 +2473,28 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
   const online = fileRec.node_online !== false;
   const isImg = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"].includes(ext);
   const iconHtml = isImg && online
-    ? `<img src="/api/files/${fileRec.id}/preview" alt="${escapeHtml(fileRec.name)}" />`
+    ? `<img src="/api/files/${fileRec.id}/raw" alt="${escapeHtml(fileRec.name)}" />`
     : getWinFileIconSvg(fileRec, 44);
-  const catNames = {
-    image: "图片",
-    video: "视频",
-    audio: "音频",
-    doc: "文档",
-    archive: "压缩包",
-    code: "代码",
-    other: "其他",
-  };
-  const catLabel = catNames[fileRec.category] || fileRec.category || "其他";
+  const catLabel = categoryNames[fileRec.category] || fileRec.category || "其他";
   const exactSize = typeof fileRec.size === "number"
     ? `${formatSize(fileRec.size)} (${fileRec.size.toLocaleString()} 字节)`
     : "-";
   const nodeLabel = `${fileRec.node_name || fileRec.node_id || "本机"}${fileRec.node_os ? " (" + fileRec.node_os + ")" : ""} · ${online ? "在线" : "离线"}`;
+
+  const isAdmin = Boolean(state.user && state.user.role === "admin");
+  const canManage = Boolean(state.user && (isAdmin || state.user.username === fileRec.uploader));
+  const allowedList = Array.isArray(fileRec.allowed_users) ? fileRec.allowed_users : [];
+  const accessText = allowedList.length === 0
+    ? "全部系统用户可见与下载"
+    : `🔒 仅指定用户可下载：${allowedList.join("、")}（其余用户隐藏）`;
+  const accessEditBtn = canManage
+    ? ` <button type="button" class="btn btn-ghost btn-xs" id="props-edit-access">修改权限</button>`
+    : "";
+
+  const physicalPath = (meta && meta.disk_path) || fileRec.storage_dir || "";
+  const adminPathRow = isAdmin
+    ? `<div class="props-row"><div class="props-key">物理存储位置</div><div class="props-val props-mono">${physicalPath ? `<span>${escapeHtml(physicalPath)}</span> <button type="button" class="btn btn-ghost btn-xs" id="props-copy-path">复制路径</button>` : `<span style="color:var(--muted)">获取中...</span>`}</div></div>`
+    : "";
 
   let mimeText = "识别中...";
   let shaHtml = `<span style="color:var(--muted)">计算中...</span>`;
@@ -2324,6 +2538,7 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
       <div class="props-row"><div class="props-key">文件类型</div><div class="props-val">${escapeHtml(catLabel)}${ext ? ` (.${escapeHtml(ext)})` : ""}</div></div>
       <div class="props-row"><div class="props-key">MIME 类型</div><div class="props-val props-mono">${escapeHtml(mimeText)}</div></div>
       <div class="props-row"><div class="props-key">精确大小</div><div class="props-val">${escapeHtml(exactSize)}</div></div>
+      <div class="props-row"><div class="props-key">可见范围</div><div class="props-val"><span>${escapeHtml(accessText)}</span>${accessEditBtn}</div></div>
       <div class="props-row"><div class="props-key">文件编号</div><div class="props-val props-mono">${escapeHtml(fileRec.id)}</div></div>
     </div>
     ${archiveGroup}
@@ -2336,6 +2551,7 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
     <div class="props-group">
       <div class="props-group-title">存储节点与设备指纹</div>
       <div class="props-row"><div class="props-key">所在节点</div><div class="props-val">${escapeHtml(nodeLabel)}</div></div>
+      ${adminPathRow}
       <div class="props-row"><div class="props-key">设备名称</div><div class="props-val">${escapeHtml(fileRec.device_name || "未知设备")}</div></div>
       <div class="props-row"><div class="props-key">设备指纹</div><div class="props-val props-mono">${escapeHtml(fileRec.device_fp || "未记录")}</div></div>
       <div class="props-row"><div class="props-key">来源 IP</div><div class="props-val props-mono">${escapeHtml(fileRec.device_ip || "未记录")}</div></div>
@@ -2379,6 +2595,14 @@ async function openFileProperties(id) {
   if (initialRec) {
     syncHeader(initialRec);
     body.innerHTML = buildPropsBodyHtml(initialRec, null, null);
+    const copyPathEarly = $("props-copy-path");
+    if (copyPathEarly && initialRec.storage_dir) {
+      copyPathEarly.onclick = () => copyText(initialRec.storage_dir);
+    }
+    const editAccessEarly = $("props-edit-access");
+    if (editAccessEarly) {
+      editAccessEarly.onclick = () => openFileAccessPicker(initialRec);
+    }
   } else {
     $("props-title").textContent = "属性 — 加载中...";
     prevBtn.classList.add("hidden");
@@ -2400,6 +2624,15 @@ async function openFileProperties(id) {
     const copyShaBtn = $("props-copy-sha");
     if (copyShaBtn && meta.sha256) {
       copyShaBtn.onclick = () => copyText(meta.sha256);
+    }
+    const copyPathBtn = $("props-copy-path");
+    const diskPath = meta.disk_path || rec.storage_dir || "";
+    if (copyPathBtn && diskPath) {
+      copyPathBtn.onclick = () => copyText(diskPath);
+    }
+    const editAccessBtn = $("props-edit-access");
+    if (editAccessBtn) {
+      editAccessBtn.onclick = () => openFileAccessPicker(rec);
     }
   } catch (err) {
     if (state.propsReqSeq !== reqSeq || modal.classList.contains("hidden")) return;
@@ -2472,7 +2705,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.2";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -2637,6 +2870,7 @@ function renderAdminCluster() {
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
     const q = splitQuotaUnit(n.quota_bytes);
+    const nid = escapeHtml(n.node_id);
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><strong>${escapeHtml(n.node_name)}</strong>${n.is_self ? ' <span class="cat-tag">本机</span>' : ""}</td>
@@ -2646,17 +2880,45 @@ function renderAdminCluster() {
       <td>${formatSize(n.used_bytes)}</td>
       <td>
         <div class="quota-editor">
-          <input class="quota-input" type="number" step="any" min="1" value="${escapeHtml(q.value)}" data-quota-input="${escapeHtml(n.node_id)}" />
-          <select class="quota-unit-select" data-quota-unit="${escapeHtml(n.node_id)}">
+          <input class="quota-input" type="number" step="any" min="1" value="${escapeHtml(q.value)}" data-quota-input="${nid}" />
+          <select class="quota-unit-select" data-quota-unit="${nid}">
             <option value="MB" ${q.unit === "MB" ? "selected" : ""}>MB</option>
             <option value="GB" ${q.unit === "GB" ? "selected" : ""}>GB</option>
             <option value="TB" ${q.unit === "TB" ? "selected" : ""}>TB</option>
           </select>
         </div>
       </td>
-      <td><button class="btn btn-primary btn-xs" type="button" data-save-quota="${escapeHtml(n.node_id)}" ${n.online ? "" : "disabled"}>保存</button></td>
+      <td><button class="btn btn-primary btn-xs" type="button" data-save-quota="${nid}" ${n.online ? "" : "disabled"}>保存配额</button></td>
     `;
     tbody.appendChild(tr);
+
+    const drives = Array.isArray(n.drives) ? n.drives : [];
+    const driveOpts = [`<option value="">选择磁盘 / 挂载点...</option>`];
+    for (const d of drives) {
+      driveOpts.push(
+        `<option value="${escapeHtml(d.default_dir)}">${escapeHtml(d.label)}（可用 ${formatSize(d.free_bytes)} / ${formatSize(d.total_bytes)}）</option>`
+      );
+    }
+
+    const storageTr = document.createElement("tr");
+    storageTr.className = "cluster-storage-row";
+    storageTr.innerHTML = `
+      <td colspan="7">
+        <div class="storage-dir-editor">
+          <span class="storage-dir-label">存储盘与路径：</span>
+          <select class="storage-drive-select" data-drive-select="${nid}" ${n.online ? "" : "disabled"}>
+            ${driveOpts.join("")}
+          </select>
+          <input class="storage-dir-input" type="text" data-storage-input="${nid}" value="${escapeHtml(n.storage_dir || "")}" placeholder="完整存储路径，如 D:\\LFH-Storage 或 /mnt/data/lfh" ${n.online ? "" : "disabled"} />
+          <label class="storage-migrate-check" title="勾选后自动把该节点已有上传文件搬移到新盘/新目录">
+            <input type="checkbox" data-storage-migrate="${nid}" ${n.online ? "" : "disabled"} />
+            <span>迁移已有文件</span>
+          </label>
+          <button class="btn btn-ghost btn-xs" type="button" data-save-storage="${nid}" ${n.online ? "" : "disabled"}>切换存储位置</button>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(storageTr);
   }
 }
 
@@ -2706,10 +2968,17 @@ function renderUsersTable(users) {
     if (st === "pending") statusPill = `<span class="status-pill status-warn">待审核</span>`;
     else if (st === "banned") statusPill = `<span class="status-pill status-off">已封禁</span>`;
 
-    let actionsHtml = `<span style="color:var(--muted);font-size:12px;">系统管理员（受保护）</span>`;
-    if (u.role !== "admin") {
-      const eu = escapeHtml(u.username);
-      if (st === "pending") {
+    const isSelf = state.user && u.username === state.user.username;
+    const eu = escapeHtml(u.username);
+    let actionsHtml = `<span style="color:var(--muted);font-size:12px;">当前登录账号（受保护）</span>`;
+    if (!isSelf) {
+      if (u.role === "admin") {
+        actionsHtml = `
+          <div class="row-actions">
+            <button class="btn btn-warn btn-xs" type="button" data-user-action="demote" data-username="${eu}">取消管理员</button>
+          </div>
+        `;
+      } else if (st === "pending") {
         actionsHtml = `
           <div class="row-actions">
             <button class="btn btn-primary btn-xs" type="button" data-user-action="approve" data-username="${eu}">同意通过</button>
@@ -2726,6 +2995,7 @@ function renderUsersTable(users) {
       } else {
         actionsHtml = `
           <div class="row-actions">
+            <button class="btn btn-primary btn-xs" type="button" data-user-action="promote" data-username="${eu}">设为管理员</button>
             <button class="btn btn-warn btn-xs" type="button" data-user-action="ban" data-username="${eu}">封禁</button>
             <button class="btn btn-danger btn-xs" type="button" data-user-action="delete" data-username="${eu}">删除</button>
           </div>
@@ -3009,6 +3279,9 @@ function bindEvents() {
       openPreview(id);
     } else if (action === "props") {
       openFileProperties(id);
+    } else if (action === "access") {
+      const rec = state.files.find((f) => f.id === id);
+      if (rec) openFileAccessPicker(rec);
     } else if (action === "delete") {
       if (!confirm("确定要删除这个文件吗？")) return;
       state.isUploadingSelf = true;
@@ -3077,6 +3350,42 @@ function bindEvents() {
   $("preview-backdrop").onclick = closePreview;
   $("props-close").onclick = closeFileProperties;
   $("props-backdrop").onclick = closeFileProperties;
+  if ($("btn-upload-access")) {
+    $("btn-upload-access").onclick = openUploadAccessPicker;
+  }
+  if ($("access-close")) $("access-close").onclick = closeAccessPicker;
+  if ($("access-backdrop")) $("access-backdrop").onclick = closeAccessPicker;
+  if ($("access-mode-all")) {
+    $("access-mode-all").onclick = () => {
+      state.accessModalIsCustom = false;
+      updateAccessModeUI();
+    };
+  }
+  if ($("access-mode-custom")) {
+    $("access-mode-custom").onclick = () => {
+      state.accessModalIsCustom = true;
+      renderAccessModalUsers();
+    };
+  }
+  if ($("access-user-search")) {
+    $("access-user-search").oninput = renderAccessModalUsers;
+  }
+  if ($("access-btn-self-only")) {
+    $("access-btn-self-only").onclick = () => {
+      state.accessModalIsCustom = true;
+      state.accessDraftSet = new Set(state.user ? [state.user.username] : []);
+      renderAccessModalUsers();
+    };
+  }
+  if ($("access-btn-clear")) {
+    $("access-btn-clear").onclick = () => {
+      state.accessDraftSet = new Set();
+      renderAccessModalUsers();
+    };
+  }
+  if ($("access-save-btn")) {
+    $("access-save-btn").onclick = saveAccessPicker;
+  }
 
   $("btn-toggle-sidebar").onclick = openMobileSidebar;
   $("btn-close-sidebar").onclick = closeMobileSidebar;
@@ -3171,6 +3480,22 @@ function bindEvents() {
       if (action === "approve") {
         await api(`/api/admin/users/${enc}/approve`, { method: "POST" });
         showToast(`已同意用户 ${username} 注册`, "success");
+      } else if (action === "promote") {
+        if (!confirm(`确定要授予用户 ${username} 管理员权限吗？`)) return;
+        await api(`/api/admin/users/${enc}/role`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: "admin" }),
+        });
+        showToast(`已授予 ${username} 管理员权限`, "success");
+      } else if (action === "demote") {
+        if (!confirm(`确定要取消用户 ${username} 的管理员权限，降为普通用户吗？`)) return;
+        await api(`/api/admin/users/${enc}/role`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: "user" }),
+        });
+        showToast(`已取消 ${username} 的管理员权限`, "success");
       } else if (action === "ban") {
         if (!confirm(`确定要封禁用户 ${username} 吗？封禁后其当前登录会立即失效。`)) return;
         await api(`/api/admin/users/${enc}/ban`, { method: "POST" });
@@ -3235,7 +3560,64 @@ function bindEvents() {
     }
   };
 
+  $("cluster-nodes-tbody").onchange = (e) => {
+    const driveSel = e.target.closest("[data-drive-select]");
+    if (!driveSel || !driveSel.value) return;
+    const nodeID = driveSel.dataset.driveSelect;
+    const input = document.querySelector(`[data-storage-input="${CSS.escape(nodeID)}"]`);
+    if (input) {
+      input.value = driveSel.value;
+    }
+  };
+
   $("cluster-nodes-tbody").onclick = async (e) => {
+    const storageBtn = e.target.closest("[data-save-storage]");
+    if (storageBtn && !storageBtn.disabled) {
+      const nodeID = storageBtn.dataset.saveStorage;
+      const input = document.querySelector(`[data-storage-input="${CSS.escape(nodeID)}"]`);
+      const migCb = document.querySelector(`[data-storage-migrate="${CSS.escape(nodeID)}"]`);
+      const storageDir = (input ? input.value : "").trim();
+      const migrateExisting = Boolean(migCb && migCb.checked);
+      if (!storageDir) {
+        showToast("请输入或选择有效的完整存储路径", "error");
+        return;
+      }
+      if (migrateExisting && !confirm(`确定要将节点存储路径切换至 ${storageDir} 并迁移该节点已有文件吗？`)) {
+        return;
+      }
+      storageBtn.disabled = true;
+      const prevText = storageBtn.textContent;
+      storageBtn.textContent = migrateExisting ? "迁移中..." : "应用中...";
+      try {
+        const data = await api("/api/admin/cluster/storage-dir", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            node_id: nodeID,
+            storage_dir: storageDir,
+            migrate_existing: migrateExisting,
+          }),
+        });
+        state.pool = data.pool || state.pool;
+        renderAdminCluster();
+        renderPoolStatus();
+        renderNodeSummary();
+        loadFiles();
+        showToast(
+          migrateExisting
+            ? `已切换存储位置至 ${data.node?.storage_dir || storageDir}（共迁移 ${data.moved_count || 0} 个文件）`
+            : `新上传文件将保存至 ${data.node?.storage_dir || storageDir}`,
+          "success"
+        );
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        storageBtn.disabled = false;
+        storageBtn.textContent = prevText;
+      }
+      return;
+    }
+
     const saveBtn = e.target.closest("[data-save-quota]");
     if (!saveBtn || saveBtn.disabled) return;
     const nodeID = saveBtn.dataset.saveQuota;

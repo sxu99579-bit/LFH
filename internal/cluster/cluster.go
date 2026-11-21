@@ -60,6 +60,7 @@ type Config struct {
 	ExposeIP      string  `json:"expose_ip,omitempty"`
 	Port          string  `json:"port,omitempty"`
 	EntryHint     string  `json:"entry_hint,omitempty"`
+	StorageDir    string  `json:"storage_dir,omitempty"`
 	DiscoveryPort int     `json:"discovery_port"`
 }
 
@@ -76,26 +77,30 @@ type Options struct {
 	Port             string
 	PortSet          bool
 	EntryHint        string
+	StorageDir       string
+	StorageDirSet    bool
 	DiscoveryPort    int
 	DiscoveryPortSet bool
 	SelfURL          string
 }
 
 type NodeStatus struct {
-	NodeID     string    `json:"node_id"`
-	NodeName   string    `json:"node_name"`
-	Role       string    `json:"role"`
-	OS         string    `json:"os"`
-	Arch       string    `json:"arch"`
-	HTTPURL    string    `json:"http_url"`
-	QuotaGB    float64   `json:"quota_gb"`
-	QuotaBytes int64     `json:"quota_bytes"`
-	UsedBytes  int64     `json:"used_bytes"`
-	FreeBytes  int64     `json:"free_bytes"`
-	FileCount  int       `json:"file_count"`
-	Online     bool      `json:"online"`
-	IsSelf     bool      `json:"is_self"`
-	LastSeen   time.Time `json:"last_seen"`
+	NodeID     string      `json:"node_id"`
+	NodeName   string      `json:"node_name"`
+	Role       string      `json:"role"`
+	OS         string      `json:"os"`
+	Arch       string      `json:"arch"`
+	HTTPURL    string      `json:"http_url"`
+	QuotaGB    float64     `json:"quota_gb"`
+	QuotaBytes int64       `json:"quota_bytes"`
+	UsedBytes  int64       `json:"used_bytes"`
+	FreeBytes  int64       `json:"free_bytes"`
+	FileCount  int         `json:"file_count"`
+	StorageDir string      `json:"storage_dir,omitempty"`
+	Drives     []DriveInfo `json:"drives,omitempty"`
+	Online     bool        `json:"online"`
+	IsSelf     bool        `json:"is_self"`
+	LastSeen   time.Time   `json:"last_seen"`
 }
 
 type PoolSummary struct {
@@ -209,6 +214,7 @@ func NewManager(dataDir string, store *storage.Store, opts Options) (*Manager, e
 				cfg.ExposeIP = seed.ExposeIP
 				cfg.Port = seed.Port
 				cfg.EntryHint = seed.EntryHint
+				cfg.StorageDir = seed.StorageDir
 				cfg.DiscoveryPort = seed.DiscoveryPort
 				if opts.DiscoveryPortSet {
 					cfg.DiscoveryPort = opts.DiscoveryPort
@@ -281,6 +287,20 @@ func NewManager(dataDir string, store *storage.Store, opts Options) (*Manager, e
 
 	if opts.NodeName != "" {
 		cfg.NodeName = strings.TrimSpace(opts.NodeName)
+	}
+	if opts.StorageDirSet {
+		cfg.StorageDir = strings.TrimSpace(opts.StorageDir)
+	}
+	if cfg.StorageDir != "" {
+		if _, err := store.SetUploadDir(cfg.StorageDir, false); err != nil {
+			if opts.StorageDirSet {
+				return nil, fmt.Errorf("初始化存储目录 %q 失败: %w", cfg.StorageDir, err)
+			}
+			log.Printf("[cluster] warning: saved storage_dir %q unavailable (%v); falling back to %s", cfg.StorageDir, err, store.UploadDir())
+			cfg.StorageDir = ""
+		} else {
+			cfg.StorageDir = store.UploadDir()
+		}
 	}
 	if cfg.NodeName == "" {
 		hn, _ := os.Hostname()
@@ -361,6 +381,10 @@ func (m *Manager) Port() string {
 	return m.cfg.Port
 }
 
+func (m *Manager) StorageDir() string {
+	return m.store.UploadDir()
+}
+
 func (m *Manager) SetSelfURL(u string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -419,6 +443,8 @@ func (m *Manager) SelfStatus() NodeStatus {
 		UsedBytes:  used,
 		FreeBytes:  free,
 		FileCount:  cnt,
+		StorageDir: m.store.UploadDir(),
+		Drives:     ListDrives(),
 		Online:     true,
 		IsSelf:     true,
 		LastSeen:   time.Now(),
@@ -475,6 +501,9 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		f.NodeName = n.NodeName
 		f.NodeOS = n.OS
 		f.NodeOnline = true
+		if f.StorageDir == "" {
+			f.StorageDir = n.StorageDir
+		}
 		files[i] = f
 	}
 
@@ -486,10 +515,13 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		prev.status.QuotaBytes != n.QuotaBytes ||
 		prev.status.UsedBytes != n.UsedBytes ||
 		prev.status.FileCount != n.FileCount ||
+		prev.status.StorageDir != n.StorageDir ||
 		len(prev.files) != len(files)
 	if !changed {
 		for i := range files {
-			if prev.files[i].ID != files[i].ID {
+			if prev.files[i].ID != files[i].ID ||
+				prev.files[i].StorageDir != files[i].StorageDir ||
+				!equalStringSlice(prev.files[i].AllowedUsers, files[i].AllowedUsers) {
 				changed = true
 				break
 			}
@@ -556,6 +588,21 @@ func (m *Manager) PoolSummary() PoolSummary {
 	return summary
 }
 
+func (m *Manager) PoolSummaryForRole(isAdmin bool) PoolSummary {
+	summary := m.PoolSummary()
+	if isAdmin {
+		return summary
+	}
+	sanitized := make([]NodeStatus, len(summary.Nodes))
+	for i, n := range summary.Nodes {
+		n.StorageDir = ""
+		n.Drives = nil
+		sanitized[i] = n
+	}
+	summary.Nodes = sanitized
+	return summary
+}
+
 func (m *Manager) AllClusterFiles() []storage.FileRecord {
 	self := m.SelfStatus()
 	local := m.store.AllRecords()
@@ -565,6 +612,9 @@ func (m *Manager) AllClusterFiles() []storage.FileRecord {
 		rec.NodeName = self.NodeName
 		rec.NodeOS = self.OS
 		rec.NodeOnline = true
+		if rec.StorageDir == "" {
+			rec.StorageDir = m.store.RecordDir(rec)
+		}
 		out = append(out, rec)
 	}
 
@@ -741,7 +791,7 @@ func computeSignature(secret, method, path, ts, nodeID string) string {
 
 // ==================== Cross-Node HTTP Proxy Helpers ====================
 
-func (m *Manager) ProxyUpload(peer NodeStatus, filename, folderPath string, r io.Reader, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
+func (m *Manager) ProxyUpload(peer NodeStatus, filename, folderPath string, r io.Reader, uploader string, allowedUsers []string, dev storage.DeviceInfo) (storage.FileRecord, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
@@ -755,6 +805,11 @@ func (m *Manager) ProxyUpload(peer NodeStatus, filename, folderPath string, r io
 		_ = mw.WriteField("device_name", dev.Name)
 		_ = mw.WriteField("device_ip", dev.IP)
 		_ = mw.WriteField("device_detail", dev.Detail)
+		if len(allowedUsers) > 0 {
+			if rawAllowed, err := json.Marshal(allowedUsers); err == nil {
+				_ = mw.WriteField("allowed_users", string(rawAllowed))
+			}
+		}
 
 		part, err := mw.CreateFormFile("files", filename)
 		if err != nil {
@@ -964,6 +1019,172 @@ func (m *Manager) UpdateNodeQuotaBytes(nodeID string, quotaBytes int64) (NodeSta
 
 func (m *Manager) UpdateNodeQuota(nodeID string, quotaGB float64) (NodeStatus, error) {
 	return m.UpdateNodeQuotaBytes(nodeID, int64(quotaGB*float64(GB)))
+}
+
+func (m *Manager) SetLocalStorageDir(newDir string, migrateExisting bool) (NodeStatus, int, error) {
+	moved, err := m.store.SetUploadDir(newDir, migrateExisting)
+	if err != nil {
+		return NodeStatus{}, moved, err
+	}
+	m.mu.Lock()
+	m.cfg.StorageDir = m.store.UploadDir()
+	saveErr := m.saveLocked()
+	m.mu.Unlock()
+	if saveErr != nil {
+		return NodeStatus{}, moved, saveErr
+	}
+	return m.SelfStatus(), moved, nil
+}
+
+func (m *Manager) UpdateNodeStorageDir(nodeID, newDir string, migrateExisting bool) (NodeStatus, int, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		return m.SetLocalStorageDir(newDir, migrateExisting)
+	}
+	m.mu.RLock()
+	p, ok := m.peers[nodeID]
+	var peer NodeStatus
+	if ok {
+		peer = p.status
+		peer.Online = time.Since(peer.LastSeen) <= PeerTimeout
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return NodeStatus{}, 0, errors.New("节点不存在")
+	}
+	if !peer.Online {
+		return NodeStatus{}, 0, fmt.Errorf("节点 %s 当前离线，无法调整存储位置", peer.NodeName)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"storage_dir":      newDir,
+		"migrate_existing": migrateExisting,
+	})
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/storage-dir"
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return NodeStatus{}, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	client := m.apiClient
+	if migrateExisting {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return NodeStatus{}, 0, fmt.Errorf("通知节点 %s 更新存储位置失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return NodeStatus{}, 0, errors.New(errBody.Error)
+		}
+		return NodeStatus{}, 0, fmt.Errorf("更新存储位置失败 (%d)", resp.StatusCode)
+	}
+
+	var out struct {
+		Node       NodeStatus `json:"node"`
+		MovedCount int        `json:"moved_count"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return NodeStatus{}, 0, err
+	}
+	out.Node.IsSelf = false
+	out.Node.Online = true
+	out.Node.LastSeen = time.Now()
+
+	m.mu.Lock()
+	if cur, exists := m.peers[nodeID]; exists {
+		cur.status = out.Node
+		if out.MovedCount > 0 {
+			for i := range cur.files {
+				cur.files[i].StorageDir = out.Node.StorageDir
+			}
+		}
+	}
+	m.mu.Unlock()
+	return out.Node, out.MovedCount, nil
+}
+
+func (m *Manager) UpdateFileAccess(fileID string, allowedUsers []string) (storage.FileRecord, error) {
+	if _, _, ok := m.store.Get(fileID); ok {
+		rec, err := m.store.SetAllowedUsers(fileID, allowedUsers)
+		if err != nil {
+			return storage.FileRecord{}, err
+		}
+		self := m.SelfStatus()
+		rec.NodeID = self.NodeID
+		rec.NodeName = self.NodeName
+		rec.NodeOS = self.OS
+		rec.NodeOnline = true
+		if rec.StorageDir == "" {
+			rec.StorageDir = m.store.RecordDir(rec)
+		}
+		return rec, nil
+	}
+
+	_, peer, ok := m.LocateFile(fileID)
+	if !ok {
+		return storage.FileRecord{}, errors.New("文件不存在")
+	}
+	if !peer.Online {
+		return storage.FileRecord{}, fmt.Errorf("文件所在节点 %s 当前离线，无法修改可见权限", peer.NodeName)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"allowed_users": allowedUsers,
+	})
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/files/" + fileID + "/access"
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return storage.FileRecord{}, fmt.Errorf("通知节点 %s 修改文件权限失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return storage.FileRecord{}, errors.New(errBody.Error)
+		}
+		return storage.FileRecord{}, fmt.Errorf("修改文件权限失败 (%d)", resp.StatusCode)
+	}
+
+	var updated storage.FileRecord
+	if err := json.Unmarshal(body, &updated); err != nil {
+		return storage.FileRecord{}, err
+	}
+	updated.NodeID = peer.NodeID
+	updated.NodeName = peer.NodeName
+	updated.NodeOS = peer.OS
+	updated.NodeOnline = true
+
+	m.mu.Lock()
+	if cur, exists := m.peers[peer.NodeID]; exists {
+		for i := range cur.files {
+			if cur.files[i].ID == fileID {
+				cur.files[i].AllowedUsers = append([]string(nil), updated.AllowedUsers...)
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+	return updated, nil
 }
 
 // ==================== Discovery & Heartbeat Loops ====================
@@ -1185,6 +1406,18 @@ func broadcastTargets() []net.IP {
 		}
 	}
 	return targets
+}
+
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func formatBytesHuman(b int64) string {

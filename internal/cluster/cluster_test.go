@@ -194,3 +194,50 @@ func TestSelectUploadTargetLargestFreeAndInsufficientQuota(t *testing.T) {
 		t.Fatalf("expected insufficient quota error, got %v", err)
 	}
 }
+
+func TestStorageDirRoleFilteringAndDrives(t *testing.T) {
+	dir := t.TempDir()
+	st, err := storage.NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := st.SaveUpload("hello.txt", "alice", storage.DeviceInfo{}, strings.NewReader("hello")); err != nil {
+		t.Fatalf("SaveUpload: %v", err)
+	}
+
+	mgr, err := NewManager(dir, st, Options{
+		Role:             RoleEntry,
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:8080",
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	adminPool := mgr.PoolSummaryForRole(true)
+	userPool := mgr.PoolSummaryForRole(false)
+	if adminPool.Nodes[0].StorageDir == "" {
+		t.Fatalf("expected admin pool to expose storage_dir")
+	}
+	if userPool.Nodes[0].StorageDir != "" || len(userPool.Nodes[0].Drives) != 0 {
+		t.Fatalf("expected non-admin pool to hide storage_dir and drives, got %+v", userPool.Nodes[0])
+	}
+
+	customDir := filepath.Join(t.TempDir(), "LFH-Custom")
+	updated, moved, err := mgr.SetLocalStorageDir(customDir, true)
+	if err != nil || moved != 1 || updated.StorageDir != customDir {
+		t.Fatalf("SetLocalStorageDir: moved=%d err=%v node=%+v", moved, err, updated)
+	}
+	reloaded, err := NewManager(dir, st, Options{
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:8080",
+	})
+	if err != nil {
+		t.Fatalf("reload NewManager: %v", err)
+	}
+	if reloaded.StorageDir() != customDir {
+		t.Fatalf("expected persisted storage_dir=%q, got %q", customDir, reloaded.StorageDir())
+	}
+}

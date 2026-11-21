@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +39,8 @@ type FileRecord struct {
 	DeviceName   string    `json:"device_name,omitempty"`
 	DeviceIP     string    `json:"device_ip,omitempty"`
 	DeviceDetail string    `json:"device_detail,omitempty"`
+	AllowedUsers []string  `json:"allowed_users,omitempty"`
+	StorageDir   string    `json:"storage_dir,omitempty"`
 	NodeID       string    `json:"node_id,omitempty"`
 	NodeName     string    `json:"node_name,omitempty"`
 	NodeOS       string    `json:"node_os,omitempty"`
@@ -60,10 +64,11 @@ type SummaryResponse struct {
 }
 
 type Store struct {
-	mu        sync.RWMutex
-	uploadDir string
-	indexPath string
-	records   map[string]FileRecord
+	mu               sync.RWMutex
+	defaultUploadDir string
+	uploadDir        string
+	indexPath        string
+	records          map[string]FileRecord
 }
 
 var categoryLabels = map[string]string{
@@ -109,14 +114,38 @@ func NewStore(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		uploadDir: uploadDir,
-		indexPath: filepath.Join(dataDir, "files.json"),
-		records:   make(map[string]FileRecord),
+		defaultUploadDir: uploadDir,
+		uploadDir:        uploadDir,
+		indexPath:        filepath.Join(dataDir, "files.json"),
+		records:          make(map[string]FileRecord),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+func (s *Store) recordDirLocked(rec FileRecord) string {
+	if d := strings.TrimSpace(rec.StorageDir); d != "" {
+		return filepath.Clean(d)
+	}
+	return s.defaultUploadDir
+}
+
+func (s *Store) recordDiskPathLocked(rec FileRecord) string {
+	return filepath.Join(s.recordDirLocked(rec), rec.StoredName)
+}
+
+func (s *Store) UploadDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.uploadDir
+}
+
+func (s *Store) RecordDir(rec FileRecord) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recordDirLocked(rec)
 }
 
 func (s *Store) load() error {
@@ -125,7 +154,7 @@ func (s *Store) load() error {
 		var list []FileRecord
 		if err := json.Unmarshal(raw, &list); err == nil {
 			for _, rec := range list {
-				if _, statErr := os.Stat(filepath.Join(s.uploadDir, rec.StoredName)); statErr == nil {
+				if _, statErr := os.Stat(s.recordDiskPathLocked(rec)); statErr == nil {
 					if rec.MonthKey == "" {
 						rec.MonthKey = rec.UploadedAt.Format("2006-01")
 					}
@@ -133,6 +162,7 @@ func (s *Store) load() error {
 						rec.DateKey = rec.UploadedAt.Format("2006-01-02")
 					}
 					rec.Category = ClassifyExt(rec.Ext)
+					rec.AllowedUsers = NormalizeAllowedUsers(rec.AllowedUsers)
 					s.records[rec.ID] = rec
 				}
 			}
@@ -195,17 +225,74 @@ func SanitizeFolderPath(p string) string {
 	return joined
 }
 
+// NormalizeAllowedUsers trims, deduplicates, and sorts allowed usernames; empty list means public to all logged-in users.
+func NormalizeAllowedUsers(users []string) []string {
+	if len(users) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(users))
+	out := make([]string, 0, len(users))
+	for _, raw := range users {
+		u := strings.TrimSpace(raw)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CanUserAccess reports whether username/role may see or download rec.
+func CanUserAccess(rec FileRecord, username, role string) bool {
+	if len(rec.AllowedUsers) == 0 {
+		return true
+	}
+	if role == "admin" || rec.Uploader == username {
+		return true
+	}
+	for _, allowed := range rec.AllowedUsers {
+		if allowed == username {
+			return true
+		}
+	}
+	return false
+}
+
+// FilterAccessibleRecords keeps only records visible to username/role.
+func FilterAccessibleRecords(records []FileRecord, username, role string) []FileRecord {
+	out := make([]FileRecord, 0, len(records))
+	for _, rec := range records {
+		if CanUserAccess(rec, username, role) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
 func (s *Store) SaveUpload(origName, uploader string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
-	return s.SaveUploadWithFolder(origName, "", uploader, dev, r)
+	return s.SaveUploadWithOptions(origName, "", uploader, nil, dev, r)
 }
 
 func (s *Store) SaveUploadWithFolder(origName, folderPath, uploader string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
+	return s.SaveUploadWithOptions(origName, folderPath, uploader, nil, dev, r)
+}
+
+func (s *Store) SaveUploadWithOptions(origName, folderPath, uploader string, allowedUsers []string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
 	origName = sanitizeFilename(origName)
 	folderPath = SanitizeFolderPath(folderPath)
 	ext := strings.ToLower(filepath.Ext(origName))
 	id := newID()
 	storedName := id + ext
-	dstPath := filepath.Join(s.uploadDir, storedName)
+	activeDir := s.UploadDir()
+	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		return FileRecord{}, err
+	}
+	dstPath := filepath.Join(activeDir, storedName)
 
 	f, err := os.Create(dstPath)
 	if err != nil {
@@ -239,6 +326,8 @@ func (s *Store) SaveUploadWithFolder(origName, folderPath, uploader string, dev 
 		DeviceName:   strings.TrimSpace(dev.Name),
 		DeviceIP:     strings.TrimSpace(dev.IP),
 		DeviceDetail: strings.TrimSpace(dev.Detail),
+		AllowedUsers: NormalizeAllowedUsers(allowedUsers),
+		StorageDir:   activeDir,
 		NodeOnline:   true,
 	}
 
@@ -259,7 +348,142 @@ func (s *Store) Get(id string) (FileRecord, string, bool) {
 	if !ok {
 		return FileRecord{}, "", false
 	}
-	return rec, filepath.Join(s.uploadDir, rec.StoredName), true
+	return rec, s.recordDiskPathLocked(rec), true
+}
+
+func (s *Store) SetAllowedUsers(id string, allowedUsers []string) (FileRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	rec.AllowedUsers = NormalizeAllowedUsers(allowedUsers)
+	s.records[id] = rec
+	if err := s.saveLocked(); err != nil {
+		return FileRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *Store) SetUploadDir(newDir string, migrateExisting bool) (int, error) {
+	trimmed := strings.TrimSpace(newDir)
+	if trimmed == "" {
+		return 0, errors.New("存储位置不能为空")
+	}
+	if runtime.GOOS == "windows" && len(trimmed) == 2 && trimmed[1] == ':' &&
+		((trimmed[0] >= 'A' && trimmed[0] <= 'Z') || (trimmed[0] >= 'a' && trimmed[0] <= 'z')) {
+		trimmed = strings.ToUpper(trimmed[:1]) + `:\LFH-Storage`
+	}
+	cleanDir := filepath.Clean(trimmed)
+	if !filepath.IsAbs(cleanDir) {
+		return 0, errors.New(`存储位置必须是完整的绝对路径（例如 D:\LFH-Storage 或 /mnt/data/lfh）`)
+	}
+	if err := os.MkdirAll(cleanDir, 0755); err != nil {
+		return 0, fmt.Errorf("创建存储目录失败: %w", err)
+	}
+	probe, err := os.CreateTemp(cleanDir, ".lfh-write-probe-*")
+	if err != nil {
+		return 0, fmt.Errorf("目标存储目录不可写: %w", err)
+	}
+	probePath := probe.Name()
+	_, writeErr := probe.WriteString("ok")
+	_ = probe.Close()
+	_ = os.Remove(probePath)
+	if writeErr != nil {
+		return 0, fmt.Errorf("测试写入存储目录失败: %w", writeErr)
+	}
+
+	s.mu.Lock()
+	s.uploadDir = cleanDir
+	var candidates []FileRecord
+	if migrateExisting {
+		candidates = make([]FileRecord, 0, len(s.records))
+		for _, rec := range s.records {
+			if s.recordDirLocked(rec) != cleanDir {
+				candidates = append(candidates, rec)
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if !migrateExisting || len(candidates) == 0 {
+		return 0, nil
+	}
+
+	moved := 0
+	for _, cand := range candidates {
+		s.mu.RLock()
+		cur, exists := s.records[cand.ID]
+		var srcPath string
+		if exists {
+			srcPath = s.recordDiskPathLocked(cur)
+		}
+		s.mu.RUnlock()
+		if !exists {
+			continue
+		}
+		dstPath := filepath.Join(cleanDir, cur.StoredName)
+		if srcPath == dstPath {
+			continue
+		}
+		if err := moveFileCrossDevice(srcPath, dstPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return moved, fmt.Errorf("迁移文件 %s 失败: %w", cur.Name, err)
+		}
+		s.mu.Lock()
+		if latest, ok := s.records[cur.ID]; ok {
+			latest.StorageDir = cleanDir
+			s.records[cur.ID] = latest
+			if saveErr := s.saveLocked(); saveErr != nil {
+				s.mu.Unlock()
+				return moved, saveErr
+			}
+			moved++
+		}
+		s.mu.Unlock()
+	}
+	return moved, nil
+}
+
+func moveFileCrossDevice(srcPath, dstPath string) error {
+	if srcPath == dstPath {
+		return nil
+	}
+	if err := os.Rename(srcPath, dstPath); err == nil {
+		return nil
+	}
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".lfh-migrate-*")
+	if err != nil {
+		_ = in.Close()
+		return err
+	}
+	tmpPath := tmp.Name()
+	_, copyErr := io.Copy(tmp, in)
+	_ = in.Close()
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return closeErr
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Remove(srcPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Delete(id string) error {
@@ -269,7 +493,7 @@ func (s *Store) Delete(id string) error {
 	if !ok {
 		return errors.New("文件不存在")
 	}
-	_ = os.Remove(filepath.Join(s.uploadDir, rec.StoredName))
+	_ = os.Remove(s.recordDiskPathLocked(rec))
 	delete(s.records, id)
 	return s.saveLocked()
 }

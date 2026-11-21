@@ -28,7 +28,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.2</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -106,7 +106,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.2</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button">✕</button>
@@ -225,6 +225,7 @@
             </div>
           </div>
           <div class="upload-strip-right">
+            <button id="btn-upload-access" class="access-pill-btn" type="button" title="指定哪些系统用户可以下载此次上传的文件，未授权用户将完全隐藏">可见：全部用户 ▾</button>
             <select id="upload-target-node" class="node-select admin-only-control hidden" title="选择存储节点">
               <option value="auto">自动分配（剩余空间最大）</option>
             </select>
@@ -314,6 +315,47 @@
         </div>
       </div>
       <div class="modal-body" id="props-body"></div>
+    </div>
+  </div>
+
+  <!-- 指定用户可见 / 下载权限弹窗 -->
+  <div id="access-modal" class="modal hidden">
+    <div class="modal-backdrop" id="access-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title" id="access-modal-title">设置文件可见与下载权限</div>
+        <div class="modal-header-actions">
+          <button id="access-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body access-modal-body">
+        <div class="access-mode-grid">
+          <button type="button" class="access-mode-card active" id="access-mode-all">
+            <div class="access-mode-title">全部系统用户可见</div>
+            <div class="access-mode-desc">所有已登录用户均可在列表中看到并下载该文件</div>
+          </button>
+          <button type="button" class="access-mode-card" id="access-mode-custom">
+            <div class="access-mode-title">仅指定用户可下载</div>
+            <div class="access-mode-desc">仅勾选用户、上传者与管理员可见可下载，其余用户完全隐藏</div>
+          </button>
+        </div>
+
+        <div id="access-custom-panel" class="access-custom-panel hidden">
+          <div class="access-picker-toolbar">
+            <input id="access-user-search" class="search-input" type="search" placeholder="搜索系统用户名..." />
+            <div class="row-actions">
+              <button id="access-btn-self-only" class="btn btn-ghost btn-xs" type="button">仅自己与管理员</button>
+              <button id="access-btn-clear" class="btn btn-ghost btn-xs" type="button">清空勾选</button>
+            </div>
+          </div>
+          <div id="access-users-list" class="access-users-list"></div>
+        </div>
+
+        <div class="access-modal-footer">
+          <div id="access-summary-hint" class="switch-desc">当前设置：全部系统用户可见</div>
+          <button id="access-save-btn" class="btn btn-primary btn-sm" type="button">确认应用</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -506,7 +548,7 @@
         <div class="settings-panel hidden" id="panel-users">
           <div class="admin-section">
             <div class="admin-section-head">
-              <div class="admin-section-title" style="margin-bottom:0;">注册账号管理（审核 / 封禁 / 解封 / 删除）</div>
+              <div class="admin-section-title" style="margin-bottom:0;">注册账号管理（审核 / 管理员权限 / 封禁 / 删除）</div>
               <button id="btn-refresh-users" class="btn btn-ghost btn-xs" type="button">刷新列表</button>
             </div>
             <div class="admin-table-wrap">
@@ -592,7 +634,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21</strong>
+                  <strong id="upd-cur-version">V0.11.21.2</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>

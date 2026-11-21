@@ -15,6 +15,8 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1104,5 +1106,317 @@ func TestFileMetaAndNonAdminAutoTarget(t *testing.T) {
 	}
 	if !strings.Contains(metaOut.ContentType, "text/markdown") {
 		t.Fatalf("expected markdown content_type, got %q", metaOut.ContentType)
+	}
+}
+
+func registerAndLoginTestUser(t *testing.T, adminClient *http.Client, baseURL, username, password string) *http.Client {
+	t.Helper()
+	invRes, err := adminClient.Post(baseURL+"/api/admin/invites", "application/json", strings.NewReader(`{"max_uses":1,"expire_hours":24}`))
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	var invOut struct {
+		Invite auth.InviteCode `json:"invite"`
+	}
+	_ = json.NewDecoder(invRes.Body).Decode(&invOut)
+	invRes.Body.Close()
+
+	client := newCookieClient(t)
+	regBody, _ := json.Marshal(map[string]string{
+		"username":    username,
+		"password":    password,
+		"invite_code": invOut.Invite.Code,
+	})
+	regRes, err := client.Post(baseURL+"/api/register", "application/json", bytes.NewReader(regBody))
+	if err != nil {
+		t.Fatalf("register %s: %v", username, err)
+	}
+	regRes.Body.Close()
+	if regRes.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 register %s, got %d", username, regRes.StatusCode)
+	}
+	return client
+}
+
+func TestAdminGrantAndRevokeRole(t *testing.T) {
+	srv, ts := newTestServer(t)
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+	aliceClient := registerAndLoginTestUser(t, adminClient, ts.URL, "alice", "pass1234")
+
+	// Initially alice is non-admin: /api/admin/users returns 403.
+	uRes0, _ := aliceClient.Get(ts.URL + "/api/admin/users")
+	uRes0.Body.Close()
+	if uRes0.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin, got %d", uRes0.StatusCode)
+	}
+
+	// Admin promotes alice -> 200 and alice immediately gets admin access.
+	promRes, err := adminClient.Post(ts.URL+"/api/admin/users/alice/role", "application/json", strings.NewReader(`{"role":"admin"}`))
+	if err != nil {
+		t.Fatalf("promote alice: %v", err)
+	}
+	promRes.Body.Close()
+	if promRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 promote, got %d", promRes.StatusCode)
+	}
+
+	uRes1, _ := aliceClient.Get(ts.URL + "/api/admin/users")
+	uRes1.Body.Close()
+	if uRes1.StatusCode != http.StatusOK {
+		t.Fatalf("expected promoted alice to get 200 on /api/admin/users, got %d", uRes1.StatusCode)
+	}
+
+	// Selectable users lists active users cleanly.
+	selRes, err := aliceClient.Get(ts.URL + "/api/users/selectable")
+	if err != nil {
+		t.Fatalf("GET /api/users/selectable: %v", err)
+	}
+	var selOut struct {
+		Users []auth.PublicUser `json:"users"`
+	}
+	_ = json.NewDecoder(selRes.Body).Decode(&selOut)
+	selRes.Body.Close()
+	if selRes.StatusCode != http.StatusOK || len(selOut.Users) < 2 {
+		t.Fatalf("unexpected selectable users: status=%d out=%+v", selRes.StatusCode, selOut)
+	}
+
+	// Admin revokes alice's admin role -> 200 and alice gets 403 again.
+	demRes, err := adminClient.Post(ts.URL+"/api/admin/users/alice/role", "application/json", strings.NewReader(`{"role":"user"}`))
+	if err != nil {
+		t.Fatalf("demote alice: %v", err)
+	}
+	demRes.Body.Close()
+	if demRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 demote, got %d", demRes.StatusCode)
+	}
+
+	uRes2, _ := aliceClient.Get(ts.URL + "/api/admin/users")
+	uRes2.Body.Close()
+	if uRes2.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected demoted alice to get 403 on /api/admin/users, got %d", uRes2.StatusCode)
+	}
+}
+
+func TestFileVisibilityAndDeletePermissions(t *testing.T) {
+	srv, ts := newTestServer(t)
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+	aliceClient := registerAndLoginTestUser(t, adminClient, ts.URL, "alice", "pass1234")
+	bobClient := registerAndLoginTestUser(t, adminClient, ts.URL, "bob", "pass1234")
+	carolClient := registerAndLoginTestUser(t, adminClient, ts.URL, "carol", "pass1234")
+
+	// Alice uploads a file visible only to ["bob"].
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("allowed_users", `["bob"]`)
+	fw, _ := mw.CreateFormFile("files", "secret-for-bob.txt")
+	_, _ = io.WriteString(fw, "confidential-bob-only")
+	_ = mw.Close()
+
+	upRes, err := aliceClient.Post(ts.URL+"/api/upload", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatalf("alice upload: %v", err)
+	}
+	var upOut struct {
+		Uploaded []storage.FileRecord `json:"uploaded"`
+	}
+	_ = json.NewDecoder(upRes.Body).Decode(&upOut)
+	upRes.Body.Close()
+	if upRes.StatusCode != http.StatusCreated || len(upOut.Uploaded) != 1 {
+		t.Fatalf("expected 201 upload, got %d out=%+v", upRes.StatusCode, upOut)
+	}
+	if upOut.Uploaded[0].StorageDir != "" {
+		t.Fatalf("expected non-admin upload response to omit storage_dir, got %q", upOut.Uploaded[0].StorageDir)
+	}
+	fileID := upOut.Uploaded[0].ID
+
+	// Bob sees it in /api/files and /api/summary, can download & preview, CANNOT delete (403) or change access (403), and does NOT see storage paths.
+	bobFilesRes, _ := bobClient.Get(ts.URL + "/api/files")
+	var bobFiles struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(bobFilesRes.Body).Decode(&bobFiles)
+	bobFilesRes.Body.Close()
+	if len(bobFiles.Files) != 1 || bobFiles.Files[0].ID != fileID || bobFiles.Files[0].StorageDir != "" {
+		t.Fatalf("unexpected bob /api/files: %+v", bobFiles.Files)
+	}
+
+	bobDlRes, _ := bobClient.Get(ts.URL + "/api/files/" + fileID + "/download")
+	bobDlBytes, _ := io.ReadAll(bobDlRes.Body)
+	bobDlRes.Body.Close()
+	if bobDlRes.StatusCode != http.StatusOK || string(bobDlBytes) != "confidential-bob-only" {
+		t.Fatalf("bob download failed: status=%d body=%q", bobDlRes.StatusCode, string(bobDlBytes))
+	}
+
+	bobMetaRes, _ := bobClient.Get(ts.URL + "/api/files/" + fileID + "/meta")
+	var bobMeta map[string]any
+	_ = json.NewDecoder(bobMetaRes.Body).Decode(&bobMeta)
+	bobMetaRes.Body.Close()
+	if bobMetaRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 bob meta, got %d", bobMetaRes.StatusCode)
+	}
+	if _, hasDisk := bobMeta["disk_path"]; hasDisk {
+		t.Fatalf("non-admin meta must NOT include disk_path: %+v", bobMeta)
+	}
+
+	bobDelReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/files/"+fileID, nil)
+	bobDelRes, _ := bobClient.Do(bobDelReq)
+	bobDelRes.Body.Close()
+	if bobDelRes.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-uploader bob deletes file, got %d", bobDelRes.StatusCode)
+	}
+
+	bobAclRes, _ := bobClient.Post(ts.URL+"/api/files/"+fileID+"/access", "application/json", strings.NewReader(`{"allowed_users":[]}`))
+	bobAclRes.Body.Close()
+	if bobAclRes.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 when non-uploader bob edits access, got %d", bobAclRes.StatusCode)
+	}
+
+	// Non-admin /api/cluster must hide storage_dir and drives.
+	bobClRes, _ := bobClient.Get(ts.URL + "/api/cluster")
+	var bobCl struct {
+		Pool cluster.PoolSummary `json:"pool"`
+	}
+	_ = json.NewDecoder(bobClRes.Body).Decode(&bobCl)
+	bobClRes.Body.Close()
+	if len(bobCl.Pool.Nodes) == 0 || bobCl.Pool.Nodes[0].StorageDir != "" || len(bobCl.Pool.Nodes[0].Drives) != 0 {
+		t.Fatalf("non-admin /api/cluster must hide storage_dir & drives: %+v", bobCl.Pool.Nodes)
+	}
+
+	// Carol is NOT authorized: hidden in /api/files & /api/summary, and gets 404 everywhere.
+	carolFilesRes, _ := carolClient.Get(ts.URL + "/api/files")
+	var carolFiles struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(carolFilesRes.Body).Decode(&carolFiles)
+	carolFilesRes.Body.Close()
+	if len(carolFiles.Files) != 0 {
+		t.Fatalf("expected carol to see 0 hidden files, got %+v", carolFiles.Files)
+	}
+
+	carolSumRes, _ := carolClient.Get(ts.URL + "/api/summary")
+	var carolSum storage.SummaryResponse
+	_ = json.NewDecoder(carolSumRes.Body).Decode(&carolSum)
+	carolSumRes.Body.Close()
+	if carolSum.TotalCount != 0 {
+		t.Fatalf("expected carol summary count=0, got %+v", carolSum)
+	}
+
+	for _, endpoint := range []string{
+		"/api/files/" + fileID + "/download",
+		"/api/files/" + fileID + "/raw",
+		"/api/files/" + fileID + "/preview",
+		"/api/files/" + fileID + "/meta",
+		"/api/files/" + fileID + "/archive-entry?path=a",
+	} {
+		r404, _ := carolClient.Get(ts.URL + endpoint)
+		r404.Body.Close()
+		if r404.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404 for unauthorized carol on %s, got %d", endpoint, r404.StatusCode)
+		}
+	}
+
+	// Admin CAN see the file AND gets physical disk_path in /meta AND can inspect storage_dir in /api/cluster.
+	admMetaRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/meta")
+	var admMeta map[string]any
+	_ = json.NewDecoder(admMetaRes.Body).Decode(&admMeta)
+	admMetaRes.Body.Close()
+	if admMetaRes.StatusCode != http.StatusOK || admMeta["disk_path"] == "" || admMeta["storage_dir"] == "" {
+		t.Fatalf("expected admin meta to include disk_path & storage_dir, got status=%d out=%+v", admMetaRes.StatusCode, admMeta)
+	}
+
+	// Uploader Alice grants Carol access too -> Carol now sees it.
+	grantRes, _ := aliceClient.Post(ts.URL+"/api/files/"+fileID+"/access", "application/json", strings.NewReader(`{"allowed_users":["bob","carol"]}`))
+	grantRes.Body.Close()
+	if grantRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 when uploader updates access, got %d", grantRes.StatusCode)
+	}
+	carolAfterRes, _ := carolClient.Get(ts.URL + "/api/files")
+	var carolAfter struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(carolAfterRes.Body).Decode(&carolAfter)
+	carolAfterRes.Body.Close()
+	if len(carolAfter.Files) != 1 || carolAfter.Files[0].ID != fileID {
+		t.Fatalf("expected carol to see file after grant, got %+v", carolAfter.Files)
+	}
+
+	// Admin deletes file -> succeeds (200).
+	admDelReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/files/"+fileID, nil)
+	admDelRes, _ := adminClient.Do(admDelReq)
+	admDelRes.Body.Close()
+	if admDelRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 when admin deletes file, got %d", admDelRes.StatusCode)
+	}
+}
+
+func TestAdminStorageDirSwitchAndMigration(t *testing.T) {
+	srv, ts := newTestServer(t)
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+	userClient := registerAndLoginTestUser(t, adminClient, ts.URL, "worker_u", "pass1234")
+
+	// Upload one file first.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("files", "move-me.txt")
+	_, _ = io.WriteString(fw, "migrated-payload")
+	_ = mw.Close()
+	upRes, _ := adminClient.Post(ts.URL+"/api/upload", mw.FormDataContentType(), &buf)
+	var upOut struct {
+		Uploaded []storage.FileRecord `json:"uploaded"`
+	}
+	_ = json.NewDecoder(upRes.Body).Decode(&upOut)
+	upRes.Body.Close()
+	fileID := upOut.Uploaded[0].ID
+
+	newDriveDir := filepath.Join(t.TempDir(), "D-LFH-Storage")
+	bodyBytes, _ := json.Marshal(map[string]any{
+		"node_id":          srv.cluster.NodeID(),
+		"storage_dir":      newDriveDir,
+		"migrate_existing": true,
+	})
+
+	// Non-admin gets 403.
+	forbRes, _ := userClient.Post(ts.URL+"/api/admin/cluster/storage-dir", "application/json", bytes.NewReader(bodyBytes))
+	forbRes.Body.Close()
+	if forbRes.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin storage-dir change, got %d", forbRes.StatusCode)
+	}
+
+	// Admin switches storage dir and migrates existing file.
+	swRes, err := adminClient.Post(ts.URL+"/api/admin/cluster/storage-dir", "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("POST /api/admin/cluster/storage-dir: %v", err)
+	}
+	var swOut struct {
+		Node       cluster.NodeStatus  `json:"node"`
+		MovedCount int                 `json:"moved_count"`
+		Pool       cluster.PoolSummary `json:"pool"`
+	}
+	_ = json.NewDecoder(swRes.Body).Decode(&swOut)
+	swRes.Body.Close()
+	if swRes.StatusCode != http.StatusOK || swOut.MovedCount != 1 || swOut.Node.StorageDir != newDriveDir {
+		t.Fatalf("unexpected storage-dir response: status=%d out=%+v", swRes.StatusCode, swOut)
+	}
+
+	// Verify /meta reports new physical disk_path inside newDriveDir and download still serves exact payload.
+	metaRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/meta")
+	var metaOut struct {
+		DiskPath   string `json:"disk_path"`
+		StorageDir string `json:"storage_dir"`
+	}
+	_ = json.NewDecoder(metaRes.Body).Decode(&metaOut)
+	metaRes.Body.Close()
+	if metaOut.StorageDir != newDriveDir || filepath.Dir(metaOut.DiskPath) != newDriveDir {
+		t.Fatalf("expected migrated disk_path under %q, got %+v", newDriveDir, metaOut)
+	}
+	if _, err := os.Stat(metaOut.DiskPath); err != nil {
+		t.Fatalf("migrated file missing on disk at %q: %v", metaOut.DiskPath, err)
+	}
+
+	dlRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/download")
+	dlBytes, _ := io.ReadAll(dlRes.Body)
+	dlRes.Body.Close()
+	if dlRes.StatusCode != http.StatusOK || string(dlBytes) != "migrated-payload" {
+		t.Fatalf("download after migration failed: status=%d body=%q", dlRes.StatusCode, string(dlBytes))
 	}
 }

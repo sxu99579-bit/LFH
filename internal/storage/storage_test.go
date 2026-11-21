@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -124,5 +126,94 @@ func TestStoreSaveListSummaryDelete(t *testing.T) {
 	}
 	if len(st.List("", "", "", "", "")) != 1 {
 		t.Fatalf("expected 1 file after delete")
+	}
+}
+
+func TestStorageACLAndUploadDirMigration(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := NewStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	dev := DeviceInfo{FP: "FP-1", Name: "PC", IP: "127.0.0.1"}
+
+	pubRec, err := st.SaveUploadWithOptions("public.txt", "", "alice", nil, dev, strings.NewReader("pub"))
+	if err != nil {
+		t.Fatalf("SaveUploadWithOptions public: %v", err)
+	}
+	privRec, err := st.SaveUploadWithOptions("secret.txt", "", "alice", []string{" bob ", "bob", ""}, dev, strings.NewReader("secret-body"))
+	if err != nil {
+		t.Fatalf("SaveUploadWithOptions restricted: %v", err)
+	}
+	if len(privRec.AllowedUsers) != 1 || privRec.AllowedUsers[0] != "bob" {
+		t.Fatalf("expected normalized allowed_users=[bob], got %+v", privRec.AllowedUsers)
+	}
+
+	all := st.AllRecords()
+	if got := FilterAccessibleRecords(all, "carol", "user"); len(got) != 1 || got[0].ID != pubRec.ID {
+		t.Fatalf("expected carol to only see public file, got %+v", got)
+	}
+	if got := FilterAccessibleRecords(all, "bob", "user"); len(got) != 2 {
+		t.Fatalf("expected bob to see both files, got %+v", got)
+	}
+	if got := FilterAccessibleRecords(all, "alice", "user"); len(got) != 2 {
+		t.Fatalf("expected uploader alice to see both files, got %+v", got)
+	}
+	if got := FilterAccessibleRecords(all, "other_admin", "admin"); len(got) != 2 {
+		t.Fatalf("expected admin to see both files, got %+v", got)
+	}
+
+	// Update ACL via SetAllowedUsers.
+	updated, err := st.SetAllowedUsers(privRec.ID, []string{"carol", "bob"})
+	if err != nil {
+		t.Fatalf("SetAllowedUsers: %v", err)
+	}
+	if !CanUserAccess(updated, "carol", "user") {
+		t.Fatalf("expected carol to gain access after SetAllowedUsers")
+	}
+
+	// Switch storage dir WITHOUT migration: old files stay readable, new files go to new dir.
+	dir2 := filepath.Join(t.TempDir(), "drive-d", "LFH-Storage")
+	moved, err := st.SetUploadDir(dir2, false)
+	if err != nil || moved != 0 {
+		t.Fatalf("SetUploadDir without migrate: moved=%d err=%v", moved, err)
+	}
+	if st.UploadDir() != dir2 {
+		t.Fatalf("expected UploadDir=%q, got %q", dir2, st.UploadDir())
+	}
+	if _, privDisk, ok := st.Get(privRec.ID); !ok || filepath.Dir(privDisk) != filepath.Join(dataDir, "uploads") {
+		t.Fatalf("expected unmigrated file to remain readable at old dir, ok=%v path=%q", ok, privDisk)
+	}
+	newRec, err := st.SaveUploadWithOptions("in-d.txt", "", "alice", nil, dev, strings.NewReader("in-d"))
+	if err != nil {
+		t.Fatalf("SaveUploadWithOptions in dir2: %v", err)
+	}
+	if newRec.StorageDir != dir2 {
+		t.Fatalf("expected new file StorageDir=%q, got %q", dir2, newRec.StorageDir)
+	}
+
+	// Switch storage dir WITH migration: moves all records to dir3.
+	dir3 := filepath.Join(t.TempDir(), "drive-e", "LFH-Storage")
+	moved3, err := st.SetUploadDir(dir3, true)
+	if err != nil || moved3 != 3 {
+		t.Fatalf("SetUploadDir with migrate: moved=%d err=%v", moved3, err)
+	}
+	for _, id := range []string{pubRec.ID, privRec.ID, newRec.ID} {
+		rec, p, ok := st.Get(id)
+		if !ok || rec.StorageDir != dir3 || filepath.Dir(p) != dir3 {
+			t.Fatalf("expected migrated file %s in %s, got ok=%v rec.StorageDir=%q path=%q", id, dir3, ok, rec.StorageDir, p)
+		}
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Fatalf("migrated file missing on disk at %q: %v", p, statErr)
+		}
+	}
+
+	// Reload store cleanly from disk and verify migrated files remain indexed.
+	reloaded, err := NewStore(dataDir)
+	if err != nil {
+		t.Fatalf("reload NewStore: %v", err)
+	}
+	if len(reloaded.AllRecords()) != 3 {
+		t.Fatalf("expected 3 records after reload across custom StorageDir, got %d", len(reloaded.AllRecords()))
 	}
 }

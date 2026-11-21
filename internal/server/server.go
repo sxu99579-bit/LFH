@@ -174,7 +174,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/cluster/files/{id}/meta", s.requireClusterAuth(s.handleClusterMeta))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/archive-entry", s.requireClusterAuth(s.handleClusterArchiveEntry))
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}", s.requireClusterAuth(s.handleClusterDelete))
+	mux.HandleFunc("POST /internal/cluster/files/{id}/access", s.requireClusterAuth(s.handleClusterUpdateAccess))
 	mux.HandleFunc("POST /internal/cluster/quota", s.requireClusterAuth(s.handleClusterSetQuota))
+	mux.HandleFunc("POST /internal/cluster/storage-dir", s.requireClusterAuth(s.handleClusterSetStorageDir))
 
 	// Public & user-facing endpoints
 	mux.HandleFunc("GET /api/info", s.handleInfo)
@@ -185,12 +187,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/password", s.requireAuth(s.handleChangePassword))
 
 	mux.HandleFunc("GET /api/cluster", s.requireAuth(s.handleGetCluster))
+	mux.HandleFunc("GET /api/users/selectable", s.requireAuth(s.handleListSelectableUsers))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
+	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
 	mux.HandleFunc("POST /api/admin/cluster/endpoint", s.requireAdmin(s.handleAdminClusterEndpoint))
 	mux.HandleFunc("GET /api/admin/settings", s.requireAdmin(s.handleGetAdminSettings))
 	mux.HandleFunc("POST /api/admin/settings", s.requireAdmin(s.handleUpdateAdminSettings))
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.handleListUsers))
 	mux.HandleFunc("POST /api/admin/users/{username}/approve", s.requireAdmin(s.handleApproveUser))
+	mux.HandleFunc("POST /api/admin/users/{username}/role", s.requireAdmin(s.handleSetUserRole))
 	mux.HandleFunc("POST /api/admin/users/{username}/ban", s.requireAdmin(s.handleBanUser))
 	mux.HandleFunc("POST /api/admin/users/{username}/unban", s.requireAdmin(s.handleUnbanUser))
 	mux.HandleFunc("DELETE /api/admin/users/{username}", s.requireAdmin(s.handleDeleteUser))
@@ -211,6 +216,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.handlePreview))
 	mux.HandleFunc("GET /api/files/{id}/meta", s.requireAuth(s.handleFileMeta))
 	mux.HandleFunc("GET /api/files/{id}/archive-entry", s.requireAuth(s.handleArchiveEntry))
+	mux.HandleFunc("POST /api/files/{id}/access", s.requireAuth(s.handleUpdateFileAccess))
 	mux.HandleFunc("POST /api/files/{id}/extract", s.requireAuth(s.handleExtractArchive))
 	mux.HandleFunc("DELETE /api/files/{id}", s.requireAuth(s.handleDelete))
 
@@ -346,7 +352,8 @@ func (s *Server) handleClusterUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取上传文件失败"})
 		return
 	}
-	rec, saveErr := s.store.SaveUploadWithFolder(fh.Filename, folderPath, uploader, dev, f)
+	allowedUsers := parseAllowedUsersForm(r.MultipartForm.Value["allowed_users"])
+	rec, saveErr := s.store.SaveUploadWithOptions(fh.Filename, folderPath, uploader, allowedUsers, dev, f)
 	_ = f.Close()
 	if saveErr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存文件失败: " + saveErr.Error()})
@@ -374,7 +381,8 @@ func (s *Server) handleClusterPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClusterMeta(w http.ResponseWriter, r *http.Request) {
-	s.serveFileMeta(w, r.PathValue("id"))
+	includePath := r.URL.Query().Get("include_path") == "1"
+	s.serveFileMeta(w, r.PathValue("id"), includePath)
 }
 
 func (s *Server) handleClusterArchiveEntry(w http.ResponseWriter, r *http.Request) {
@@ -431,6 +439,44 @@ func (s *Server) handleClusterSetQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+func (s *Server) handleClusterSetStorageDir(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		StorageDir      string `json:"storage_dir"`
+		MigrateExisting bool   `json:"migrate_existing"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	st, moved, err := s.cluster.SetLocalStorageDir(req.StorageDir, req.MigrateExisting)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node":        st,
+		"moved_count": moved,
+	})
+}
+
+func (s *Server) handleClusterUpdateAccess(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AllowedUsers []string `json:"allowed_users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	rec, err := s.store.SetAllowedUsers(r.PathValue("id"), req.AllowedUsers)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // ==================== Public & Entry Handlers ====================
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -441,7 +487,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"local_url":       "http://localhost:" + s.Port(),
 		"role":            s.cluster.Role(),
 		"invite_required": s.auth.Settings().InviteRequired,
-		"pool":            s.cluster.PoolSummary(),
+		"pool":            s.cluster.PoolSummaryForRole(false),
 	})
 }
 
@@ -523,7 +569,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			"allowed_exts": settings.AllowedExts,
 			"blocked_exts": settings.BlockedExts,
 		},
-		"pool": s.cluster.PoolSummary(),
+		"pool": s.cluster.PoolSummaryForRole(u.Role == "admin"),
 	}
 	if u.Role == "admin" {
 		resp["pending_users"] = s.auth.PendingCount()
@@ -621,7 +667,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	port := s.Port()
 	resp := map[string]any{
-		"pool":           s.cluster.PoolSummary(),
+		"pool":           s.cluster.PoolSummaryForRole(u.Role == "admin"),
 		"cluster_secret": "",
 		"events_version": s.events.Version(),
 	}
@@ -632,6 +678,38 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request, u auth
 		resp["available_addrs"] = DiscoverNetworkAddrs(port)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleListSelectableUsers(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"users": s.auth.ListActiveUsers(),
+	})
+}
+
+func (s *Server) handleAdminClusterStorageDir(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID          string `json:"node_id"`
+		StorageDir      string `json:"storage_dir"`
+		MigrateExisting bool   `json:"migrate_existing"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	updated, moved, err := s.cluster.UpdateNodeStorageDir(req.NodeID, req.StorageDir, req.MigrateExisting)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: updated.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node":        updated,
+		"moved_count": moved,
+		"pool":        s.cluster.PoolSummaryForRole(true),
+	})
 }
 
 func (s *Server) handleAdminClusterQuota(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
@@ -652,7 +730,7 @@ func (s *Server) handleAdminClusterQuota(w http.ResponseWriter, r *http.Request,
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node": updated,
-		"pool": s.cluster.PoolSummary(),
+		"pool": s.cluster.PoolSummaryForRole(true),
 	})
 }
 
@@ -711,7 +789,7 @@ func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Reque
 		"expose_ip":    cleanIP,
 		"port":         newPort,
 		"port_changed": portChanged,
-		"pool":         s.cluster.PoolSummary(),
+		"pool":         s.cluster.PoolSummaryForRole(true),
 	})
 }
 
@@ -763,6 +841,30 @@ func (s *Server) handleApproveUser(w http.ResponseWriter, r *http.Request, u aut
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":          approved,
+		"pending_count": s.auth.PendingCount(),
+	})
+}
+
+func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	target := r.PathValue("username")
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	updated, err := s.auth.SetUserRole(u.Username, target, req.Role)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "role_change",
+		Uploader: target,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":          updated,
 		"pending_count": s.auth.PendingCount(),
 	})
 }
@@ -834,10 +936,77 @@ func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request, u au
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func parseAllowedUsersForm(vals []string) []string {
+	var out []string
+	for _, raw := range vals {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if strings.HasPrefix(s, "[") {
+			var parsed []string
+			if json.Unmarshal([]byte(s), &parsed) == nil {
+				out = append(out, parsed...)
+				continue
+			}
+		}
+		parts := strings.FieldsFunc(s, func(r rune) bool {
+			return r == ',' || r == '，'
+		})
+		out = append(out, parts...)
+	}
+	return storage.NormalizeAllowedUsers(out)
+}
+
+func (s *Server) sanitizeRecordForUser(rec storage.FileRecord, u auth.PublicUser) storage.FileRecord {
+	if u.Role != "admin" {
+		rec.StorageDir = ""
+	}
+	return rec
+}
+
+func (s *Server) sanitizeRecordsForUser(recs []storage.FileRecord, u auth.PublicUser) []storage.FileRecord {
+	if u.Role == "admin" {
+		return recs
+	}
+	out := make([]storage.FileRecord, len(recs))
+	for i, rec := range recs {
+		rec.StorageDir = ""
+		out[i] = rec
+	}
+	return out
+}
+
+func (s *Server) findAccessibleFile(id string, u auth.PublicUser) (rec storage.FileRecord, localPath string, peer cluster.NodeStatus, isLocal bool, status int, errMsg string) {
+	if rLocal, fp, ok := s.store.Get(id); ok {
+		rLocal.NodeID = s.cluster.NodeID()
+		rLocal.NodeName = s.cluster.NodeName()
+		rLocal.NodeOS = runtime.GOOS
+		rLocal.NodeOnline = true
+		rLocal.StorageDir = s.store.RecordDir(rLocal)
+		if !storage.CanUserAccess(rLocal, u.Username, u.Role) {
+			return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在或无权访问"
+		}
+		return rLocal, fp, cluster.NodeStatus{}, true, http.StatusOK, ""
+	}
+	rPeer, p, ok := s.cluster.LocateFile(id)
+	if !ok {
+		return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在"
+	}
+	if !storage.CanUserAccess(rPeer, u.Username, u.Role) {
+		return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在或无权访问"
+	}
+	if !p.Online {
+		return rPeer, "", p, false, http.StatusServiceUnavailable, "该文件所在节点当前离线，请开机后重试"
+	}
+	return rPeer, "", p, false, http.StatusOK, ""
+}
+
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	q := r.URL.Query()
+	accessible := storage.FilterAccessibleRecords(s.cluster.AllClusterFiles(), u.Username, u.Role)
 	list := storage.FilterRecords(
-		s.cluster.AllClusterFiles(),
+		accessible,
 		q.Get("category"),
 		q.Get("month"),
 		q.Get("date"),
@@ -845,13 +1014,14 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, u auth.
 		q.Get("node"),
 		q.Get("q"),
 	)
-	writeJSON(w, http.StatusOK, map[string]any{"files": list})
+	writeJSON(w, http.StatusOK, map[string]any{"files": s.sanitizeRecordsForUser(list, u)})
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	q := r.URL.Query()
+	accessible := storage.FilterAccessibleRecords(s.cluster.AllClusterFiles(), u.Username, u.Role)
 	sum := storage.SummarizeRecords(
-		s.cluster.AllClusterFiles(),
+		accessible,
 		q.Get("category"),
 		q.Get("month"),
 		q.Get("node"),
@@ -876,6 +1046,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 	}
 	if len(headers) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未收到任何文件"})
+		return
+	}
+
+	rawAllowed := parseAllowedUsersForm(r.MultipartForm.Value["allowed_users"])
+	allowedUsers, userErr := s.auth.ValidateExistingUsers(rawAllowed)
+	if userErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
 		return
 	}
 
@@ -925,7 +1102,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 				writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": capErr.Error()})
 				return
 			}
-			rec, saveErr := s.store.SaveUploadWithFolder(fh.Filename, folderPath, u.Username, dev, f)
+			rec, saveErr := s.store.SaveUploadWithOptions(fh.Filename, folderPath, u.Username, allowedUsers, dev, f)
 			_ = f.Close()
 			if saveErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存文件失败: " + saveErr.Error()})
@@ -937,7 +1114,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 			rec.NodeOnline = true
 			uploaded = append(uploaded, rec)
 		} else {
-			rec, proxyErr := s.cluster.ProxyUpload(target, fh.Filename, folderPath, f, u.Username, dev)
+			rec, proxyErr := s.cluster.ProxyUpload(target, fh.Filename, folderPath, f, u.Username, allowedUsers, dev)
 			_ = f.Close()
 			if proxyErr != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": proxyErr.Error()})
@@ -946,23 +1123,23 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 			uploaded = append(uploaded, rec)
 		}
 	}
-	s.publishRecordChange("upload", u.Username, uploaded)
-	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": uploaded})
+	s.publishRecordChange("upload", u.Username, uploaded, allowedUsers)
+	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": s.sanitizeRecordsForUser(uploaded, u)})
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	if _, _, ok := s.store.Get(id); ok {
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		if status == http.StatusNotFound {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, errMsg, status)
+		}
+		return
+	}
+	if isLocal {
 		s.serveFileAttachment(w, r, id)
-		return
-	}
-	_, peer, ok := s.cluster.LocateFile(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	if !peer.Online {
-		http.Error(w, "该文件所在节点当前离线，请开机后重试", http.StatusServiceUnavailable)
 		return
 	}
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/download")
@@ -970,17 +1147,17 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, u auth.P
 
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	if _, _, ok := s.store.Get(id); ok {
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		if status == http.StatusNotFound {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, errMsg, status)
+		}
+		return
+	}
+	if isLocal {
 		s.serveFileRaw(w, r, id)
-		return
-	}
-	_, peer, ok := s.cluster.LocateFile(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	if !peer.Online {
-		http.Error(w, "该文件所在节点当前离线，请开机后重试", http.StatusServiceUnavailable)
 		return
 	}
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/raw")
@@ -988,17 +1165,13 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request, u auth.Public
 
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	if _, _, ok := s.store.Get(id); ok {
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if isLocal {
 		s.serveFilePreview(w, id)
-		return
-	}
-	_, peer, ok := s.cluster.LocateFile(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
-		return
-	}
-	if !peer.Online {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "该文件所在节点当前离线，请开机后重试"})
 		return
 	}
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/preview")
@@ -1006,38 +1179,71 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, u auth.Pu
 
 func (s *Server) handleFileMeta(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	if _, _, ok := s.store.Get(id); ok {
-		s.serveFileMeta(w, id)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
-	_, peer, ok := s.cluster.LocateFile(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+	includePath := u.Role == "admin"
+	if isLocal {
+		s.serveFileMeta(w, id, includePath)
 		return
 	}
-	if !peer.Online {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "该文件所在节点当前离线，请开机后重试"})
-		return
+	flag := "0"
+	if includePath {
+		flag = "1"
 	}
-	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/meta")
+	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/meta?include_path="+flag)
 }
 
 func (s *Server) handleArchiveEntry(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	if _, _, ok := s.store.Get(id); ok {
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if isLocal {
 		s.serveArchiveEntry(w, r, id)
 		return
 	}
-	_, peer, ok := s.cluster.LocateFile(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
-		return
-	}
-	if !peer.Online {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "该文件所在节点当前离线，请开机后重试"})
-		return
-	}
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/archive-entry")
+}
+
+func (s *Server) handleUpdateFileAccess(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	id := r.PathValue("id")
+	rec, _, _, _, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if u.Role != "admin" && rec.Uploader != u.Username {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅上传者或管理员可修改文件可见权限"})
+		return
+	}
+	var req struct {
+		AllowedUsers []string `json:"allowed_users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	cleanUsers, err := s.auth.ValidateExistingUsers(req.AllowedUsers)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	updated, err := s.cluster.UpdateFileAccess(id, cleanUsers)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "access",
+		Uploader: u.Username,
+		Count:    1,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"file": s.sanitizeRecordForUser(updated, u)})
 }
 
 func archiveBaseFolderName(name string) string {
@@ -1055,29 +1261,18 @@ func archiveBaseFolderName(name string) string {
 
 func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	var rec storage.FileRecord
-	var localPath string
+	rec, localPath, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
 	var cleanup func()
-
-	if rLocal, fp, ok := s.store.Get(id); ok {
-		rec = rLocal
-		localPath = fp
-	} else {
-		rPeer, peer, ok := s.cluster.LocateFile(id)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
-			return
-		}
-		if !peer.Online {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "该文件所在节点当前离线，请开机后重试"})
-			return
-		}
+	if !isLocal {
 		tmpPath, fn, err := s.cluster.FetchPeerFileToTemp(peer, id)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "读取远端压缩包失败: " + err.Error()})
 			return
 		}
-		rec = rPeer
 		localPath = tmpPath
 		cleanup = fn
 	}
@@ -1124,7 +1319,7 @@ func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u 
 				skipped = append(skipped, relPath+" ("+capErr.Error()+")")
 				return nil
 			}
-			saved, saveErr := s.store.SaveUploadWithFolder(base, targetFolder, u.Username, dev, rd)
+			saved, saveErr := s.store.SaveUploadWithOptions(base, targetFolder, u.Username, rec.AllowedUsers, dev, rd)
 			if saveErr != nil {
 				return saveErr
 			}
@@ -1134,7 +1329,7 @@ func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u 
 			saved.NodeOnline = true
 			extracted = append(extracted, saved)
 		} else {
-			saved, proxyErr := s.cluster.ProxyUpload(target, base, targetFolder, rd, u.Username, dev)
+			saved, proxyErr := s.cluster.ProxyUpload(target, base, targetFolder, rd, u.Username, rec.AllowedUsers, dev)
 			if proxyErr != nil {
 				return proxyErr
 			}
@@ -1147,63 +1342,58 @@ func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 
-	s.publishRecordChange("extract", u.Username, extracted)
+	s.publishRecordChange("extract", u.Username, extracted, rec.AllowedUsers)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"extracted": extracted,
+		"extracted": s.sanitizeRecordsForUser(extracted, u),
 		"skipped":   skipped,
 	})
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
-	if rec, _, ok := s.store.Get(id); ok {
-		if u.Role != "admin" && rec.Uploader != u.Username {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅上传者或管理员可删除该文件"})
-			return
-		}
-		if err := s.store.Delete(id); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		s.events.Publish(FileChangeEvent{
-			Kind:      "delete",
-			Uploader:  u.Username,
-			Count:     1,
-			FileNames: []string{rec.Name},
-			NodeName:  s.cluster.NodeName(),
-		})
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-		return
-	}
-
-	rec, peer, ok := s.cluster.LocateFile(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
 	if u.Role != "admin" && rec.Uploader != u.Username {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅上传者或管理员可删除该文件"})
 		return
 	}
-	if !peer.Online {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "该文件所在节点当前离线，请开机后重试"})
+
+	if isLocal {
+		if err := s.store.Delete(id); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		s.events.Publish(FileChangeEvent{
+			Kind:         "delete",
+			Uploader:     rec.Uploader,
+			Count:        1,
+			FileNames:    []string{rec.Name},
+			NodeName:     s.cluster.NodeName(),
+			AllowedUsers: rec.AllowedUsers,
+		})
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
+
 	if err := s.cluster.ProxyDelete(peer, id); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	s.events.Publish(FileChangeEvent{
-		Kind:      "delete",
-		Uploader:  u.Username,
-		Count:     1,
-		FileNames: []string{rec.Name},
-		NodeName:  rec.NodeName,
+		Kind:         "delete",
+		Uploader:     rec.Uploader,
+		Count:        1,
+		FileNames:    []string{rec.Name},
+		NodeName:     rec.NodeName,
+		AllowedUsers: rec.AllowedUsers,
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) publishRecordChange(kind, uploader string, recs []storage.FileRecord) {
+func (s *Server) publishRecordChange(kind, uploader string, recs []storage.FileRecord, allowedUsers []string) {
 	if len(recs) == 0 {
 		return
 	}
@@ -1218,11 +1408,12 @@ func (s *Server) publishRecordChange(kind, uploader string, recs []storage.FileR
 		}
 	}
 	s.events.Publish(FileChangeEvent{
-		Kind:      kind,
-		Uploader:  uploader,
-		Count:     len(recs),
-		FileNames: names,
-		NodeName:  nodeName,
+		Kind:         kind,
+		Uploader:     uploader,
+		Count:        len(recs),
+		FileNames:    names,
+		NodeName:     nodeName,
+		AllowedUsers: allowedUsers,
 	})
 }
 
@@ -1253,6 +1444,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, u auth.Pub
 		case <-s.events.Done():
 			return
 		case ev := <-ch:
+			if len(ev.AllowedUsers) > 0 && !storage.CanUserAccess(storage.FileRecord{Uploader: ev.Uploader, AllowedUsers: ev.AllowedUsers}, u.Username, u.Role) {
+				continue
+			}
 			b, err := json.Marshal(ev)
 			if err != nil {
 				continue
@@ -1367,7 +1561,7 @@ func (s *Server) serveFilePreview(w http.ResponseWriter, id string) {
 	}
 }
 
-func (s *Server) serveFileMeta(w http.ResponseWriter, id string) {
+func (s *Server) serveFileMeta(w http.ResponseWriter, id string, includePath bool) {
 	rec, fp, ok := s.store.Get(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
@@ -1378,6 +1572,11 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string) {
 		rec.NodeName = s.cluster.NodeName()
 		rec.NodeOS = runtime.GOOS
 		rec.NodeOnline = true
+	}
+	if includePath {
+		rec.StorageDir = filepath.Dir(fp)
+	} else {
+		rec.StorageDir = ""
 	}
 
 	ct := detectContentType(rec.Ext)
@@ -1415,6 +1614,10 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string) {
 		"sha256_skipped": shaSkipped,
 		"can_preview":    canPrev,
 		"is_archive":     isArch,
+	}
+	if includePath {
+		resp["disk_path"] = fp
+		resp["storage_dir"] = filepath.Dir(fp)
 	}
 	if isArch {
 		if archRes, err := preview.InspectArchive(fp, rec.Name); err == nil {

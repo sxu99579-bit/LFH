@@ -135,6 +135,7 @@ func main() {
 	exposeIP := flag.String("expose-ip", "", "Custom exposed IP or hostname (empty = auto primary LAN IP)")
 	secret := flag.String("secret", "", "Shared cluster secret")
 	entryHint := flag.String("entry", "", "Primary entry URL hint for worker mode")
+	storageDir := flag.String("storage-dir", "", "Custom directory/drive path for storing uploaded files")
 	nodeName := flag.String("name", "", "Custom display name for this node")
 	configPath := flag.String("config", "", "Seed cluster-config.json path")
 	discoveryPort := flag.Int("discovery-port", -1, "UDP discovery port (0 to disable)")
@@ -152,7 +153,7 @@ func main() {
 		updater.CleanupOldBinary(exe)
 	}
 
-	var portSet, quotaSet, exposeIPSet, discoverySet bool
+	var portSet, quotaSet, exposeIPSet, discoverySet, storageDirSet bool
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "port":
@@ -163,6 +164,8 @@ func main() {
 			exposeIPSet = true
 		case "discovery-port":
 			discoverySet = true
+		case "storage-dir":
+			storageDirSet = true
 		}
 	})
 
@@ -208,6 +211,8 @@ func main() {
 		Port:             *port,
 		PortSet:          portSet,
 		EntryHint:        *entryHint,
+		StorageDir:       *storageDir,
+		StorageDirSet:    storageDirSet,
 		DiscoveryPort:    *discoveryPort,
 		DiscoveryPortSet: discoverySet,
 	}
@@ -357,6 +362,7 @@ func main() {
 	fmt.Printf("%s %s 已启动:\n", version.AppName, version.Version)
 	fmt.Printf("  节点角色: %s (%s)\n", st.Role, st.NodeName)
 	fmt.Printf("  预留空间: %s\n", formatQuotaText(st.QuotaBytes))
+	fmt.Printf("  文件存储位置: %s\n", clusterMgr.StorageDir())
 	if st.Role == cluster.RoleEntry {
 		fmt.Printf("  唯一对外入口: %s\n", clusterMgr.EntryURL())
 		fmt.Printf("  本机访问: http://localhost:%s\n", listenPort)

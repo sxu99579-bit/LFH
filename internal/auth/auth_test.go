@@ -300,3 +300,66 @@ func TestUploadPolicySettings(t *testing.T) {
 		t.Fatalf("expected extensionless file rejected when whitelist active")
 	}
 }
+
+func TestSetUserRoleAndSafeguards(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManagerWithOptions(dir, InitOptions{AdminUser: "rootadmin", AdminPass: "pass1234"})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions: %v", err)
+	}
+	if err := mgr.SetInviteRequired(false); err != nil {
+		t.Fatalf("SetInviteRequired: %v", err)
+	}
+	if _, err := mgr.Register("alice", "pass1234", ""); err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	if _, err := mgr.Register("bob", "pass1234", ""); err != nil {
+		t.Fatalf("Register bob: %v", err)
+	}
+
+	// Pending user cannot be promoted.
+	if _, err := mgr.SetUserRole("rootadmin", "alice", "admin"); err == nil {
+		t.Fatalf("expected error promoting pending user")
+	}
+
+	if _, err := mgr.ApproveUser("alice"); err != nil {
+		t.Fatalf("ApproveUser alice: %v", err)
+	}
+
+	// Self role change must be rejected.
+	if _, err := mgr.SetUserRole("rootadmin", "rootadmin", "user"); err == nil {
+		t.Fatalf("expected error modifying own role")
+	}
+
+	// ListActiveUsers excludes pending bob.
+	active := mgr.ListActiveUsers()
+	if len(active) != 2 || active[0].Username != "alice" || active[1].Username != "rootadmin" {
+		t.Fatalf("unexpected ListActiveUsers: %+v", active)
+	}
+
+	// Promote alice to admin.
+	promoted, err := mgr.SetUserRole("rootadmin", "alice", "admin")
+	if err != nil || promoted.Role != "admin" {
+		t.Fatalf("promote alice failed: err=%v user=%+v", err, promoted)
+	}
+
+	// alice can now demote rootadmin because alice is also an active admin, leaving 1 admin.
+	demotedRoot, err := mgr.SetUserRole("alice", "rootadmin", "user")
+	if err != nil || demotedRoot.Role != "user" {
+		t.Fatalf("alice demoting rootadmin failed: err=%v user=%+v", err, demotedRoot)
+	}
+
+	// rootadmin is no longer admin, and alice is the last active admin -> demoting alice must fail if someone tried.
+	if _, err := mgr.SetUserRole("rootadmin", "alice", "user"); err == nil {
+		t.Fatalf("expected error demoting last active admin")
+	}
+
+	// ValidateExistingUsers normalizes & rejects unknown usernames.
+	valid, err := mgr.ValidateExistingUsers([]string{" alice ", "alice", "rootadmin"})
+	if err != nil || len(valid) != 2 || valid[0] != "alice" || valid[1] != "rootadmin" {
+		t.Fatalf("unexpected ValidateExistingUsers result: valid=%+v err=%v", valid, err)
+	}
+	if _, err := mgr.ValidateExistingUsers([]string{"alice", "ghost"}); err == nil {
+		t.Fatalf("expected error for unknown username")
+	}
+}

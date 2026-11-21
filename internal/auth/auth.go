@@ -566,6 +566,95 @@ func (m *Manager) DeleteUser(actorUsername, targetUsername string) error {
 	return m.saveLocked()
 }
 
+// SetUserRole promotes an active user to admin or revokes admin privileges back to regular user.
+func (m *Manager) SetUserRole(actorUsername, targetUsername, role string) (PublicUser, error) {
+	actor := strings.TrimSpace(actorUsername)
+	target := strings.TrimSpace(targetUsername)
+	nextRole := strings.ToLower(strings.TrimSpace(role))
+	if nextRole != "admin" && nextRole != "user" {
+		return PublicUser{}, errors.New("无效的角色类型")
+	}
+	if target == "" {
+		return PublicUser{}, errors.New("目标用户名不能为空")
+	}
+	if target == actor {
+		return PublicUser{}, errors.New("不能修改当前登录账号的管理员权限")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	u, ok := m.users[target]
+	if !ok {
+		return PublicUser{}, errors.New("用户不存在")
+	}
+	if nextRole == "admin" && u.Status != "" && u.Status != StatusActive {
+		return PublicUser{}, errors.New("仅可为正常状态的账号授予管理员权限")
+	}
+	if u.Role == "admin" && nextRole != "admin" {
+		activeAdmins := 0
+		for _, item := range m.users {
+			if item.Role == "admin" && (item.Status == "" || item.Status == StatusActive) {
+				activeAdmins++
+			}
+		}
+		if activeAdmins <= 1 {
+			return PublicUser{}, errors.New("系统至少需保留一名有效管理员")
+		}
+	}
+
+	u.Role = nextRole
+	m.users[target] = u
+	if err := m.saveLocked(); err != nil {
+		return PublicUser{}, err
+	}
+	return toPublicUser(u), nil
+}
+
+// ListActiveUsers returns all active accounts sorted by username for file access selection.
+func (m *Manager) ListActiveUsers() []PublicUser {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]PublicUser, 0, len(m.users))
+	for _, u := range m.users {
+		if u.Status != "" && u.Status != StatusActive {
+			continue
+		}
+		out = append(out, toPublicUser(u))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Username < out[j].Username
+	})
+	return out
+}
+
+// ValidateExistingUsers normalizes, deduplicates, and verifies that each username exists.
+func (m *Manager) ValidateExistingUsers(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" || seen[name] {
+			continue
+		}
+		if _, ok := m.users[name]; !ok {
+			return nil, errors.New("指定的用户不存在: " + name)
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
 func (m *Manager) CreateInvite(createdBy, customCode, note string, maxUses int, expireHours int) (InviteCode, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

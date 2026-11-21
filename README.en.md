@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.2</code>
 </p>
 
 ---
@@ -23,11 +23,12 @@ Ships as a single binary with zero database setup required—ready for both Dock
 - **Heterogeneous LAN Clustering (`entry` / `worker`)**: Automatically discovers peer nodes over LAN UDP broadcast, honors per-node customizable storage quotas (e.g. `500MB`, `10GB`, `1.5TB`), routes uploads automatically by available capacity, and presents one unified entry URL.
 - **Instant Drag-and-Drop & Folder Structure**: Drop individual files, entire directory trees, or archives directly into the workspace with real-time progress and configurable extension allow/deny policies.
 - **Three Views & Live Auto-Refresh**: Switch cleanly between **List**, Windows Explorer-style **Grid**, and **Chart** views. Powered by Server-Sent Events (SSE), new uploads appear across connected clients automatically without page reloads.
-- **Online Preview & Detailed File Properties**: Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser. Open **Properties** on any file to inspect exact byte size, MIME type, on-demand SHA-256 checksum (up to 256 MB), storage node location, and uploader device fingerprint.
-- **Access Control & Role Isolation**:
+- **Online Preview & Detailed File Properties**: Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser. Open **Properties** on any file to inspect exact byte size, MIME type, on-demand SHA-256 checksum (up to 256 MB), visibility scope, storage node location, and uploader device fingerprint—plus exact physical disk path for administrators.
+- **Fine-Grained Access Control & Role Governance**:
   - Generates unique random initial admin credentials (`lfh_xxxxxx` + 12-character password) per fresh installation and saves a copy to `initial-admin.txt`, avoiding duplicate default passwords across hosts.
-  - Supports both invite-code registration and admin-approval registration, alongside user banning and removal.
-  - Standard users only see Appearance and Account panels in Settings; storage node routing overrides and cluster administration controls stay strictly hidden and enforced server-side.
+  - Administrators can **grant or revoke admin privileges** for active accounts directly in User Management (with built-in self-modification and last-admin protection).
+  - **Designated User Visibility & Owner/Admin Deletion**: Restrict uploaded files to selected system users—unauthorized users never see them in file lists, charts, SSE notifications, or download/preview endpoints. Only **admins and the original uploader** may delete files or update visibility; other authorized recipients have read/download access only.
+  - Standard users only see Appearance and Account settings. Storage drive selection, physical directory migration across disks, and server disk paths stay strictly hidden and accessible to administrators only.
 - **Light & Dark Themes across All Screens**: Polished light and dark themes with responsive layouts tuned for desktop, tablet, and mobile viewports.
 - **Zero-Downtime GitHub Self-Updater**: Checks the configured GitHub repository (`sxu99579-bit/LFH`) for new releases, verifies downloads, and swaps the running binary via graceful handoff.
 
@@ -60,7 +61,7 @@ Your generated initial credentials are also written to `./lfh-data/initial-admin
 Manual `docker build` / `docker run` equivalent:
 
 ```bash
-docker build -t lfh:V0.11.21 .
+docker build -t lfh:V0.11.21.2 .
 
 docker run -d \
   --name lfh \
@@ -68,7 +69,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/lfh-data:/data \
-  lfh:V0.11.21 -data /data -port 8080 -expose-ip 192.168.1.100
+  lfh:V0.11.21.2 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---
@@ -112,6 +113,7 @@ Copy [`cluster-config.example.json`](./cluster-config.example.json) to `cluster-
 | `-data` | `./data` | Data directory for users, metadata, uploads, and credentials |
 | `-role` | `entry` | Cluster node role: `entry` or `worker` |
 | `-quota` | auto | Reserved storage quota on this node (e.g. `500MB`, `10GB`, `1.5TB`) |
+| `-storage-dir` | `<data>/uploads` | Custom disk drive or directory path where this node stores uploaded files (also switchable live with migration by admins in Settings) |
 | `-expose-ip` | auto-detect | Custom IP or hostname displayed on the entry landing page |
 | `-secret` | auto/config | Shared cluster authentication secret |
 | `-entry` | empty | Entry node URL hint used by worker nodes |
