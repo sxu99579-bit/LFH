@@ -1,0 +1,11 @@
+.git
+.github
+data
+initial-admin.txt
+cluster-config.json
+dist
+*.exe
+*.old
+*.new
+*.zip
+*.tar.gz

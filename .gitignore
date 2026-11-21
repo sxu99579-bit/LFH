@@ -1,0 +1,18 @@
+# Runtime data & generated credentials
+data/
+initial-admin.txt
+cluster-config.json
+
+# Compiled binaries, update staging & archives
+*.exe
+*.old
+*.new
+dist/
+*.zip
+*.tar.gz
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

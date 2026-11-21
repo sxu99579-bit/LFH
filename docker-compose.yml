@@ -1,0 +1,21 @@
+services:
+  lfh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lfh:V0.11.21
+    container_name: lfh
+    restart: unless-stopped
+    # Note:
+    # 1. Replace YOUR_LAN_IP with your Docker host's LAN IP so the UI displays
+    #    the reachable address instead of the container bridge IP.
+    # 2. On Linux, you can switch to `network_mode: host` (and remove `ports`)
+    #    for seamless UDP broadcast auto-discovery on port 53319.
+    ports:
+      - "8080:8080"
+      - "53319:53319/udp"
+    volumes:
+      - ./lfh-data:/data
+    command: ["-data", "/data", "-port", "8080"]
+    # Example with custom host LAN IP & quota:
+    # command: ["-data", "/data", "-port", "8080", "-expose-ip", "192.168.1.100", "-quota", "20GB"]
