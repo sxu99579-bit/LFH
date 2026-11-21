@@ -1568,8 +1568,56 @@ func (m *Manager) ProxyNewVersion(peer NodeStatus, fileID, filename, note string
 	return rec, nil
 }
 
-func (m *Manager) ProxyRestoreVersion(peer NodeStatus, fileID string, ver int, note string) (storage.FileRecord, error) {
-	payload, _ := json.Marshal(map[string]string{"note": note})
+func (m *Manager) ProxyEditFile(peer NodeStatus, fileID, content, note, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"content":       content,
+		"note":          note,
+		"uploader":      uploader,
+		"device_fp":     dev.FP,
+		"device_name":   dev.Name,
+		"device_ip":     dev.IP,
+		"device_detail": dev.Detail,
+	})
+	targetURL := fmt.Sprintf("%s/internal/cluster/files/%s/edit", strings.TrimRight(peer.HTTPURL, "/"), fileID)
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return storage.FileRecord{}, fmt.Errorf("转发在线编辑内容到节点 %s 失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return storage.FileRecord{}, errors.New(errBody.Error)
+		}
+		return storage.FileRecord{}, fmt.Errorf("远端节点在线保存失败 (%d)", resp.StatusCode)
+	}
+	var rec storage.FileRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return storage.FileRecord{}, err
+	}
+	m.AddPeerFile(peer.NodeID, rec)
+	return rec, nil
+}
+
+func (m *Manager) ProxyRestoreVersion(peer NodeStatus, fileID string, ver int, note, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"note":          note,
+		"uploader":      uploader,
+		"device_fp":     dev.FP,
+		"device_name":   dev.Name,
+		"device_ip":     dev.IP,
+		"device_detail": dev.Detail,
+	})
 	targetURL := fmt.Sprintf("%s/internal/cluster/files/%s/versions/%d/restore", strings.TrimRight(peer.HTTPURL, "/"), fileID, ver)
 	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
 	if err != nil {

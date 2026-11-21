@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.7</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.8</code>
 </p>
 
 ---
@@ -27,7 +27,10 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - **Lossless Primary Node Switching & Node Exit Control**: Promote any online worker node into the cluster's new **Primary/Entry** node in one click (migrating accounts/permissions while preserving files across all hosts), evict online nodes or delete offline entries cleanly, dissolve an entire cluster, or visit `/worker` on any worker node to leave the cluster independently.
 - **Instant Drag-and-Drop & Folder Structure**: Drop individual files, entire directory trees, or archives directly into the workspace with real-time progress and configurable extension allow/deny policies.
 - **Three Views & Live Auto-Refresh**: Switch cleanly between **List**, Windows Explorer-style **Grid**, and **Chart** views. Powered by Server-Sent Events (SSE), new uploads appear across connected clients automatically without page reloads.
-- **Online Preview & Detailed File Properties**: Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser. Open **Properties** on any file to inspect exact byte size, MIME type, on-demand SHA-256 checksum (up to 256 MB), visibility scope, storage node location, and uploader device fingerprint—plus exact physical disk path for administrators.
+- **Online Preview, In-Browser Text Editor & Full Version Provenance**:
+  - Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser;
+  - **Online Text / JSON / Markdown / Code Editor**: Edit uploaded `.txt`, `.json`, `.md`, `.yaml`, `.csv`, `.log`, `.ini`, `.conf`, `.sql`, and source code files directly in the browser with line numbers, JSON formatting/minifying/validation, and live split Markdown preview—saving creates a new version automatically;
+  - **Detailed File Version Control**: Every version records and displays its **update method** (`Initial Upload`, `Upload Overwrite`, `Online Edit`, `Manual Version Upload`, `Historical Version Restore`), **updating user**, **updating device** (device name, fingerprint & IP), and **update timestamp**, with one-click download or rollback for any historical version.
 - **Fine-Grained Access Control & Role Governance**:
   - Generates unique random initial admin credentials (`lfh_xxxxxx` + 12-character password) per fresh installation and saves a copy to `initial-admin.txt`, avoiding duplicate default passwords across hosts.
   - Administrators can **grant or revoke admin privileges** for active accounts directly in User Management (with built-in self-modification and last-admin protection).

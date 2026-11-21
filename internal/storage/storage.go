@@ -24,6 +24,25 @@ type DeviceInfo struct {
 	Detail string `json:"device_detail,omitempty"`
 }
 
+const (
+	MethodInitialUpload   = "initial_upload"
+	MethodUploadOverwrite = "upload_overwrite"
+	MethodOnlineEdit      = "online_edit"
+	MethodVersionUpload   = "version_upload"
+	MethodVersionRestore  = "version_restore"
+)
+
+func DefaultUpdateMethod(method string, ver int) string {
+	m := strings.TrimSpace(method)
+	if m != "" {
+		return m
+	}
+	if ver <= 1 {
+		return MethodInitialUpload
+	}
+	return MethodUploadOverwrite
+}
+
 type FileVersion struct {
 	Version      int       `json:"version"`
 	StoredName   string    `json:"stored_name"`
@@ -36,6 +55,7 @@ type FileVersion struct {
 	DeviceDetail string    `json:"device_detail,omitempty"`
 	StorageDir   string    `json:"storage_dir,omitempty"`
 	Note         string    `json:"note,omitempty"`
+	UpdateMethod string    `json:"update_method,omitempty"`
 }
 
 type FileRecord struct {
@@ -59,6 +79,7 @@ type FileRecord struct {
 	Version      int           `json:"version"`
 	VersionCount int           `json:"version_count"`
 	VersionNote  string        `json:"version_note,omitempty"`
+	UpdateMethod string        `json:"update_method,omitempty"`
 	Versions     []FileVersion `json:"versions,omitempty"`
 	NodeID       string        `json:"node_id,omitempty"`
 	NodeName     string        `json:"node_name,omitempty"`
@@ -288,6 +309,7 @@ func (s *Store) load() error {
 					if rec.Version <= 0 {
 						rec.Version = 1
 					}
+					rec.UpdateMethod = DefaultUpdateMethod(rec.UpdateMethod, rec.Version)
 					if len(rec.Versions) > 0 {
 						validVers := make([]FileVersion, 0, len(rec.Versions))
 						for _, v := range rec.Versions {
@@ -298,6 +320,7 @@ func (s *Store) load() error {
 								if v.Version <= 0 {
 									v.Version = 1
 								}
+								v.UpdateMethod = DefaultUpdateMethod(v.UpdateMethod, v.Version)
 								validVers = append(validVers, v)
 							}
 						}
@@ -500,6 +523,7 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 			DeviceDetail: cur.DeviceDetail,
 			StorageDir:   cur.StorageDir,
 			Note:         cur.VersionNote,
+			UpdateMethod: DefaultUpdateMethod(cur.UpdateMethod, curVer),
 		}
 		cur.Versions = append([]FileVersion{prevSnap}, cur.Versions...)
 		sort.Slice(cur.Versions, func(i, j int) bool {
@@ -508,6 +532,7 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 		cur.Version = maxVer + 1
 		cur.VersionCount = 1 + len(cur.Versions)
 		cur.VersionNote = cleanNote
+		cur.UpdateMethod = MethodUploadOverwrite
 		cur.StoredName = storedName
 		cur.Size = n
 		cur.Ext = ext
@@ -549,6 +574,7 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 			Version:      1,
 			VersionCount: 1,
 			VersionNote:  cleanNote,
+			UpdateMethod: MethodInitialUpload,
 			NodeOnline:   true,
 		}
 		s.records[blobID] = rec
@@ -564,6 +590,16 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 
 // SaveNewVersion appends a new version to an existing file record by ID.
 func (s *Store) SaveNewVersion(id, origName, note, uploader string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
+	return s.SaveNewVersionWithMethod(id, origName, note, MethodVersionUpload, uploader, dev, r)
+}
+
+// SaveEditedText saves online-edited text content as a new version (MethodOnlineEdit) on an existing file record.
+func (s *Store) SaveEditedText(id, content, note, uploader string, dev DeviceInfo) (FileRecord, error) {
+	return s.SaveNewVersionWithMethod(id, "", note, MethodOnlineEdit, uploader, dev, strings.NewReader(content))
+}
+
+// SaveNewVersionWithMethod appends a new version with an explicit UpdateMethod to an existing file record by ID.
+func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
 	s.mu.RLock()
 	cur, ok := s.records[id]
 	s.mu.RUnlock()
@@ -631,6 +667,7 @@ func (s *Store) SaveNewVersion(id, origName, note, uploader string, dev DeviceIn
 		DeviceDetail: latest.DeviceDetail,
 		StorageDir:   latest.StorageDir,
 		Note:         latest.VersionNote,
+		UpdateMethod: DefaultUpdateMethod(latest.UpdateMethod, curVer),
 	}
 	latest.Versions = append([]FileVersion{prevSnap}, latest.Versions...)
 	sort.Slice(latest.Versions, func(i, j int) bool {
@@ -639,6 +676,10 @@ func (s *Store) SaveNewVersion(id, origName, note, uploader string, dev DeviceIn
 	latest.Version = maxVer + 1
 	latest.VersionCount = 1 + len(latest.Versions)
 	latest.VersionNote = strings.TrimSpace(note)
+	if strings.TrimSpace(method) == "" {
+		method = MethodVersionUpload
+	}
+	latest.UpdateMethod = strings.TrimSpace(method)
 	latest.StoredName = storedName
 	latest.Size = n
 	latest.Uploader = uploader
@@ -684,11 +725,13 @@ func (s *Store) GetVersion(id string, version int) (FileRecord, FileVersion, str
 			DeviceDetail: rec.DeviceDetail,
 			StorageDir:   rec.StorageDir,
 			Note:         rec.VersionNote,
+			UpdateMethod: DefaultUpdateMethod(rec.UpdateMethod, curVer),
 		}
 		return rec, fv, s.recordDiskPathLocked(rec), true
 	}
 	for _, v := range rec.Versions {
 		if v.Version == version {
+			v.UpdateMethod = DefaultUpdateMethod(v.UpdateMethod, v.Version)
 			return rec, v, s.versionDiskPathLocked(rec, v), true
 		}
 	}
@@ -697,6 +740,11 @@ func (s *Store) GetVersion(id string, version int) (FileRecord, FileVersion, str
 
 // RestoreVersion promotes a historical version to become the active version while preserving the prior active version in history.
 func (s *Store) RestoreVersion(id string, targetVer int, note string) (FileRecord, error) {
+	return s.RestoreVersionByUser(id, targetVer, note, "", DeviceInfo{})
+}
+
+// RestoreVersionByUser promotes a historical version to become the active version and records the operator/device when provided.
+func (s *Store) RestoreVersionByUser(id string, targetVer int, note, actor string, dev DeviceInfo) (FileRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.records[id]
@@ -743,6 +791,7 @@ func (s *Store) RestoreVersion(id string, targetVer int, note string) (FileRecor
 		DeviceDetail: rec.DeviceDetail,
 		StorageDir:   rec.StorageDir,
 		Note:         rec.VersionNote,
+		UpdateMethod: DefaultUpdateMethod(rec.UpdateMethod, curVer),
 	}
 	remaining := make([]FileVersion, 0, len(rec.Versions))
 	for i, v := range rec.Versions {
@@ -758,14 +807,30 @@ func (s *Store) RestoreVersion(id string, targetVer int, note string) (FileRecor
 	rec.Version = target.Version
 	rec.StoredName = target.StoredName
 	rec.Size = target.Size
-	rec.Uploader = target.Uploader
-	rec.UploadedAt = target.UploadedAt
-	rec.MonthKey = target.UploadedAt.Format("2006-01")
-	rec.DateKey = target.UploadedAt.Format("2006-01-02")
-	rec.DeviceFP = target.DeviceFP
-	rec.DeviceName = target.DeviceName
-	rec.DeviceIP = target.DeviceIP
-	rec.DeviceDetail = target.DeviceDetail
+	rec.UpdateMethod = MethodVersionRestore
+	if strings.TrimSpace(actor) != "" {
+		now := time.Now()
+		rec.Uploader = strings.TrimSpace(actor)
+		rec.UploadedAt = now
+		rec.MonthKey = now.Format("2006-01")
+		rec.DateKey = now.Format("2006-01-02")
+	} else {
+		rec.Uploader = target.Uploader
+		rec.UploadedAt = target.UploadedAt
+		rec.MonthKey = target.UploadedAt.Format("2006-01")
+		rec.DateKey = target.UploadedAt.Format("2006-01-02")
+	}
+	if strings.TrimSpace(dev.FP) != "" || strings.TrimSpace(dev.Name) != "" || strings.TrimSpace(dev.IP) != "" {
+		rec.DeviceFP = strings.TrimSpace(dev.FP)
+		rec.DeviceName = strings.TrimSpace(dev.Name)
+		rec.DeviceIP = strings.TrimSpace(dev.IP)
+		rec.DeviceDetail = strings.TrimSpace(dev.Detail)
+	} else {
+		rec.DeviceFP = target.DeviceFP
+		rec.DeviceName = target.DeviceName
+		rec.DeviceIP = target.DeviceIP
+		rec.DeviceDetail = target.DeviceDetail
+	}
 	if target.StorageDir != "" {
 		rec.StorageDir = target.StorageDir
 	}
@@ -821,6 +886,7 @@ func (s *Store) DeleteVersion(id string, targetVer int) (FileRecord, error) {
 			rec.StorageDir = nextActive.StorageDir
 		}
 		rec.VersionNote = nextActive.Note
+		rec.UpdateMethod = DefaultUpdateMethod(nextActive.UpdateMethod, nextActive.Version)
 		rec.VersionCount = 1 + len(rec.Versions)
 		s.records[id] = rec
 		if err := s.saveLocked(); err != nil {

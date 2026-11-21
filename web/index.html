@@ -28,7 +28,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.7</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.8</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -106,7 +106,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.7</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.8</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
@@ -373,11 +373,56 @@
       <div class="modal-header">
         <div class="modal-title" id="preview-title">文件预览</div>
         <div class="modal-header-actions">
+          <button id="preview-edit-btn" class="btn btn-ghost btn-xs hidden" type="button">在线编辑</button>
           <a id="preview-download-link" class="btn btn-primary btn-xs" href="#" download>下载原文件</a>
           <button id="preview-close" class="btn btn-ghost btn-xs" type="button">关闭</button>
         </div>
       </div>
       <div class="modal-body" id="preview-body"></div>
+    </div>
+  </div>
+
+  <!-- 在线文本 / JSON / Markdown / 代码编辑器弹窗 -->
+  <div id="editor-modal" class="modal hidden">
+    <div class="modal-backdrop" id="editor-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title" id="editor-title">在线文本编辑器</div>
+        <div class="modal-header-actions">
+          <span id="editor-lang-badge" class="ver-badge">TXT</span>
+          <button id="editor-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body editor-modal-body">
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <span id="editor-stats-text" class="editor-stats-text">0 行 · 0 字符 · 0 B</span>
+            <span id="editor-status-pill" class="editor-status-pill hidden"></span>
+          </div>
+          <div class="editor-toolbar-right">
+            <button id="editor-btn-json-format" class="btn btn-ghost btn-xs hidden" type="button">JSON 格式化</button>
+            <button id="editor-btn-json-minify" class="btn btn-ghost btn-xs hidden" type="button">JSON 压缩</button>
+            <button id="editor-btn-json-validate" class="btn btn-ghost btn-xs hidden" type="button">JSON 语法校验</button>
+            <button id="editor-btn-md-preview" class="btn btn-ghost btn-xs hidden" type="button">分栏预览 Markdown</button>
+          </div>
+        </div>
+
+        <div id="editor-workspace" class="editor-workspace">
+          <div class="editor-code-pane">
+            <div id="editor-line-gutter" class="editor-line-gutter" aria-hidden="true">1</div>
+            <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" placeholder="在此编辑文件内容..."></textarea>
+          </div>
+          <div id="editor-md-preview" class="editor-md-preview md-render hidden"></div>
+        </div>
+
+        <div class="editor-footer">
+          <input id="editor-note-input" class="search-input" type="text" placeholder="版本变更说明（选填，例如：修改配置参数 / 在线修订文档）" style="flex:1;min-width:220px;" />
+          <div class="row-actions">
+            <span class="switch-desc">保存后将自动生成新版本（更新方式：在线编辑更新）并保留历史版本</span>
+            <button id="editor-save-btn" class="btn btn-primary btn-sm" type="button">保存为新版本 (Ctrl+S)</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -761,7 +806,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.7</strong>
+                  <strong id="upd-cur-version">V0.11.21.8</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>

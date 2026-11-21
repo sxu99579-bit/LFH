@@ -18,7 +18,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.7",
+  appVersion: "V0.11.21.8",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -35,6 +35,9 @@ const state = {
   lastRenderedFilesSig: "",
   versionModalFileId: null,
   versionModalData: null,
+  editorFileId: null,
+  editorFileRec: null,
+  editorSplitMd: false,
   healthTimer: null,
   chartMetric: "count",
   autoRefresh: true,
@@ -564,7 +567,13 @@ async function copyText(text) {
 }
 
 async function api(url, options = {}) {
-  const res = await fetch(url, options);
+  const headers = new Headers(options.headers || {});
+  if (state.device) {
+    if (state.device.fp && !headers.has("X-Device-FP")) headers.set("X-Device-FP", state.device.fp);
+    if (state.device.name && !headers.has("X-Device-Name")) headers.set("X-Device-Name", state.device.name);
+    if (state.device.detail && !headers.has("X-Device-Detail")) headers.set("X-Device-Detail", state.device.detail);
+  }
+  const res = await fetch(url, { ...options, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `请求失败 (${res.status})`);
@@ -645,7 +654,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.7";
+  const ver = state.appVersion || "V0.11.21.8";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -1367,7 +1376,7 @@ function computeFilesRenderSig() {
   for (let i = 0; i < state.files.length; i++) {
     const r = state.files[i];
     const acl = Array.isArray(r.allowed_users) ? r.allowed_users.join(",") : "";
-    parts.push(`${r.id}:${r.version || 1}:${r.version_count || 1}:${r.size}:${r.uploaded_at}:${r.node_online !== false ? 1 : 0}:${acl}:${r.storage_dir || ""}`);
+    parts.push(`${r.id}:${r.version || 1}:${r.version_count || 1}:${r.update_method || ""}:${r.size}:${r.uploaded_at}:${r.node_online !== false ? 1 : 0}:${acl}:${r.storage_dir || ""}`);
   }
   return parts.join(";");
 }
@@ -1432,17 +1441,59 @@ function isArchiveRec(rec) {
   return ["zip", "tar", "tgz", "gz"].includes(ext) || name.endsWith(".tar.gz");
 }
 
+const EDITABLE_TEXT_EXTS = [
+  "md", "markdown", "txt", "json", "yaml", "yml", "log", "csv",
+  "go", "js", "ts", "jsx", "tsx", "py", "html", "css", "xml",
+  "sh", "bat", "ps1", "ini", "conf", "toml", "env", "sql",
+  "c", "cpp", "h", "java", "rs", "php", "rb",
+];
+
+function isEditableTextRec(rec) {
+  if (!rec || isArchiveRec(rec)) return false;
+  const ext = (rec.ext || "").toLowerCase().replace(/^\./, "");
+  return EDITABLE_TEXT_EXTS.includes(ext);
+}
+
 function canPreview(rec) {
-  if (isArchiveRec(rec)) return true;
+  if (isArchiveRec(rec) || isEditableTextRec(rec)) return true;
   const ext = (rec?.ext || "").toLowerCase().replace(/^\./, "");
   return [
     "mp4", "webm", "mov", "m4v", "ogv",
     "mp3", "wav", "flac", "aac", "ogg", "m4a",
-    "pdf", "md", "markdown", "txt", "json", "yaml", "yml", "log", "csv",
-    "go", "js", "ts", "py", "html", "css", "xml", "sh", "bat", "ini", "sql",
+    "pdf",
     "docx", "xlsx", "pptx", "doc", "xls", "ppt",
     "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp",
   ].includes(ext);
+}
+
+function normalizeUpdateMethod(method, ver = 1) {
+  const m = String(method || "").trim();
+  if (m) return m;
+  return Number(ver || 1) <= 1 ? "initial_upload" : "upload_overwrite";
+}
+
+function formatUpdateMethodLabel(method, ver = 1) {
+  const m = normalizeUpdateMethod(method, ver);
+  switch (m) {
+    case "online_edit":
+      return "在线编辑更新";
+    case "upload_overwrite":
+      return "上传覆盖更新";
+    case "version_upload":
+      return "手动上传新版本";
+    case "version_restore":
+      return "历史版本回滚";
+    case "initial_upload":
+    default:
+      return "初始上传";
+  }
+}
+
+function formatUpdateMethodBadge(method, ver = 1) {
+  const m = normalizeUpdateMethod(method, ver);
+  const label = formatUpdateMethodLabel(m, ver);
+  const cls = `method-${m.replace(/_/g, "-")}`;
+  return `<span class="update-method-pill ${cls}">${escapeHtml(label)}</span>`;
 }
 
 function buildRecordMeta(rec) {
@@ -1451,13 +1502,19 @@ function buildRecordMeta(rec) {
   const isArch = isArchiveRec(rec);
   const isImg = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"].includes(ext);
   const canPrev = canPreview(rec);
+  const canEdit = isEditableTextRec(rec);
   const previewLabel = isArch ? "在线解压查看" : "在线打开";
   const previewBtn = canPrev
     ? `<button class="btn btn-primary btn-xs" data-action="preview" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"}>${previewLabel}</button>`
     : "";
+  const editBtn = canEdit
+    ? `<button class="btn btn-ghost btn-xs" type="button" data-action="edit" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"} title="在线文本编辑并保存为新版本">编辑</button>`
+    : "";
   const verNum = Number(rec.version || 1);
   const verCnt = Number(rec.version_count || (Array.isArray(rec.versions) ? rec.versions.length + 1 : 1));
-  const verBadgeHtml = `<button type="button" class="ver-chip ${verCnt > 1 ? "multi" : ""}" data-action="versions" data-id="${rec.id}" title="点击查看与管理该文件的版本历史">${ICON_VERSION_BRANCH_SVG}<span>v${verNum}${verCnt > 1 ? ` · ${verCnt}版` : ""}</span></button>`;
+  const methodLabel = formatUpdateMethodLabel(rec.update_method, verNum);
+  const showMethodInChip = verCnt > 1 || rec.update_method === "online_edit" || rec.update_method === "version_restore";
+  const verBadgeHtml = `<button type="button" class="ver-chip ${verCnt > 1 ? "multi" : ""}" data-action="versions" data-id="${rec.id}" title="当前 v${verNum} · 更新方式：${escapeHtml(methodLabel)} · 更新用户：${escapeHtml(rec.uploader || "-")} · 点击查看版本历史">${ICON_VERSION_BRANCH_SVG}<span>v${verNum}${verCnt > 1 ? ` · ${verCnt}版` : ""}${showMethodInChip ? ` · ${escapeHtml(methodLabel)}` : ""}</span></button>`;
   const verBtn = `<button class="btn btn-ghost btn-xs" type="button" data-action="versions" data-id="${rec.id}" title="文件版本历史控制">版本${verCnt > 1 ? `(${verCnt})` : ""}</button>`;
   const propsBtn = `<button class="btn btn-ghost btn-xs" type="button" data-action="props" data-id="${rec.id}">属性</button>`;
   const dlHtml = online
@@ -1507,7 +1564,9 @@ function buildRecordMeta(rec) {
     online,
     isImg,
     canPrev,
+    canEdit,
     previewBtn,
+    editBtn,
     verBadgeHtml,
     verBtn,
     propsBtn,
@@ -1572,6 +1631,7 @@ function renderFilesTable() {
       <td class="col-actions" data-label="操作">
         <div class="row-actions">
           ${meta.previewBtn}
+          ${meta.editBtn}
           ${meta.verBtn}
           ${meta.propsBtn}
           ${meta.accessBtn}
@@ -1644,6 +1704,7 @@ function renderFilesGrid() {
       </div>
       <div class="file-card-actions">
         ${meta.previewBtn}
+        ${meta.editBtn}
         ${meta.verBtn}
         ${meta.propsBtn}
         ${meta.accessBtn}
@@ -2114,6 +2175,17 @@ async function openPreview(id) {
 
   $("preview-title").textContent = rec.name;
   $("preview-download-link").href = `/api/files/${rec.id}/download`;
+  const editHeaderBtn = $("preview-edit-btn");
+  if (editHeaderBtn) {
+    const canEdit = isEditableTextRec(rec) && rec.node_online !== false;
+    editHeaderBtn.classList.toggle("hidden", !canEdit);
+    editHeaderBtn.onclick = canEdit
+      ? () => {
+          closePreview();
+          openTextEditor(rec.id);
+        }
+      : null;
+  }
   const body = $("preview-body");
   body.innerHTML = `<div class="empty-state">正在加载预览...</div>`;
   $("preview-modal").classList.remove("hidden");
@@ -2452,6 +2524,211 @@ function renderMarkdown(md) {
 function closePreview() {
   $("preview-modal").classList.add("hidden");
   $("preview-body").innerHTML = "";
+}
+
+// ==================== Online Text / JSON / Markdown / Code Editor ====================
+
+function setEditorStatusPill(text, kind = "ok") {
+  const pill = $("editor-status-pill");
+  if (!pill) return;
+  if (!text) {
+    pill.textContent = "";
+    pill.classList.add("hidden");
+    return;
+  }
+  pill.textContent = text;
+  pill.className = `editor-status-pill ${kind === "err" ? "err" : "ok"}`;
+}
+
+function updateEditorGutterAndStats() {
+  const ta = $("editor-textarea");
+  const gutter = $("editor-line-gutter");
+  const stats = $("editor-stats-text");
+  if (!ta) return;
+  const val = ta.value || "";
+  const lines = val.split("\n");
+  const lineCount = Math.max(1, lines.length);
+  if (gutter) {
+    const nums = [];
+    for (let i = 1; i <= lineCount; i++) {
+      nums.push(i);
+    }
+    gutter.textContent = nums.join("\n");
+    gutter.scrollTop = ta.scrollTop;
+  }
+  if (stats) {
+    const byteLen = new TextEncoder().encode(val).length;
+    stats.textContent = `${lineCount} 行 · ${val.length} 字符 · ${formatSize(byteLen)}`;
+  }
+  if (state.editorSplitMd && $("editor-md-preview") && !$("editor-md-preview").classList.contains("hidden")) {
+    $("editor-md-preview").innerHTML = renderMarkdown(val);
+  }
+}
+
+async function openTextEditor(id) {
+  const rec = state.files.find((f) => f.id === id);
+  if (!rec) return;
+  if (!isEditableTextRec(rec)) {
+    showToast("该文件类型暂不支持在线文本编辑", "error");
+    return;
+  }
+  if (rec.node_online === false) {
+    showToast("文件所在存储节点当前离线，无法在线编辑", "error");
+    return;
+  }
+  const ext = (rec.ext || "").toLowerCase().replace(/^\./, "");
+  const isJson = ext === "json";
+  const isMd = ext === "md" || ext === "markdown";
+
+  state.editorFileId = rec.id;
+  state.editorFileRec = rec;
+  state.editorSplitMd = isMd;
+
+  if ($("editor-title")) {
+    $("editor-title").textContent = `在线编辑 — ${rec.name} (当前 v${Number(rec.version || 1)})`;
+  }
+  if ($("editor-lang-badge")) {
+    $("editor-lang-badge").textContent = (ext || "TXT").toUpperCase();
+  }
+  if ($("editor-btn-json-format")) $("editor-btn-json-format").classList.toggle("hidden", !isJson);
+  if ($("editor-btn-json-minify")) $("editor-btn-json-minify").classList.toggle("hidden", !isJson);
+  if ($("editor-btn-json-validate")) $("editor-btn-json-validate").classList.toggle("hidden", !isJson);
+  if ($("editor-btn-md-preview")) {
+    $("editor-btn-md-preview").classList.toggle("hidden", !isMd);
+    $("editor-btn-md-preview").textContent = state.editorSplitMd ? "隐藏 Markdown 预览" : "分栏预览 Markdown";
+  }
+  if ($("editor-workspace")) {
+    $("editor-workspace").classList.toggle("split", state.editorSplitMd);
+  }
+  if ($("editor-md-preview")) {
+    $("editor-md-preview").classList.toggle("hidden", !state.editorSplitMd);
+  }
+  if ($("editor-note-input")) {
+    $("editor-note-input").value = "";
+  }
+  setEditorStatusPill("");
+
+  const ta = $("editor-textarea");
+  if (ta) {
+    ta.value = "正在加载文件内容...";
+    ta.disabled = true;
+  }
+  $("editor-modal").classList.remove("hidden");
+
+  try {
+    const data = await api(`/api/files/${encodeURIComponent(rec.id)}/preview`);
+    if (state.editorFileId !== rec.id) return;
+    if (ta) {
+      ta.value = typeof data.content === "string" ? data.content : "";
+      ta.disabled = false;
+      ta.focus();
+    }
+    updateEditorGutterAndStats();
+    if (data.truncated) {
+      setEditorStatusPill("提示：原文件较大，已截取可编辑前段内容", "err");
+    } else if (isJson) {
+      try {
+        JSON.parse(ta.value || "{}");
+        setEditorStatusPill("JSON 语法有效", "ok");
+      } catch (e) {
+        setEditorStatusPill(`JSON 语法提示：${e.message}`, "err");
+      }
+    }
+  } catch (err) {
+    if (ta) {
+      ta.value = "";
+      ta.disabled = false;
+    }
+    setEditorStatusPill(err.message || "读取文件失败", "err");
+    showToast(err.message || "读取文件失败", "error");
+  }
+}
+
+function closeTextEditor() {
+  state.editorFileId = null;
+  state.editorFileRec = null;
+  if ($("editor-modal")) $("editor-modal").classList.add("hidden");
+}
+
+function formatEditorJson(minify = false) {
+  const ta = $("editor-textarea");
+  if (!ta) return;
+  try {
+    const parsed = JSON.parse(ta.value);
+    ta.value = minify ? JSON.stringify(parsed) : JSON.stringify(parsed, null, 2);
+    updateEditorGutterAndStats();
+    setEditorStatusPill(minify ? "已压缩为单行 JSON" : "已格式化为标准 2 空格缩进 JSON", "ok");
+  } catch (err) {
+    setEditorStatusPill(`JSON 语法错误：${err.message}`, "err");
+    showToast(`JSON 语法错误：${err.message}`, "error");
+  }
+}
+
+function validateEditorJson() {
+  const ta = $("editor-textarea");
+  if (!ta) return true;
+  try {
+    JSON.parse(ta.value);
+    setEditorStatusPill("JSON 语法校验通过", "ok");
+    showToast("JSON 语法校验通过", "success");
+    return true;
+  } catch (err) {
+    setEditorStatusPill(`JSON 语法错误：${err.message}`, "err");
+    showToast(`JSON 语法错误：${err.message}`, "error");
+    return false;
+  }
+}
+
+async function saveTextEditor() {
+  const fileId = state.editorFileId;
+  const rec = state.editorFileRec;
+  const ta = $("editor-textarea");
+  const btn = $("editor-save-btn");
+  if (!fileId || !ta || ta.disabled) return;
+
+  const ext = (rec?.ext || "").toLowerCase().replace(/^\./, "");
+  if (ext === "json") {
+    try {
+      JSON.parse(ta.value);
+    } catch (err) {
+      if (!confirm(`检测到当前 JSON 存在语法错误（${err.message}），仍然强制保存吗？`)) {
+        return;
+      }
+    }
+  }
+
+  const content = ta.value;
+  const note = ($("editor-note-input")?.value || "").trim() || "在线编辑更新";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "正在保存新版本...";
+  }
+  state.isUploadingSelf = true;
+  try {
+    const res = await api(`/api/files/${encodeURIComponent(fileId)}/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, note }),
+    });
+    const newVer = res.file?.version || (Number(rec?.version || 1) + 1);
+    showToast(`已保存为新版本 v${newVer}（在线编辑更新）`, "success");
+    closeTextEditor();
+    await refreshAll();
+    if ($("versions-modal") && !$("versions-modal").classList.contains("hidden") && state.versionModalFileId === fileId) {
+      await openFileVersionsModal(fileId);
+    }
+  } catch (err) {
+    setEditorStatusPill(err.message || "保存失败", "err");
+    showToast(err.message || "保存失败", "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "保存为新版本 (Ctrl+S)";
+    }
+    setTimeout(() => {
+      state.isUploadingSelf = false;
+    }, 600);
+  }
 }
 
 function updateUploadAccessButton() {
@@ -3290,6 +3567,7 @@ function renderFileVersionsModal() {
   const versions = Array.isArray(data.versions) ? data.versions : [];
   const curVer = Number(data.current_version || f.version || 1);
   const canManage = Boolean(state.user && (state.user.role === "admin" || state.user.username === f.uploader));
+  const canEdit = isEditableTextRec(f) && f.node_online !== false;
 
   if ($("versions-title")) {
     $("versions-title").textContent = `文件版本控制 — ${f.name}`;
@@ -3300,11 +3578,21 @@ function renderFileVersionsModal() {
         <strong>${escapeHtml(f.name)}</strong>
         ${f.folder_path ? `<span style="color:var(--muted);margin-left:6px;">目录：${escapeHtml(f.folder_path)}</span>` : ""}
         <div style="font-size:12px;color:var(--muted);margin-top:3px;">
-          所在节点：${escapeHtml(f.node_name || f.node_id || "本机")} · 当前生效版本：<strong>v${curVer}</strong> · 历史版本总数：<strong>${versions.length}</strong> 个
+          所在节点：${escapeHtml(f.node_name || f.node_id || "本机")} · 当前生效版本：<strong>v${curVer}</strong>（${escapeHtml(formatUpdateMethodLabel(f.update_method, curVer))}） · 历史版本总数：<strong>${versions.length}</strong> 个
         </div>
       </div>
-      <a class="btn btn-primary btn-xs" href="/api/files/${encodeURIComponent(f.id)}/download">下载当前生效版本 (v${curVer})</a>
+      <div class="row-actions">
+        ${canEdit ? `<button type="button" class="btn btn-ghost btn-xs" id="versions-open-editor-btn">在线编辑此文件</button>` : ""}
+        <a class="btn btn-primary btn-xs" href="/api/files/${encodeURIComponent(f.id)}/download">下载当前生效版本 (v${curVer})</a>
+      </div>
     `;
+    const openEditorBtn = $("versions-open-editor-btn");
+    if (openEditorBtn) {
+      openEditorBtn.onclick = () => {
+        closeFileVersionsModal();
+        openTextEditor(f.id);
+      };
+    }
   }
 
   const rowsHtml = versions
@@ -3313,6 +3601,23 @@ function renderFileVersionsModal() {
       const badge = isCurrent
         ? `<span class="status-pill status-ok">v${v.version} · 当前生效</span>`
         : `<span class="cat-tag">v${v.version} · 历史版本</span>`;
+      const methodBadge = formatUpdateMethodBadge(v.update_method, v.version);
+      const devPrimary = v.device_name || v.device_fp || "未记录设备";
+      const devSecondaryParts = [];
+      if (v.device_fp && v.device_name) devSecondaryParts.push(v.device_fp);
+      if (v.device_ip) devSecondaryParts.push(v.device_ip);
+      const devHtml = `
+        <div>
+          <div style="font-weight:500;">${escapeHtml(devPrimary)}</div>
+          ${devSecondaryParts.length > 0 ? `<div style="font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;">${escapeHtml(devSecondaryParts.join(" · "))}</div>` : ""}
+        </div>
+      `;
+      const timeHtml = `
+        <div>
+          <div>${escapeHtml(formatTime(v.uploaded_at))}</div>
+          <div style="font-size:11px;color:var(--muted);">${escapeHtml(formatRelativeTime(v.uploaded_at))}</div>
+        </div>
+      `;
       const restoreBtn = !isCurrent && canManage
         ? `<button type="button" class="btn btn-primary btn-xs" data-restore-version="${v.version}">设为当前版本</button>`
         : "";
@@ -3322,11 +3627,12 @@ function renderFileVersionsModal() {
       return `
         <tr>
           <td>${badge}</td>
-          <td>${escapeHtml(v.note || (isCurrent ? "当前版本" : "历史归档版本"))}</td>
+          <td>${methodBadge}</td>
+          <td><strong>${escapeHtml(v.uploader || "-")}</strong></td>
+          <td>${devHtml}</td>
+          <td>${timeHtml}</td>
+          <td>${escapeHtml(v.note || formatUpdateMethodLabel(v.update_method, v.version))}</td>
           <td>${formatSize(v.size)}</td>
-          <td>${escapeHtml(v.uploader || "-")}</td>
-          <td>${formatTime(v.uploaded_at)}</td>
-          <td>${escapeHtml(v.device_name || v.device_fp || "-")}</td>
           <td>
             <div class="row-actions">
               <a class="btn btn-ghost btn-xs" href="/api/files/${encodeURIComponent(f.id)}/versions/${v.version}/download">下载 v${v.version}</a>
@@ -3344,11 +3650,12 @@ function renderFileVersionsModal() {
       <thead>
         <tr>
           <th>版本号</th>
+          <th>更新方式</th>
+          <th>更新用户</th>
+          <th>更新设备</th>
+          <th>更新时间</th>
           <th>版本备注说明</th>
           <th>大小</th>
-          <th>提交人</th>
-          <th>提交时间</th>
-          <th>来源设备</th>
           <th>操作</th>
         </tr>
       </thead>
@@ -3432,9 +3739,12 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
     </div>
     ${archiveGroup}
     <div class="props-group">
-      <div class="props-group-title">上传与完整性</div>
-      <div class="props-row"><div class="props-key">上传者</div><div class="props-val">${escapeHtml(fileRec.uploader || "-")}</div></div>
-      <div class="props-row"><div class="props-key">上传时间</div><div class="props-val">${escapeHtml(formatTime(fileRec.uploaded_at))}</div></div>
+      <div class="props-group-title">版本控制与更新溯源</div>
+      <div class="props-row"><div class="props-key">当前版本</div><div class="props-val"><strong>v${Number(fileRec.version || 1)}</strong>（共 ${Number(fileRec.version_count || 1)} 个版本）</div></div>
+      <div class="props-row"><div class="props-key">更新方式</div><div class="props-val">${formatUpdateMethodBadge(fileRec.update_method, fileRec.version)}</div></div>
+      <div class="props-row"><div class="props-key">更新用户</div><div class="props-val">${escapeHtml(fileRec.uploader || "-")}</div></div>
+      <div class="props-row"><div class="props-key">更新时间</div><div class="props-val">${escapeHtml(formatTime(fileRec.uploaded_at))} (${escapeHtml(formatRelativeTime(fileRec.uploaded_at))})</div></div>
+      <div class="props-row"><div class="props-key">版本备注</div><div class="props-val">${escapeHtml(fileRec.version_note || formatUpdateMethodLabel(fileRec.update_method, fileRec.version))}</div></div>
       <div class="props-row"><div class="props-key">SHA-256</div><div class="props-val props-mono">${shaHtml}</div></div>
     </div>
     <div class="props-group">
@@ -4302,6 +4612,8 @@ function bindEvents() {
     const { action, id } = btn.dataset;
     if (action === "preview") {
       openPreview(id);
+    } else if (action === "edit") {
+      openTextEditor(id);
     } else if (action === "versions") {
       openFileVersionsModal(id);
     } else if (action === "props") {
@@ -4375,6 +4687,48 @@ function bindEvents() {
 
   $("preview-close").onclick = closePreview;
   $("preview-backdrop").onclick = closePreview;
+  if ($("editor-close")) $("editor-close").onclick = closeTextEditor;
+  if ($("editor-backdrop")) $("editor-backdrop").onclick = closeTextEditor;
+  if ($("editor-save-btn")) $("editor-save-btn").onclick = saveTextEditor;
+  if ($("editor-btn-json-format")) $("editor-btn-json-format").onclick = () => formatEditorJson(false);
+  if ($("editor-btn-json-minify")) $("editor-btn-json-minify").onclick = () => formatEditorJson(true);
+  if ($("editor-btn-json-validate")) $("editor-btn-json-validate").onclick = validateEditorJson;
+  if ($("editor-btn-md-preview")) {
+    $("editor-btn-md-preview").onclick = () => {
+      state.editorSplitMd = !state.editorSplitMd;
+      $("editor-btn-md-preview").textContent = state.editorSplitMd ? "隐藏 Markdown 预览" : "分栏预览 Markdown";
+      if ($("editor-workspace")) $("editor-workspace").classList.toggle("split", state.editorSplitMd);
+      if ($("editor-md-preview")) $("editor-md-preview").classList.toggle("hidden", !state.editorSplitMd);
+      updateEditorGutterAndStats();
+    };
+  }
+  if ($("editor-textarea")) {
+    const ta = $("editor-textarea");
+    ta.oninput = () => {
+      setEditorStatusPill("");
+      updateEditorGutterAndStats();
+    };
+    ta.onscroll = () => {
+      const gutter = $("editor-line-gutter");
+      if (gutter) gutter.scrollTop = ta.scrollTop;
+    };
+    ta.onkeydown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveTextEditor();
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        const val = ta.value;
+        ta.value = val.slice(0, start) + "  " + val.slice(end);
+        ta.selectionStart = ta.selectionEnd = start + 2;
+        updateEditorGutterAndStats();
+      }
+    };
+  }
   $("props-close").onclick = closeFileProperties;
   $("props-backdrop").onclick = closeFileProperties;
   if ($("btn-upload-access")) {

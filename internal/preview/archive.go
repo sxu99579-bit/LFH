@@ -80,11 +80,12 @@ func CleanArchivePath(raw string) (string, bool) {
 }
 
 func CanPreviewExt(ext string) bool {
+	if IsTextPreviewExt(ext) {
+		return true
+	}
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	switch ext {
-	case "md", "markdown", "txt", "json", "yaml", "yml", "log", "csv",
-		"go", "js", "ts", "py", "html", "css", "xml", "sh", "bat", "ini", "sql",
-		"docx", "xlsx", "pptx", "pdf",
+	case "docx", "xlsx", "pptx", "pdf",
 		"jpg", "jpeg", "png", "gif", "webp", "svg", "bmp",
 		"mp4", "webm", "mov", "m4v", "ogv",
 		"mp3", "wav", "flac", "ogg", "m4a":
@@ -98,7 +99,9 @@ func IsTextPreviewExt(ext string) bool {
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	switch ext {
 	case "md", "markdown", "txt", "json", "yaml", "yml", "log", "csv",
-		"go", "js", "ts", "py", "html", "css", "xml", "sh", "bat", "ini", "sql":
+		"go", "js", "ts", "jsx", "tsx", "py", "html", "css", "xml",
+		"sh", "bat", "ps1", "ini", "conf", "toml", "env", "sql",
+		"c", "cpp", "h", "java", "rs", "php", "rb":
 		return true
 	default:
 		return false

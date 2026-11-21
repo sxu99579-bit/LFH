@@ -1847,12 +1847,12 @@ func TestFileVersionControlAndNodeHealthTelemetryAPI(t *testing.T) {
 		Uploaded []storage.FileRecord `json:"uploaded"`
 	}
 	_ = json.Unmarshal(raw1, &up1)
-	if len(up1.Uploaded) != 1 || up1.Uploaded[0].Version != 1 {
-		t.Fatalf("expected v1 uploaded: %+v", up1)
+	if len(up1.Uploaded) != 1 || up1.Uploaded[0].Version != 1 || up1.Uploaded[0].UpdateMethod != storage.MethodInitialUpload {
+		t.Fatalf("expected v1 uploaded with MethodInitialUpload: %+v", up1)
 	}
 	fileID := up1.Uploaded[0].ID
 
-	// 2. Re-uploading spec.txt creates v2 automatically on the same record ID
+	// 2. Re-uploading spec.txt creates v2 automatically on the same record ID with MethodUploadOverwrite
 	res2, raw2 := uploadFile(ts.URL+"/api/upload", "files", "spec.txt", "", "spec-v2")
 	if res2.StatusCode != http.StatusCreated {
 		t.Fatalf("upload v2 failed: %d %s", res2.StatusCode, string(raw2))
@@ -1861,17 +1861,40 @@ func TestFileVersionControlAndNodeHealthTelemetryAPI(t *testing.T) {
 		Uploaded []storage.FileRecord `json:"uploaded"`
 	}
 	_ = json.Unmarshal(raw2, &up2)
-	if len(up2.Uploaded) != 1 || up2.Uploaded[0].ID != fileID || up2.Uploaded[0].Version != 2 || up2.Uploaded[0].VersionCount != 2 {
-		t.Fatalf("expected automatic v2 on same fileID: %+v", up2)
+	if len(up2.Uploaded) != 1 || up2.Uploaded[0].ID != fileID || up2.Uploaded[0].Version != 2 || up2.Uploaded[0].VersionCount != 2 || up2.Uploaded[0].UpdateMethod != storage.MethodUploadOverwrite {
+		t.Fatalf("expected automatic v2 on same fileID with MethodUploadOverwrite: %+v", up2)
 	}
 
-	// 3. Explicit POST /api/files/{id}/versions creates v3 with note
+	// 3. Explicit POST /api/files/{id}/versions creates v3 with note and MethodVersionUpload
 	res3, raw3 := uploadFile(ts.URL+"/api/files/"+fileID+"/versions", "file", "spec.txt", "正式版定稿", "spec-v3")
 	if res3.StatusCode != http.StatusCreated {
 		t.Fatalf("upload v3 failed: %d %s", res3.StatusCode, string(raw3))
 	}
 
-	// 4. GET /api/files/{id}/versions lists all 3 versions
+	// 3b. POST /api/files/{id}/edit creates v4 with MethodOnlineEdit
+	editBody, _ := json.Marshal(map[string]string{
+		"content": "spec-v4-edited-online",
+		"note":    "在线编辑修订",
+	})
+	editReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/files/"+fileID+"/edit", bytes.NewReader(editBody))
+	editReq.Header.Set("Content-Type", "application/json")
+	editReq.Header.Set("X-Device-Name", "Win11-Workstation")
+	editReq.Header.Set("X-Device-FP", "FP-EDIT123456")
+	editRes, err := adminClient.Do(editReq)
+	if err != nil {
+		t.Fatalf("POST /api/files/%s/edit: %v", fileID, err)
+	}
+	var editOut struct {
+		OK   bool               `json:"ok"`
+		File storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(editRes.Body).Decode(&editOut)
+	editRes.Body.Close()
+	if editRes.StatusCode != http.StatusOK || !editOut.OK || editOut.File.Version != 4 || editOut.File.UpdateMethod != storage.MethodOnlineEdit || editOut.File.DeviceName != "Win11-Workstation" {
+		t.Fatalf("unexpected edit response: status=%d out=%+v", editRes.StatusCode, editOut)
+	}
+
+	// 4. GET /api/files/{id}/versions lists all 4 versions with update_method, uploader, device_name, uploaded_at
 	vListRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/versions")
 	var vListOut struct {
 		CurrentVersion int                   `json:"current_version"`
@@ -1880,8 +1903,14 @@ func TestFileVersionControlAndNodeHealthTelemetryAPI(t *testing.T) {
 	}
 	_ = json.NewDecoder(vListRes.Body).Decode(&vListOut)
 	vListRes.Body.Close()
-	if vListRes.StatusCode != http.StatusOK || vListOut.CurrentVersion != 3 || vListOut.VersionCount != 3 || len(vListOut.Versions) != 3 {
+	if vListRes.StatusCode != http.StatusOK || vListOut.CurrentVersion != 4 || vListOut.VersionCount != 4 || len(vListOut.Versions) != 4 {
 		t.Fatalf("unexpected versions list: %+v", vListOut)
+	}
+	if vListOut.Versions[0].UpdateMethod != storage.MethodOnlineEdit ||
+		vListOut.Versions[1].UpdateMethod != storage.MethodVersionUpload ||
+		vListOut.Versions[2].UpdateMethod != storage.MethodUploadOverwrite ||
+		vListOut.Versions[3].UpdateMethod != storage.MethodInitialUpload {
+		t.Fatalf("unexpected version update_method chain: %+v", vListOut.Versions)
 	}
 
 	// 5. Download historical v1
@@ -1892,12 +1921,17 @@ func TestFileVersionControlAndNodeHealthTelemetryAPI(t *testing.T) {
 		t.Fatalf("download v1 mismatch: status=%d body=%q", dl1Res.StatusCode, string(dl1Bytes))
 	}
 
-	// 6. Restore v2 as active version
+	// 6. Restore v2 as active version (records MethodVersionRestore)
 	restoreBody, _ := json.Marshal(map[string]string{"note": "切回v2"})
 	restRes, _ := adminClient.Post(ts.URL+"/api/files/"+fileID+"/versions/2/restore", "application/json", bytes.NewReader(restoreBody))
+	var restOut struct {
+		OK   bool               `json:"ok"`
+		File storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(restRes.Body).Decode(&restOut)
 	restRes.Body.Close()
-	if restRes.StatusCode != http.StatusOK {
-		t.Fatalf("restore v2 failed: %d", restRes.StatusCode)
+	if restRes.StatusCode != http.StatusOK || restOut.File.UpdateMethod != storage.MethodVersionRestore {
+		t.Fatalf("restore v2 failed: status=%d out=%+v", restRes.StatusCode, restOut)
 	}
 	dlCurRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/download")
 	dlCurBytes, _ := io.ReadAll(dlCurRes.Body)

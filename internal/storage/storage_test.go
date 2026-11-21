@@ -232,8 +232,8 @@ func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveUpload v1: %v", err)
 	}
-	if v1Rec.Version != 1 || v1Rec.VersionCount != 1 || len(v1Rec.Versions) != 0 {
-		t.Fatalf("expected v1 with VersionCount=1, got %+v", v1Rec)
+	if v1Rec.Version != 1 || v1Rec.VersionCount != 1 || len(v1Rec.Versions) != 0 || v1Rec.UpdateMethod != MethodInitialUpload {
+		t.Fatalf("expected v1 with VersionCount=1 UpdateMethod=%s, got %+v", MethodInitialUpload, v1Rec)
 	}
 
 	// 2. Uploading the same filename + folderPath automatically creates v2 while preserving v1
@@ -241,10 +241,10 @@ func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveUpload v2: %v", err)
 	}
-	if v2Rec.ID != v1Rec.ID || v2Rec.Version != 2 || v2Rec.VersionCount != 2 || len(v2Rec.Versions) != 1 {
-		t.Fatalf("expected same ID and Version=2 VersionCount=2, got %+v", v2Rec)
+	if v2Rec.ID != v1Rec.ID || v2Rec.Version != 2 || v2Rec.VersionCount != 2 || len(v2Rec.Versions) != 1 || v2Rec.UpdateMethod != MethodUploadOverwrite {
+		t.Fatalf("expected same ID and Version=2 VersionCount=2 UpdateMethod=%s, got %+v", MethodUploadOverwrite, v2Rec)
 	}
-	if v2Rec.Versions[0].Version != 1 || v2Rec.Versions[0].Note != "初版草稿" {
+	if v2Rec.Versions[0].Version != 1 || v2Rec.Versions[0].Note != "初版草稿" || v2Rec.Versions[0].UpdateMethod != MethodInitialUpload {
 		t.Fatalf("unexpected archived v1: %+v", v2Rec.Versions[0])
 	}
 
@@ -253,13 +253,22 @@ func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveNewVersion v3: %v", err)
 	}
-	if v3Rec.Version != 3 || v3Rec.VersionCount != 3 || len(v3Rec.Versions) != 2 {
-		t.Fatalf("expected Version=3 VersionCount=3, got %+v", v3Rec)
+	if v3Rec.Version != 3 || v3Rec.VersionCount != 3 || len(v3Rec.Versions) != 2 || v3Rec.UpdateMethod != MethodVersionUpload {
+		t.Fatalf("expected Version=3 VersionCount=3 UpdateMethod=%s, got %+v", MethodVersionUpload, v3Rec)
 	}
 
-	// 4. GetVersion reads both current (v3) and historical (v1) versions from disk
+	// 3b. SaveEditedText creates v4 with MethodOnlineEdit
+	v4Rec, err := st.SaveEditedText(v1Rec.ID, "# online edited v4", "在线编辑修订", "bob", dev2)
+	if err != nil {
+		t.Fatalf("SaveEditedText v4: %v", err)
+	}
+	if v4Rec.Version != 4 || v4Rec.VersionCount != 4 || v4Rec.UpdateMethod != MethodOnlineEdit || v4Rec.Uploader != "bob" || v4Rec.DeviceName != "PC-2" {
+		t.Fatalf("expected Version=4 UpdateMethod=%s, got %+v", MethodOnlineEdit, v4Rec)
+	}
+
+	// 4. GetVersion reads both current (v4) and historical (v1) versions from disk
 	_, fv1, path1, ok := st.GetVersion(v1Rec.ID, 1)
-	if !ok || fv1.Version != 1 {
+	if !ok || fv1.Version != 1 || fv1.UpdateMethod != MethodInitialUpload {
 		t.Fatalf("GetVersion(1) failed: ok=%v fv=%+v", ok, fv1)
 	}
 	raw1, err := os.ReadFile(path1)
@@ -267,12 +276,12 @@ func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
 		t.Fatalf("unexpected v1 content: %q err=%v", string(raw1), err)
 	}
 
-	// 5. RestoreVersion promotes v1 back to active while keeping v3 and v2 in history
-	restored, err := st.RestoreVersion(v1Rec.ID, 1, "回滚至初版")
+	// 5. RestoreVersionByUser promotes v1 back to active while keeping v4, v3, and v2 in history
+	restored, err := st.RestoreVersionByUser(v1Rec.ID, 1, "回滚至初版", "alice", dev1)
 	if err != nil {
-		t.Fatalf("RestoreVersion(1): %v", err)
+		t.Fatalf("RestoreVersionByUser(1): %v", err)
 	}
-	if restored.Version != 1 || restored.VersionCount != 3 || restored.VersionNote != "回滚至初版" {
+	if restored.Version != 1 || restored.VersionCount != 4 || restored.VersionNote != "回滚至初版" || restored.UpdateMethod != MethodVersionRestore || restored.Uploader != "alice" {
 		t.Fatalf("unexpected restored record: %+v", restored)
 	}
 	_, curPath, ok := st.Get(v1Rec.ID)
@@ -286,7 +295,7 @@ func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
 
 	// 6. DeleteVersion removes historical v2
 	afterDelV2, err := st.DeleteVersion(v1Rec.ID, 2)
-	if err != nil || afterDelV2.VersionCount != 2 || len(afterDelV2.Versions) != 1 {
+	if err != nil || afterDelV2.VersionCount != 3 || len(afterDelV2.Versions) != 2 {
 		t.Fatalf("DeleteVersion(2) mismatch: rec=%+v err=%v", afterDelV2, err)
 	}
 

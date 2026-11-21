@@ -185,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/cluster/files/{id}/archive-entry", s.requireClusterAuth(s.handleClusterArchiveEntry))
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}", s.requireClusterAuth(s.handleClusterDelete))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/access", s.requireClusterAuth(s.handleClusterUpdateAccess))
+	mux.HandleFunc("POST /internal/cluster/files/{id}/edit", s.requireClusterAuth(s.handleClusterEditFile))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/versions", s.requireClusterAuth(s.handleClusterNewVersion))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/versions/{ver}/download", s.requireClusterAuth(s.handleClusterDownloadVersion))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/versions/{ver}/restore", s.requireClusterAuth(s.handleClusterRestoreVersion))
@@ -249,6 +250,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/files/{id}/meta", s.requireAuth(s.handleFileMeta))
 	mux.HandleFunc("GET /api/files/{id}/archive-entry", s.requireAuth(s.handleArchiveEntry))
 	mux.HandleFunc("POST /api/files/{id}/access", s.requireAuth(s.handleUpdateFileAccess))
+	mux.HandleFunc("POST /api/files/{id}/edit", s.requireAuth(s.handleEditFile))
 	mux.HandleFunc("GET /api/files/{id}/versions", s.requireAuth(s.handleGetFileVersions))
 	mux.HandleFunc("POST /api/files/{id}/versions", s.requireAuth(s.handleUploadFileVersion))
 	mux.HandleFunc("GET /api/files/{id}/versions/{ver}/download", s.requireAuth(s.handleDownloadFileVersion))
@@ -489,6 +491,57 @@ func (s *Server) handleClusterNewVersion(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, rec)
 }
 
+func (s *Server) handleClusterEditFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Content      string `json:"content"`
+		Note         string `json:"note"`
+		Uploader     string `json:"uploader"`
+		DeviceFP     string `json:"device_fp"`
+		DeviceName   string `json:"device_name"`
+		DeviceIP     string `json:"device_ip"`
+		DeviceDetail string `json:"device_detail"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析编辑内容失败"})
+		return
+	}
+	rec, _, ok := s.store.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+		return
+	}
+	if !preview.IsTextPreviewExt(rec.Ext) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "该文件类型不支持在线文本编辑"})
+		return
+	}
+	if err := s.cluster.CanAcceptLocal(int64(len(req.Content))); err != nil {
+		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+		return
+	}
+	uploader := strings.TrimSpace(req.Uploader)
+	if uploader == "" {
+		uploader = "unknown"
+	}
+	dev := storage.DeviceInfo{
+		FP:     req.DeviceFP,
+		Name:   req.DeviceName,
+		IP:     req.DeviceIP,
+		Detail: req.DeviceDetail,
+	}
+	updated, err := s.store.SaveEditedText(id, req.Content, req.Note, uploader, dev)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	updated.NodeID = s.cluster.NodeID()
+	updated.NodeName = s.cluster.NodeName()
+	updated.NodeOS = runtime.GOOS
+	updated.NodeOnline = true
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (s *Server) handleClusterDownloadVersion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ver, err := strconv.Atoi(r.PathValue("ver"))
@@ -507,10 +560,21 @@ func (s *Server) handleClusterRestoreVersion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		Note string `json:"note"`
+		Note         string `json:"note"`
+		Uploader     string `json:"uploader"`
+		DeviceFP     string `json:"device_fp"`
+		DeviceName   string `json:"device_name"`
+		DeviceIP     string `json:"device_ip"`
+		DeviceDetail string `json:"device_detail"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	rec, err := s.store.RestoreVersion(id, ver, req.Note)
+	dev := storage.DeviceInfo{
+		FP:     req.DeviceFP,
+		Name:   req.DeviceName,
+		IP:     req.DeviceIP,
+		Detail: req.DeviceDetail,
+	}
+	rec, err := s.store.RestoreVersionByUser(id, ver, req.Note, req.Uploader, dev)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -2472,6 +2536,61 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.Pub
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	id := r.PathValue("id")
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if !preview.IsTextPreviewExt(rec.Ext) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "该文件类型不支持在线文本编辑"})
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+		Note    string `json:"note"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析编辑内容失败"})
+		return
+	}
+	dev := extractDeviceInfo(r)
+	note := strings.TrimSpace(req.Note)
+	var updated storage.FileRecord
+	var err error
+	if isLocal {
+		if err := s.cluster.CanAcceptLocal(int64(len(req.Content))); err != nil {
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+			return
+		}
+		updated, err = s.store.SaveEditedText(id, req.Content, note, u.Username, dev)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		updated.NodeID = s.cluster.NodeID()
+		updated.NodeName = s.cluster.NodeName()
+		updated.NodeOS = runtime.GOOS
+		updated.NodeOnline = true
+	} else {
+		if !peer.Online {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "文件所在存储节点当前离线"})
+			return
+		}
+		updated, err = s.cluster.ProxyEditFile(peer, id, req.Content, note, u.Username, dev)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	s.publishRecordChange("upload", u.Username, []storage.FileRecord{updated}, rec.AllowedUsers)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"file": s.sanitizeRecordForUser(updated, u),
+	})
+}
+
 func (s *Server) handleGetFileVersions(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	id := r.PathValue("id")
 	rec, _, _, _, status, errMsg := s.findAccessibleFile(id, u)
@@ -2496,10 +2615,14 @@ func (s *Server) handleGetFileVersions(w http.ResponseWriter, r *http.Request, u
 		DeviceDetail: clean.DeviceDetail,
 		StorageDir:   clean.StorageDir,
 		Note:         clean.VersionNote,
+		UpdateMethod: storage.DefaultUpdateMethod(clean.UpdateMethod, curVer),
 	}
 	allVersions := make([]storage.FileVersion, 0, 1+len(clean.Versions))
 	allVersions = append(allVersions, currentItem)
-	allVersions = append(allVersions, clean.Versions...)
+	for _, v := range clean.Versions {
+		v.UpdateMethod = storage.DefaultUpdateMethod(v.UpdateMethod, v.Version)
+		allVersions = append(allVersions, v)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file":            clean,
 		"current_version": curVer,
@@ -2615,10 +2738,11 @@ func (s *Server) handleRestoreFileVersion(w http.ResponseWriter, r *http.Request
 		Note string `json:"note"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	dev := extractDeviceInfo(r)
 
 	var updated storage.FileRecord
 	if isLocal {
-		updated, err = s.store.RestoreVersion(id, ver, req.Note)
+		updated, err = s.store.RestoreVersionByUser(id, ver, req.Note, u.Username, dev)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -2632,7 +2756,7 @@ func (s *Server) handleRestoreFileVersion(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "文件所在存储节点当前离线"})
 			return
 		}
-		updated, err = s.cluster.ProxyRestoreVersion(peer, id, ver, req.Note)
+		updated, err = s.cluster.ProxyRestoreVersion(peer, id, ver, req.Note, u.Username, dev)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
@@ -3051,8 +3175,17 @@ func (s *Server) serveArchiveEntry(w http.ResponseWriter, r *http.Request, id st
 func extractDeviceInfo(r *http.Request) storage.DeviceInfo {
 	clientIP := resolveClientIP(r)
 	fp := truncateRunes(strings.TrimSpace(r.FormValue("device_fp")), 64)
+	if fp == "" {
+		fp = truncateRunes(strings.TrimSpace(r.Header.Get("X-Device-FP")), 64)
+	}
 	name := truncateRunes(strings.TrimSpace(r.FormValue("device_name")), 80)
+	if name == "" {
+		name = truncateRunes(strings.TrimSpace(r.Header.Get("X-Device-Name")), 80)
+	}
 	detail := truncateRunes(strings.TrimSpace(r.FormValue("device_detail")), 160)
+	if detail == "" {
+		detail = truncateRunes(strings.TrimSpace(r.Header.Get("X-Device-Detail")), 160)
+	}
 
 	if name == "" {
 		name = deriveDeviceName(r.UserAgent())
