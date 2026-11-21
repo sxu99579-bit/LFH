@@ -132,6 +132,28 @@ type beaconPacket struct {
 	EntryURL    string `json:"entry_url"`
 }
 
+var directClusterTransport = &http.Transport{
+	// Never route LAN node-to-node RPCs through HTTP_PROXY / HTTPS_PROXY.
+	Proxy: nil,
+	DialContext: (&net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          64,
+	MaxIdleConnsPerHost:   16,
+	IdleConnTimeout:       60 * time.Second,
+	TLSHandshakeTimeout:   5 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
+func newDirectClusterClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: directClusterTransport,
+	}
+}
+
 type peerRecord struct {
 	status    NodeStatus
 	files     []storage.FileRecord
@@ -328,8 +350,8 @@ func NewManager(dataDir string, store *storage.Store, opts Options) (*Manager, e
 		selfURL:      strings.TrimRight(strings.TrimSpace(opts.SelfURL), "/"),
 		peers:        make(map[string]*peerRecord),
 		discovered:   make(map[string]DiscoveredNode),
-		apiClient:    &http.Client{Timeout: 10 * time.Second},
-		streamClient: &http.Client{},
+		apiClient:    newDirectClusterClient(10 * time.Second),
+		streamClient: newDirectClusterClient(0),
 		hbTrigger:    make(chan struct{}, 1),
 	}
 	if err := m.saveLocked(); err != nil {
@@ -1102,7 +1124,7 @@ func (m *Manager) UpdateNodeStorageDir(nodeID, newDir string, migrateExisting bo
 
 	client := m.apiClient
 	if migrateExisting {
-		client = &http.Client{Timeout: 5 * time.Minute}
+		client = newDirectClusterClient(5 * time.Minute)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1281,7 +1303,7 @@ func (m *Manager) SendTestHeartbeat(entryURL, secret string) error {
 	req.Header.Set("Content-Type", "application/json")
 	SignRequest(req, sec, m.NodeID())
 
-	client := &http.Client{Timeout: 6 * time.Second}
+	client := newDirectClusterClient(6 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("无法连接到主入口节点 %s: %w", cleanEntry, err)
@@ -1369,7 +1391,7 @@ func (m *Manager) AdoptPeer(peerURL, targetAdminUser, targetAdminPass, targetAut
 		"quota_text":         strings.TrimSpace(quotaText),
 	}
 	raw, _ := json.Marshal(reqBody)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := newDirectClusterClient(15 * time.Second)
 	req, err := http.NewRequest(http.MethodPost, cleanPeer+"/api/cluster/adopt", bytes.NewReader(raw))
 	if err != nil {
 		return NodeStatus{}, err

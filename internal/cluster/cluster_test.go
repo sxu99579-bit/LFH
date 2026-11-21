@@ -347,3 +347,62 @@ func TestOfflinePeerFilesHiddenNormalizeProbeAndRemove(t *testing.T) {
 		t.Fatalf("expected 1 node after RemovePeer")
 	}
 }
+
+func TestDirectClusterClientIgnoresHTTPProxy(t *testing.T) {
+	// Point HTTP_PROXY / HTTPS_PROXY at an unreachable blackhole port; direct LAN clients must still succeed.
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "")
+
+	secret := "proxy-bypass-secret"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/info":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app_name": "LFH",
+				"version":  "V0.11.21.4",
+				"role":     "entry",
+				"pool": PoolSummary{
+					Nodes: []NodeStatus{{
+						NodeID:   "node-entry-direct",
+						NodeName: "Entry-Direct",
+						Role:     "entry",
+						IsSelf:   true,
+					}},
+				},
+			})
+		case "/internal/cluster/heartbeat":
+			if !VerifyRequest(r, secret) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	st, err := storage.NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	mgr, err := NewManager(dir, st, Options{
+		Role:             RoleWorker,
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:8081",
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	dn, err := mgr.ProbeNodeURL(context.Background(), ts.URL, "manual")
+	if err != nil || dn.NodeID != "node-entry-direct" {
+		t.Fatalf("ProbeNodeURL failed with HTTP_PROXY set: dn=%+v err=%v", dn, err)
+	}
+	if err := mgr.SendTestHeartbeat(ts.URL, secret); err != nil {
+		t.Fatalf("SendTestHeartbeat failed with HTTP_PROXY set: %v", err)
+	}
+}

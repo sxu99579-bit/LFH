@@ -18,7 +18,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.3",
+  appVersion: "V0.11.21.4",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -627,7 +627,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.3";
+  const ver = state.appVersion || "V0.11.21.4";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -2764,7 +2764,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.3";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.4";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";

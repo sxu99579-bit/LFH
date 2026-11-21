@@ -84,7 +84,7 @@ func (m *Manager) ProbeNodeURL(ctx context.Context, rawURL, source string) (Disc
 	if err != nil {
 		return DiscoveredNode{}, err
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := newDirectClusterClient(2 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return DiscoveredNode{}, fmt.Errorf("连接 %s 失败: %w", cleanURL, err)

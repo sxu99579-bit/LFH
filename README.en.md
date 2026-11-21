@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.3</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.4</code>
 </p>
 
 ---
@@ -64,7 +64,7 @@ Your generated initial credentials are also written to `./lfh-data/initial-admin
 Manual `docker build` / `docker run` equivalent:
 
 ```bash
-docker build -t lfh:V0.11.21.3 .
+docker build -t lfh:V0.11.21.4 .
 
 docker run -d \
   --name lfh \
@@ -72,7 +72,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/lfh-data:/data \
-  lfh:V0.11.21.3 -data /data -port 8080 -expose-ip 192.168.1.100
+  lfh:V0.11.21.4 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---
