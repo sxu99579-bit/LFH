@@ -21,7 +21,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.9",
+  appVersion: "V0.11.21.10",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -665,7 +665,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.9";
+  const ver = state.appVersion || "V0.11.21.10";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }

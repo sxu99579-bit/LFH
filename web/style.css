@@ -3165,66 +3165,138 @@ code {
     font-size: 16px !important;
   }
   .topbar {
-    padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;
-    gap: 8px;
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 10px 8px;
+    gap: 6px;
+    flex-direction: column;
+    align-items: stretch;
   }
   .topbar-left {
     width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     justify-content: space-between;
+    gap: 6px;
+  }
+  .workspace-nav {
+    width: 100%;
+    order: 2;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+  }
+  .workspace-nav-btn {
+    justify-content: center;
+    padding: 6px 8px;
+    font-size: 12.5px;
   }
   .home-access-bar {
-    flex: 1;
+    width: 100%;
+    order: 3;
     min-width: 0;
     justify-content: space-between;
-    padding: 4px 8px;
+    padding: 5px 8px;
+    gap: 6px;
+  }
+  .top-entry-select {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    font-size: 12px !important;
+    padding: 4px 6px;
   }
   .access-label,
   #current-device-badge {
     display: none;
   }
   .access-url {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 46vw;
+    max-width: none;
     font-size: 12px;
   }
   .topbar-right {
     width: 100%;
-    justify-content: space-between;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .topbar-right .user-badge {
+    margin-right: auto;
+    font-size: 11.5px;
+    padding: 3px 8px;
   }
   .workspace-body {
-    padding: 10px 10px calc(18px + env(safe-area-inset-bottom, 0px));
-    gap: 10px;
+    padding: 8px 10px calc(18px + env(safe-area-inset-bottom, 0px));
+    gap: 8px;
   }
   .upload-strip {
-    padding: 12px;
+    padding: 10px 12px;
     flex-direction: column;
     align-items: stretch;
+    gap: 8px;
+  }
+  .upload-strip .upload-desc {
+    display: none;
+  }
+  .upload-strip .upload-title {
+    font-size: 13px;
+    line-height: 1.35;
   }
   .upload-strip-right {
     width: 100%;
-    flex-direction: column;
-    align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    align-items: center;
   }
-  .node-select {
+  .upload-strip-right .access-pill-btn {
+    width: 100%;
+    justify-content: center;
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+  .upload-strip-right .node-select {
     max-width: none;
     width: 100%;
+    font-size: 12px !important;
+    padding: 6px 8px;
   }
-  .progress-wrap {
-    width: 100%;
-  }
-  .upload-btn-group {
+  .upload-strip-right .progress-wrap,
+  .upload-strip-right .upload-btn-group {
+    grid-column: 1 / -1;
     width: 100%;
   }
   .upload-btn-group .btn {
     flex: 1;
-    min-height: 38px;
+    min-height: 36px;
   }
   .files-toolbar {
     padding: 10px 12px;
     flex-direction: column;
     align-items: stretch;
+    gap: 8px;
+  }
+  .files-toolbar-left {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .files-toolbar-left .active-filters {
+    width: 100%;
+    order: 3;
+    font-size: 11.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .files-actions {
     width: 100%;
@@ -3246,15 +3318,57 @@ code {
   }
   .files-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 8px;
     padding: 10px;
   }
+  .file-card {
+    border-radius: 12px;
+  }
   .file-card-thumb {
-    height: 98px;
+    height: 82px;
   }
   .thumb-icon-wrap svg {
-    width: 54px;
-    height: 54px;
+    width: 44px;
+    height: 44px;
+  }
+  .file-card-body {
+    padding: 8px 10px;
+    gap: 4px;
+  }
+  .file-card-title {
+    font-size: 12.5px;
+    line-height: 1.3;
+    -webkit-line-clamp: 1;
+  }
+  .file-card-body .ver-chip {
+    font-size: 10px;
+    padding: 1px 5px;
+    max-width: 85px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-card-meta {
+    font-size: 11px;
+    gap: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-card-body .admin-path-sub,
+  .file-card-body .fp-chip {
+    display: none;
+  }
+  .file-card-actions {
+    padding: 6px 8px 8px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+  }
+  .file-card-actions .btn {
+    padding: 5px 4px;
+    font-size: 11px;
+    min-width: 0;
   }
   .props-row {
     flex-direction: column;
@@ -3304,36 +3418,36 @@ code {
     padding: 8px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
   }
   .files-table.files-cards-mobile tbody tr {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px 10px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px 8px;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 12px;
+    padding: 10px 12px;
   }
   .files-table.files-cards-mobile td {
     padding: 0;
     border: none;
     white-space: normal;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: 12px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
   }
   .files-table.files-cards-mobile td[data-label]::before {
     content: attr(data-label);
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--muted);
   }
   .files-table.files-cards-mobile td.file-name-cell {
     grid-column: 1 / -1;
     max-width: none;
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 600;
     padding-bottom: 6px;
     border-bottom: 1px solid var(--border);
@@ -3343,7 +3457,10 @@ code {
     display: none;
   }
   .files-table.files-cards-mobile td.col-device {
-    grid-column: 1 / -1;
+    display: none;
+  }
+  .files-table.files-cards-mobile .admin-path-sub {
+    display: none;
   }
   .files-table.files-cards-mobile td.col-actions {
     grid-column: 1 / -1;
@@ -3352,11 +3469,15 @@ code {
   }
   .files-table.files-cards-mobile .row-actions {
     width: 100%;
+    display: flex;
     flex-wrap: wrap;
+    gap: 6px;
   }
   .files-table.files-cards-mobile .row-actions .btn {
-    flex: 1;
-    min-height: 36px;
+    flex: 1 1 28%;
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: 12px;
     text-align: center;
     justify-content: center;
   }

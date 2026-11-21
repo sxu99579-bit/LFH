@@ -199,28 +199,29 @@
       color: #fff;
     }
 
-    /* 移动端工作区滚动高度留出底部导航栏 */
+    /* 移动端工作区滚动高度留出底部导航栏（整页自然滚动，不再把上传框固定死占满半屏） */
     html[data-layout="mobile"] .workspace-body {
       flex: 1;
-      overflow: hidden;
-      padding: 0 0 64px 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      padding: 0 0 calc(72px + env(safe-area-inset-bottom, 0px)) 0;
       display: flex;
       flex-direction: column;
     }
     html[data-layout="mobile"] #page-files {
-      flex: 1;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
+      overflow: visible;
+      min-height: min-content;
       gap: 0;
     }
     html[data-layout="mobile"] .files-panel {
-      flex: 1;
-      margin: 0 12px;
-      border-radius: 14px 14px 0 0;
+      margin: 0 10px 12px;
+      border-radius: 14px;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
+      overflow: visible;
     }
     html[data-layout="mobile"] .files-toolbar {
       padding: 10px 12px;
@@ -238,20 +239,18 @@
       min-width: 0;
     }
     html[data-layout="mobile"] .table-scroll {
-      flex: 1;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      padding-bottom: 24px;
+      overflow: visible;
+      padding-bottom: 12px;
     }
     html[data-layout="mobile"] .page-panel {
-      margin: 8px 12px;
+      margin: 8px 10px;
       border-radius: 14px;
-      flex: 1;
-      overflow: hidden;
+      overflow: visible;
     }
     html[data-layout="mobile"] .page-panel-scroll {
       padding: 12px;
-      padding-bottom: 30px;
+      padding-bottom: 24px;
+      overflow: visible;
     }
 
     /* 移动端底部固定 Tab 导航栏 */
@@ -318,7 +317,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.9</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.10</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -385,7 +384,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.9</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.10</span></div>
           <div class="brand-sub">多维筛选与存储池总览</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
@@ -1037,7 +1036,7 @@
             </div>
             <div class="update-status-card">
               <div class="update-meta-grid">
-                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.9</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.10</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>
