@@ -87,23 +87,55 @@ type Options struct {
 	SelfURL          string
 }
 
+type hostMetrics struct {
+	CPUPercent     float64
+	CPUCores       int
+	MemPercent     float64
+	MemUsedBytes   int64
+	MemTotalBytes  int64
+	DiskTotalBytes int64
+	DiskUsedBytes  int64
+	DiskFreeBytes  int64
+	DiskPercent    float64
+}
+
 type NodeStatus struct {
-	NodeID     string      `json:"node_id"`
-	NodeName   string      `json:"node_name"`
-	Role       string      `json:"role"`
-	OS         string      `json:"os"`
-	Arch       string      `json:"arch"`
-	HTTPURL    string      `json:"http_url"`
-	QuotaGB    float64     `json:"quota_gb"`
-	QuotaBytes int64       `json:"quota_bytes"`
-	UsedBytes  int64       `json:"used_bytes"`
-	FreeBytes  int64       `json:"free_bytes"`
-	FileCount  int         `json:"file_count"`
-	StorageDir string      `json:"storage_dir,omitempty"`
-	Drives     []DriveInfo `json:"drives,omitempty"`
-	Online     bool        `json:"online"`
-	IsSelf     bool        `json:"is_self"`
-	LastSeen   time.Time   `json:"last_seen"`
+	NodeID             string      `json:"node_id"`
+	NodeName           string      `json:"node_name"`
+	Role               string      `json:"role"`
+	OS                 string      `json:"os"`
+	Arch               string      `json:"arch"`
+	Version            string      `json:"version,omitempty"`
+	HTTPURL            string      `json:"http_url"`
+	QuotaGB            float64     `json:"quota_gb"`
+	QuotaBytes         int64       `json:"quota_bytes"`
+	UsedBytes          int64       `json:"used_bytes"`
+	FreeBytes          int64       `json:"free_bytes"`
+	FileCount          int         `json:"file_count"`
+	StorageDir         string      `json:"storage_dir,omitempty"`
+	Drives             []DriveInfo `json:"drives,omitempty"`
+	CPUPercent         float64     `json:"cpu_percent"`
+	CPUCores           int         `json:"cpu_cores,omitempty"`
+	MemPercent         float64     `json:"mem_percent"`
+	MemUsedBytes       int64       `json:"mem_used_bytes"`
+	MemTotalBytes      int64       `json:"mem_total_bytes"`
+	DiskTotalBytes     int64       `json:"disk_total_bytes"`
+	DiskUsedBytes      int64       `json:"disk_used_bytes"`
+	DiskFreeBytes      int64       `json:"disk_free_bytes"`
+	DiskPercent        float64     `json:"disk_percent"`
+	NetLatencyMs       float64     `json:"net_latency_ms"`
+	HeartbeatLatencyMs float64     `json:"heartbeat_latency_ms"`
+	UploadBps          int64       `json:"upload_bps"`
+	DownloadBps        int64       `json:"download_bps"`
+	TotalUploadBytes   int64       `json:"total_upload_bytes,omitempty"`
+	TotalDownloadBytes int64       `json:"total_download_bytes,omitempty"`
+	LastSyncAt         time.Time   `json:"last_sync_at"`
+	IOReadErrors       int64       `json:"io_read_errors"`
+	IOWriteErrors      int64       `json:"io_write_errors"`
+	IOTotalErrors      int64       `json:"io_total_errors"`
+	Online             bool        `json:"online"`
+	IsSelf             bool        `json:"is_self"`
+	LastSeen           time.Time   `json:"last_seen"`
 }
 
 type PoolSummary struct {
@@ -158,9 +190,10 @@ func newDirectClusterClient(timeout time.Duration) *http.Client {
 }
 
 type peerRecord struct {
-	status    NodeStatus
-	files     []storage.FileRecord
-	wasOnline bool
+	status     NodeStatus
+	files      []storage.FileRecord
+	wasOnline  bool
+	lastProbed time.Time
 }
 
 type Manager struct {
@@ -178,6 +211,8 @@ type Manager struct {
 	parentCtx          context.Context
 	loopCancel         context.CancelFunc
 	onPeerChange       func(nodeName string, online bool)
+	lastHBLatencyMs    float64
+	lastSyncAt         time.Time
 }
 
 func ParseQuotaBytes(input string) (int64, error) {
@@ -457,7 +492,17 @@ func (m *Manager) SelfStatus() NodeStatus {
 	m.mu.RLock()
 	cfg := m.cfg
 	selfURL := m.selfURL
+	hbLat := m.lastHBLatencyMs
+	lastSync := m.lastSyncAt
 	m.mu.RUnlock()
+
+	now := time.Now()
+	if lastSync.IsZero() {
+		lastSync = now
+	}
+	if hbLat <= 0 {
+		hbLat = 0.3
+	}
 
 	cnt, used := m.store.LocalStats()
 	quotaBytes := cfg.QuotaBytes
@@ -468,24 +513,84 @@ func (m *Manager) SelfStatus() NodeStatus {
 	if free < 0 {
 		free = 0
 	}
-	return NodeStatus{
-		NodeID:     cfg.NodeID,
-		NodeName:   cfg.NodeName,
-		Role:       cfg.Role,
-		OS:         runtime.GOOS,
-		Arch:       runtime.GOARCH,
-		HTTPURL:    selfURL,
-		QuotaGB:    float64(quotaBytes) / float64(GB),
-		QuotaBytes: quotaBytes,
-		UsedBytes:  used,
-		FreeBytes:  free,
-		FileCount:  cnt,
-		StorageDir: m.store.UploadDir(),
-		Drives:     ListDrives(),
-		Online:     true,
-		IsSelf:     true,
-		LastSeen:   time.Now(),
+	storageDir := m.store.UploadDir()
+	drives := ListDrives()
+	hm := collectHostMetrics(storageDir)
+	if hm.DiskTotalBytes <= 0 && len(drives) > 0 {
+		dTotal, dUsed, dFree, dPct := deriveDiskMetricsFromDrives(storageDir, drives)
+		hm.DiskTotalBytes = dTotal
+		hm.DiskUsedBytes = dUsed
+		hm.DiskFreeBytes = dFree
+		hm.DiskPercent = dPct
 	}
+	rErr, wErr := m.store.IOStats()
+	upBps, downBps, totalUp, totalDown := m.store.TransferStats()
+	netLat := 0.2
+	if cfg.Role == RoleWorker && hbLat > 0 {
+		netLat = hbLat
+	}
+
+	return NodeStatus{
+		NodeID:             cfg.NodeID,
+		NodeName:           cfg.NodeName,
+		Role:               cfg.Role,
+		OS:                 runtime.GOOS,
+		Arch:               runtime.GOARCH,
+		Version:            version.Version,
+		HTTPURL:            selfURL,
+		QuotaGB:            float64(quotaBytes) / float64(GB),
+		QuotaBytes:         quotaBytes,
+		UsedBytes:          used,
+		FreeBytes:          free,
+		FileCount:          cnt,
+		StorageDir:         storageDir,
+		Drives:             drives,
+		CPUPercent:         hm.CPUPercent,
+		CPUCores:           hm.CPUCores,
+		MemPercent:         hm.MemPercent,
+		MemUsedBytes:       hm.MemUsedBytes,
+		MemTotalBytes:      hm.MemTotalBytes,
+		DiskTotalBytes:     hm.DiskTotalBytes,
+		DiskUsedBytes:      hm.DiskUsedBytes,
+		DiskFreeBytes:      hm.DiskFreeBytes,
+		DiskPercent:        hm.DiskPercent,
+		NetLatencyMs:       netLat,
+		HeartbeatLatencyMs: hbLat,
+		UploadBps:          upBps,
+		DownloadBps:        downBps,
+		TotalUploadBytes:   totalUp,
+		TotalDownloadBytes: totalDown,
+		LastSyncAt:         lastSync,
+		IOReadErrors:       rErr,
+		IOWriteErrors:      wErr,
+		IOTotalErrors:      rErr + wErr,
+		Online:             true,
+		IsSelf:             true,
+		LastSeen:           now,
+	}
+}
+
+func deriveDiskMetricsFromDrives(storageDir string, drives []DriveInfo) (total, used, free int64, pct float64) {
+	if len(drives) == 0 {
+		return 0, 0, 0, 0
+	}
+	chosen := drives[0]
+	cleanDir := strings.ToLower(strings.TrimSpace(storageDir))
+	bestMatchLen := -1
+	for _, d := range drives {
+		p := strings.ToLower(strings.TrimSpace(d.Path))
+		if p != "" && strings.HasPrefix(cleanDir, p) && len(p) > bestMatchLen {
+			chosen = d
+			bestMatchLen = len(p)
+		}
+	}
+	total = chosen.TotalBytes
+	free = chosen.FreeBytes
+	if total > 0 {
+		used = max(0, total-free)
+		pct = math.Round((float64(used)*100.0/float64(total))*10) / 10
+	}
+	return total, used, free, pct
 }
 
 func (m *Manager) CanAcceptLocal(size int64) error {
@@ -528,8 +633,13 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	n.Online = true
 	n.IsSelf = false
 	n.LastSeen = now
+	n.LastSyncAt = now
+	n.IOTotalErrors = n.IOReadErrors + n.IOWriteErrors
 	if n.HTTPURL != "" {
 		n.HTTPURL = strings.TrimRight(n.HTTPURL, "/")
+	}
+	if n.DiskTotalBytes <= 0 && len(n.Drives) > 0 {
+		n.DiskTotalBytes, n.DiskUsedBytes, n.DiskFreeBytes, n.DiskPercent = deriveDiskMetricsFromDrives(n.StorageDir, n.Drives)
 	}
 
 	files := make([]storage.FileRecord, len(payload.Files))
@@ -545,6 +655,7 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	}
 
 	m.mu.Lock()
+	m.lastSyncAt = now
 	if len(m.cfg.EvictedPeers) > 0 {
 		if _, evicted := m.cfg.EvictedPeers[n.NodeID]; evicted {
 			if n.HTTPURL != "" {
@@ -554,6 +665,7 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 					Role:          n.Role,
 					OS:            n.OS,
 					Arch:          n.Arch,
+					Version:       n.Version,
 					URL:           n.HTTPURL,
 					QuotaBytes:    n.QuotaBytes,
 					UsedBytes:     n.UsedBytes,
@@ -569,6 +681,33 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		}
 	}
 	prev, exists := m.peers[n.NodeID]
+	var lastProbed time.Time
+	if exists {
+		lastProbed = prev.lastProbed
+		if n.Version == "" {
+			n.Version = prev.status.Version
+		}
+		if n.NetLatencyMs <= 0 {
+			n.NetLatencyMs = prev.status.NetLatencyMs
+		}
+		if n.HeartbeatLatencyMs <= 0 {
+			if !prev.status.LastSeen.IsZero() {
+				gapMs := float64(now.Sub(prev.status.LastSeen).Microseconds()) / 1000.0
+				if prev.status.NetLatencyMs > 0 {
+					n.HeartbeatLatencyMs = prev.status.NetLatencyMs
+				} else if gapMs > 0 && gapMs < 500 {
+					n.HeartbeatLatencyMs = math.Round(gapMs*10) / 10
+				}
+			}
+			if n.HeartbeatLatencyMs <= 0 {
+				n.HeartbeatLatencyMs = prev.status.HeartbeatLatencyMs
+			}
+		}
+	}
+	needProbe := n.HTTPURL != "" && (n.Version == "" || n.NetLatencyMs <= 0 || now.Sub(lastProbed) > 9*time.Second)
+	if needProbe {
+		lastProbed = now
+	}
 	changed := !exists ||
 		!prev.wasOnline ||
 		now.Sub(prev.status.LastSeen) > PeerTimeout ||
@@ -581,6 +720,8 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	if !changed {
 		for i := range files {
 			if prev.files[i].ID != files[i].ID ||
+				prev.files[i].Version != files[i].Version ||
+				prev.files[i].VersionCount != files[i].VersionCount ||
 				prev.files[i].StorageDir != files[i].StorageDir ||
 				!equalStringSlice(prev.files[i].AllowedUsers, files[i].AllowedUsers) {
 				changed = true
@@ -589,12 +730,53 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		}
 	}
 	m.peers[n.NodeID] = &peerRecord{
-		status:    n,
-		files:     files,
-		wasOnline: true,
+		status:     n,
+		files:      files,
+		wasOnline:  true,
+		lastProbed: lastProbed,
 	}
 	m.mu.Unlock()
+	if needProbe {
+		go m.refreshPeerTelemetry(n.NodeID, n.HTTPURL)
+	}
 	return changed
+}
+
+func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
+	cleanURL := strings.TrimRight(strings.TrimSpace(httpURL), "/")
+	if cleanURL == "" {
+		return
+	}
+	t0 := time.Now()
+	req, err := http.NewRequest(http.MethodGet, cleanURL+"/api/info", nil)
+	if err != nil {
+		return
+	}
+	resp, err := newDirectClusterClient(2 * time.Second).Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	rttMs := math.Round((float64(time.Since(t0).Microseconds())/1000.0)*10) / 10
+	if rttMs <= 0 {
+		rttMs = 0.2
+	}
+	var info struct {
+		Version string `json:"version"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&info)
+
+	m.mu.Lock()
+	if p, ok := m.peers[nodeID]; ok {
+		p.status.NetLatencyMs = rttMs
+		if p.status.HeartbeatLatencyMs <= 0 {
+			p.status.HeartbeatLatencyMs = rttMs
+		}
+		if info.Version != "" && p.status.Version == "" {
+			p.status.Version = info.Version
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) SetOnPeerChange(fn func(nodeName string, online bool)) {
@@ -787,6 +969,14 @@ func (m *Manager) AddPeerFile(nodeID string, rec storage.FileRecord) {
 	rec.NodeName = p.status.NodeName
 	rec.NodeOS = p.status.OS
 	rec.NodeOnline = true
+	for i, existing := range p.files {
+		if existing.ID == rec.ID {
+			p.status.UsedBytes = max(0, p.status.UsedBytes-existing.Size) + rec.Size
+			p.status.FreeBytes = max(0, p.status.QuotaBytes-p.status.UsedBytes)
+			p.files[i] = rec
+			return
+		}
+	}
 	p.files = append([]storage.FileRecord{rec}, p.files...)
 	p.status.FileCount++
 	p.status.UsedBytes += rec.Size
@@ -1015,7 +1205,10 @@ func (m *Manager) ProxyGet(w http.ResponseWriter, r *http.Request, peer NodeStat
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	n, _ := io.Copy(w, resp.Body)
+	if n > 0 && m.store != nil {
+		m.store.AddDownloadBytes(n)
+	}
 }
 
 func (m *Manager) FetchPeerFileToTemp(peer NodeStatus, fileID string) (string, func(), error) {
@@ -1072,6 +1265,130 @@ func (m *Manager) ProxyDelete(peer NodeStatus, fileID string) error {
 	}
 	m.RemovePeerFile(peer.NodeID, fileID)
 	return nil
+}
+
+func (m *Manager) ProxyNewVersion(peer NodeStatus, fileID, filename, note string, r io.Reader, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() {
+		defer pw.Close()
+		defer mw.Close()
+
+		_ = mw.WriteField("uploader", uploader)
+		_ = mw.WriteField("note", note)
+		_ = mw.WriteField("device_fp", dev.FP)
+		_ = mw.WriteField("device_name", dev.Name)
+		_ = mw.WriteField("device_ip", dev.IP)
+		_ = mw.WriteField("device_detail", dev.Detail)
+
+		part, err := mw.CreateFormFile("file", filename)
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(part, r); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+	}()
+
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/files/" + fileID + "/versions"
+	req, err := http.NewRequest(http.MethodPost, targetURL, pr)
+	if err != nil {
+		_ = pr.Close()
+		return storage.FileRecord{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.streamClient.Do(req)
+	if err != nil {
+		return storage.FileRecord{}, fmt.Errorf("转发新版本到节点 %s 失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return storage.FileRecord{}, errors.New(errBody.Error)
+		}
+		return storage.FileRecord{}, fmt.Errorf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode)
+	}
+
+	var rec storage.FileRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return storage.FileRecord{}, err
+	}
+	m.AddPeerFile(peer.NodeID, rec)
+	return rec, nil
+}
+
+func (m *Manager) ProxyRestoreVersion(peer NodeStatus, fileID string, ver int, note string) (storage.FileRecord, error) {
+	payload, _ := json.Marshal(map[string]string{"note": note})
+	targetURL := fmt.Sprintf("%s/internal/cluster/files/%s/versions/%d/restore", strings.TrimRight(peer.HTTPURL, "/"), fileID, ver)
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return storage.FileRecord{}, errors.New(errBody.Error)
+		}
+		return storage.FileRecord{}, fmt.Errorf("远端节点回滚版本失败 (%d)", resp.StatusCode)
+	}
+	var rec storage.FileRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return storage.FileRecord{}, err
+	}
+	m.AddPeerFile(peer.NodeID, rec)
+	return rec, nil
+}
+
+func (m *Manager) ProxyDeleteVersion(peer NodeStatus, fileID string, ver int) (storage.FileRecord, error) {
+	targetURL := fmt.Sprintf("%s/internal/cluster/files/%s/versions/%d", strings.TrimRight(peer.HTTPURL, "/"), fileID, ver)
+	req, err := http.NewRequest(http.MethodDelete, targetURL, nil)
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return storage.FileRecord{}, errors.New(errBody.Error)
+		}
+		return storage.FileRecord{}, fmt.Errorf("远端节点删除版本失败 (%d)", resp.StatusCode)
+	}
+	var rec storage.FileRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return storage.FileRecord{}, err
+	}
+	m.AddPeerFile(peer.NodeID, rec)
+	return rec, nil
 }
 
 func (m *Manager) UpdateNodeQuotaBytes(nodeID string, quotaBytes int64) (NodeStatus, error) {
@@ -2002,6 +2319,7 @@ func (m *Manager) SendHeartbeatNow() error {
 	req.Header.Set("Content-Type", "application/json")
 	SignRequest(req, m.Secret(), m.NodeID())
 
+	t0 := time.Now()
 	resp, err := m.apiClient.Do(req)
 	if err != nil {
 		return err
@@ -2010,6 +2328,14 @@ func (m *Manager) SendHeartbeatNow() error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("heartbeat HTTP %d", resp.StatusCode)
 	}
+	rttMs := math.Round((float64(time.Since(t0).Microseconds())/1000.0)*10) / 10
+	if rttMs <= 0 {
+		rttMs = 0.2
+	}
+	m.mu.Lock()
+	m.lastHBLatencyMs = rttMs
+	m.lastSyncAt = time.Now()
+	m.mu.Unlock()
 
 	var ack struct {
 		OK       bool   `json:"ok"`

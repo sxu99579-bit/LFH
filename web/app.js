@@ -18,7 +18,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.5",
+  appVersion: "V0.11.21.6",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -31,6 +31,11 @@ const state = {
   accessModalIsCustom: false,
   accessDraftSet: new Set(),
   viewMode: "list",
+  workspacePage: "files",
+  lastRenderedFilesSig: "",
+  versionModalFileId: null,
+  versionModalData: null,
+  healthTimer: null,
   chartMetric: "count",
   autoRefresh: true,
   eventSource: null,
@@ -217,6 +222,19 @@ function showToast(msg, type = "info") {
   setTimeout(() => el.remove(), 2600);
 }
 
+const ICON_LOCK_SVG = `<svg viewBox="0 0 24 24" width="12.5" height="12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
+const ICON_CHEVRON_DOWN_SVG = `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:3px;"><polyline points="6 9 12 15 18 9"/></svg>`;
+const ICON_MOON_SVG = `<svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
+const ICON_SUN_SVG = `<svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
+const ICON_VERSION_BRANCH_SVG = `<svg viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>`;
+const ICON_CLOCK_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
+const ICON_DEVICE_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`;
+const ICON_SERVER_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`;
+const ICON_CPU_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>`;
+const ICON_MEM_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19v-3"/><path d="M10 19v-3"/><path d="M14 19v-3"/><path d="M18 19v-3"/><path d="M8 11V9"/><path d="M16 11V9"/><path d="M12 11V9"/><path d="M2 15h20"/><path d="M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z"/></svg>`;
+const ICON_DISK_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg>`;
+const ICON_NET_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`;
+
 // ==================== Theme System ====================
 function getSavedTheme() {
   try {
@@ -234,12 +252,12 @@ function applyTheme(theme) {
     localStorage.setItem("lan_filehub_theme", clean);
   } catch {}
 
-  const quickLabel = clean === "light" ? "🌙 深色" : "☀ 浅色";
+  const iconSvg = clean === "light" ? ICON_MOON_SVG : ICON_SUN_SVG;
   if ($("btn-auth-theme")) {
-    $("btn-auth-theme").textContent = clean === "light" ? "🌙 深色主题" : "☀ 浅色主题";
+    $("btn-auth-theme").innerHTML = `${iconSvg}<span>${clean === "light" ? "深色主题" : "浅色主题"}</span>`;
   }
   if ($("btn-top-theme")) {
-    $("btn-top-theme").textContent = quickLabel;
+    $("btn-top-theme").innerHTML = `${iconSvg}<span>${clean === "light" ? "深色" : "浅色"}</span>`;
   }
   if ($("theme-card-dark")) {
     $("theme-card-dark").classList.toggle("active", clean === "dark");
@@ -627,7 +645,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.5";
+  const ver = state.appVersion || "V0.11.21.6";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -1074,6 +1092,11 @@ async function loadCluster() {
     if (state.viewMode === "chart" && $("files-charts") && !$("files-charts").classList.contains("hidden")) {
       renderFilesCharts();
     }
+    if (state.workspacePage === "analytics") {
+      renderAnalyticsPage();
+    } else if (state.workspacePage === "health") {
+      renderNodeHealthPage();
+    }
     const modal = $("settings-modal");
     if (!modal.classList.contains("hidden") && state.settingsTab === "cluster" && !modal.contains(document.activeElement)) {
       renderAdminCluster();
@@ -1231,6 +1254,7 @@ function renderTimeSummary(buckets) {
     btn.className = `nav-item ${state.selectedMonth === key ? "active" : ""}`;
     btn.innerHTML = `
       <div class="nav-item-left">
+        <span class="nav-icon">${ICON_CLOCK_SVG}</span>
         <span class="nav-label">${escapeHtml(label)}</span>
       </div>
       <div class="nav-right">
@@ -1241,6 +1265,7 @@ function renderTimeSummary(buckets) {
     btn.onclick = () => {
       state.selectedMonth = key === "all" ? "all" : state.selectedMonth === key ? "all" : key;
       closeMobileSidebar();
+      if (state.workspacePage === "health") switchWorkspacePage("files");
       refreshAll();
     };
     return btn;
@@ -1260,8 +1285,10 @@ function renderCategorySummary(buckets) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `nav-item ${state.selectedCategory === key ? "active" : ""}`;
+    const iconSvg = categoryIcons[key] || categoryIcons.other;
     btn.innerHTML = `
       <div class="nav-item-left">
+        <span class="nav-icon">${iconSvg}</span>
         <span class="nav-label">${escapeHtml(label)}</span>
       </div>
       <div class="nav-right">
@@ -1272,6 +1299,7 @@ function renderCategorySummary(buckets) {
     btn.onclick = () => {
       state.selectedCategory = key === "all" ? "all" : state.selectedCategory === key ? "all" : key;
       closeMobileSidebar();
+      if (state.workspacePage === "health") switchWorkspacePage("files");
       refreshAll();
     };
     return btn;
@@ -1292,6 +1320,7 @@ function renderDeviceSummary(buckets) {
   allBtn.className = `nav-item ${state.selectedDevice === "all" ? "active" : ""}`;
   allBtn.innerHTML = `
     <div class="nav-item-left">
+      <span class="nav-icon">${ICON_DEVICE_SVG}</span>
       <span class="nav-label">全部设备</span>
     </div>
     <span class="nav-count">${buckets.length} 台</span>
@@ -1299,6 +1328,7 @@ function renderDeviceSummary(buckets) {
   allBtn.onclick = () => {
     state.selectedDevice = "all";
     closeMobileSidebar();
+    if (state.workspacePage === "health") switchWorkspacePage("files");
     refreshAll();
   };
   wrap.appendChild(allBtn);
@@ -1309,7 +1339,10 @@ function renderDeviceSummary(buckets) {
     btn.className = `nav-item ${state.selectedDevice === b.key ? "active" : ""}`;
     btn.innerHTML = `
       <div class="nav-item-left" style="flex-direction:column;align-items:flex-start;gap:1px;">
-        <span class="nav-label">${escapeHtml(b.label)}</span>
+        <div style="display:flex;align-items:center;gap:6px;max-width:100%;">
+          <span class="nav-icon">${ICON_DEVICE_SVG}</span>
+          <span class="nav-label">${escapeHtml(b.label)}</span>
+        </div>
         <span class="nav-sub">${escapeHtml(b.key)}</span>
       </div>
       <div class="nav-right">
@@ -1320,10 +1353,23 @@ function renderDeviceSummary(buckets) {
     btn.onclick = () => {
       state.selectedDevice = state.selectedDevice === b.key ? "all" : b.key;
       closeMobileSidebar();
+      if (state.workspacePage === "health") switchWorkspacePage("files");
       refreshAll();
     };
     wrap.appendChild(btn);
   }
+}
+
+function computeFilesRenderSig() {
+  const role = state.user?.role || "";
+  const uname = state.user?.username || "";
+  const parts = [`${state.viewMode}|${role}|${uname}|${state.selectedNode}|${state.files.length}`];
+  for (let i = 0; i < state.files.length; i++) {
+    const r = state.files[i];
+    const acl = Array.isArray(r.allowed_users) ? r.allowed_users.join(",") : "";
+    parts.push(`${r.id}:${r.version || 1}:${r.version_count || 1}:${r.size}:${r.uploaded_at}:${r.node_online !== false ? 1 : 0}:${acl}:${r.storage_dir || ""}`);
+  }
+  return parts.join(";");
 }
 
 async function loadFiles() {
@@ -1336,7 +1382,10 @@ async function loadFiles() {
 
   const data = await api(`/api/files?${params.toString()}`);
   state.files = data.files || [];
-  renderCurrentFilesView();
+  renderCurrentFilesView(false);
+  if (state.workspacePage === "analytics") {
+    renderAnalyticsPage();
+  }
 }
 
 function applyViewMode(mode) {
@@ -1351,16 +1400,29 @@ function applyViewMode(mode) {
   if ($("files-main-table")) $("files-main-table").classList.toggle("hidden", valid !== "list");
   if ($("files-grid")) $("files-grid").classList.toggle("hidden", valid !== "grid");
   if ($("files-charts")) $("files-charts").classList.toggle("hidden", valid !== "chart");
-  renderCurrentFilesView();
+  renderCurrentFilesView(true);
 }
 
-function renderCurrentFilesView() {
+function renderCurrentFilesView(force = false) {
+  if (state.viewMode === "chart") {
+    state.lastRenderedFilesSig = "";
+    renderFilesCharts();
+    return;
+  }
+  const sig = computeFilesRenderSig();
+  if (!force && sig === state.lastRenderedFilesSig) {
+    return;
+  }
+  state.lastRenderedFilesSig = sig;
+  const scrollEl = $("files-scroll-container");
+  const prevTop = scrollEl ? scrollEl.scrollTop : 0;
   if (state.viewMode === "grid") {
     renderFilesGrid();
-  } else if (state.viewMode === "chart") {
-    renderFilesCharts();
   } else {
     renderFilesTable();
+  }
+  if (scrollEl && prevTop > 0) {
+    scrollEl.scrollTop = prevTop;
   }
 }
 
@@ -1393,6 +1455,10 @@ function buildRecordMeta(rec) {
   const previewBtn = canPrev
     ? `<button class="btn btn-primary btn-xs" data-action="preview" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"}>${previewLabel}</button>`
     : "";
+  const verNum = Number(rec.version || 1);
+  const verCnt = Number(rec.version_count || (Array.isArray(rec.versions) ? rec.versions.length + 1 : 1));
+  const verBadgeHtml = `<button type="button" class="ver-chip ${verCnt > 1 ? "multi" : ""}" data-action="versions" data-id="${rec.id}" title="点击查看与管理该文件的版本历史">${ICON_VERSION_BRANCH_SVG}<span>v${verNum}${verCnt > 1 ? ` · ${verCnt}版` : ""}</span></button>`;
+  const verBtn = `<button class="btn btn-ghost btn-xs" type="button" data-action="versions" data-id="${rec.id}" title="文件版本历史控制">版本${verCnt > 1 ? `(${verCnt})` : ""}</button>`;
   const propsBtn = `<button class="btn btn-ghost btn-xs" type="button" data-action="props" data-id="${rec.id}">属性</button>`;
   const dlHtml = online
     ? `<a class="btn btn-ghost btn-xs" href="/api/files/${rec.id}/download">下载</a>`
@@ -1411,7 +1477,7 @@ function buildRecordMeta(rec) {
 
   const restrictedCount = Array.isArray(rec.allowed_users) ? rec.allowed_users.length : 0;
   const accessBadgeHtml = restrictedCount > 0
-    ? `<span class="access-badge" title="仅指定用户可下载：${escapeHtml(rec.allowed_users.join(", "))}">🔒 指定 ${restrictedCount} 人可下载</span>`
+    ? `<span class="access-badge" title="仅指定用户可下载：${escapeHtml(rec.allowed_users.join(", "))}">${ICON_LOCK_SVG}<span>指定 ${restrictedCount} 人可下载</span></span>`
     : "";
 
   const adminPathHtml = state.user && state.user.role === "admin" && rec.storage_dir
@@ -1442,6 +1508,8 @@ function buildRecordMeta(rec) {
     isImg,
     canPrev,
     previewBtn,
+    verBadgeHtml,
+    verBtn,
     propsBtn,
     accessBtn,
     dlHtml,
@@ -1470,14 +1538,16 @@ function updateEmptyFilesState(emptyEl) {
 function renderFilesTable() {
   const tbody = $("files-tbody");
   const empty = $("empty-state");
-  tbody.innerHTML = "";
+  if (!tbody) return;
 
   if (state.files.length === 0) {
+    tbody.replaceChildren();
     updateEmptyFilesState(empty);
     return;
   }
   empty.classList.add("hidden");
 
+  const frag = document.createDocumentFragment();
   for (const rec of state.files) {
     const meta = buildRecordMeta(rec);
     const tr = document.createElement("tr");
@@ -1487,6 +1557,7 @@ function renderFilesTable() {
           <div class="file-main-row">
             <span class="win-file-icon-sm">${getWinFileIconSvg(rec, 22)}</span>
             <span class="file-main-name">${escapeHtml(rec.name)}</span>
+            ${meta.verBadgeHtml}
           </div>
           ${meta.folderHtml}
           ${meta.accessBadgeHtml}
@@ -1494,13 +1565,14 @@ function renderFilesTable() {
       </td>
       <td data-label="分类"><span class="cat-tag">${escapeHtml(categoryNames[rec.category] || rec.category)}</span></td>
       <td data-label="大小">${formatSize(rec.size)}</td>
-      <td data-label="上传时间">${formatTime(rec.uploaded_at)}</td>
+      <td data-label="更新时间">${formatTime(rec.uploaded_at)}</td>
       <td data-label="上传者">${escapeHtml(rec.uploader)}</td>
       <td data-label="存储节点">${meta.nodeCellHtml}</td>
       <td class="col-device" data-label="上传设备">${meta.devCellHtml}</td>
       <td class="col-actions" data-label="操作">
         <div class="row-actions">
           ${meta.previewBtn}
+          ${meta.verBtn}
           ${meta.propsBtn}
           ${meta.accessBtn}
           ${meta.dlHtml}
@@ -1508,22 +1580,24 @@ function renderFilesTable() {
         </div>
       </td>
     `;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   }
+  tbody.replaceChildren(frag);
 }
 
 function renderFilesGrid() {
   const grid = $("files-grid");
   const empty = $("empty-state");
   if (!grid) return;
-  grid.innerHTML = "";
 
   if (state.files.length === 0) {
+    grid.replaceChildren();
     updateEmptyFilesState(empty);
     return;
   }
   empty.classList.add("hidden");
 
+  const frag = document.createDocumentFragment();
   for (const rec of state.files) {
     const meta = buildRecordMeta(rec);
     const card = document.createElement("div");
@@ -1550,7 +1624,10 @@ function renderFilesGrid() {
         ${meta.online ? "" : `<span class="thumb-offline">节点离线</span>`}
       </div>
       <div class="file-card-body">
-        <div class="file-card-title" title="${escapeHtml(rec.name)}">${escapeHtml(rec.name)}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+          <div class="file-card-title" title="${escapeHtml(rec.name)}">${escapeHtml(rec.name)}</div>
+          ${meta.verBadgeHtml}
+        </div>
         ${meta.folderHtml}
         ${meta.accessBadgeHtml}
         <div class="file-card-meta">
@@ -1567,14 +1644,16 @@ function renderFilesGrid() {
       </div>
       <div class="file-card-actions">
         ${meta.previewBtn}
+        ${meta.verBtn}
         ${meta.propsBtn}
         ${meta.accessBtn}
         ${meta.dlHtml}
         ${meta.delBtn}
       </div>
     `;
-    grid.appendChild(card);
+    frag.appendChild(card);
   }
+  grid.replaceChildren(frag);
 }
 
 function renderFilesCharts() {
@@ -2380,10 +2459,10 @@ function updateUploadAccessButton() {
   if (!btn) return;
   const cnt = Array.isArray(state.uploadAllowedUsers) ? state.uploadAllowedUsers.length : 0;
   if (cnt === 0) {
-    btn.textContent = "可见：全部用户 ▾";
+    btn.innerHTML = `<span>可见：全部用户</span>${ICON_CHEVRON_DOWN_SVG}`;
     btn.classList.remove("restricted");
   } else {
-    btn.textContent = `🔒 仅指定 ${cnt} 人 ▾`;
+    btn.innerHTML = `${ICON_LOCK_SVG}<span>仅指定 ${cnt} 人</span>${ICON_CHEVRON_DOWN_SVG}`;
     btn.classList.add("restricted");
   }
 }
@@ -2534,6 +2613,678 @@ function closeFileProperties() {
   $("props-body").innerHTML = "";
 }
 
+// ==================== Workspace Pages: Analytics, Node Health & File Version Control ====================
+
+function formatRate(bps) {
+  const n = Number(bps || 0);
+  if (!n || n <= 0) return "0 B/s";
+  return `${formatSize(n)}/s`;
+}
+
+function gaugeBarClass(pct) {
+  const v = Number(pct || 0);
+  if (v >= 88) return "crit";
+  if (v >= 72) return "warn";
+  return "ok";
+}
+
+function switchWorkspacePage(page) {
+  const valid = page === "analytics" || page === "health" ? page : "files";
+  state.workspacePage = valid;
+  document.querySelectorAll("#workspace-nav [data-workspace-page]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.workspacePage === valid);
+  });
+  if ($("page-files")) $("page-files").classList.toggle("hidden", valid !== "files");
+  if ($("page-analytics")) $("page-analytics").classList.toggle("hidden", valid !== "analytics");
+  if ($("page-health")) $("page-health").classList.toggle("hidden", valid !== "health");
+
+  if ($("btn-health-open-cluster-settings")) {
+    $("btn-health-open-cluster-settings").classList.toggle("hidden", !(state.user && state.user.role === "admin"));
+  }
+
+  if (state.healthTimer) {
+    clearInterval(state.healthTimer);
+    state.healthTimer = null;
+  }
+
+  if (valid === "analytics") {
+    renderAnalyticsPage();
+  } else if (valid === "health") {
+    loadCluster();
+    renderNodeHealthPage();
+    state.healthTimer = setInterval(() => {
+      if (state.workspacePage === "health" && state.user && !$("app-view").classList.contains("hidden")) {
+        loadCluster();
+      }
+    }, 3000);
+  } else {
+    renderCurrentFilesView(false);
+  }
+}
+
+function renderAnalyticsPage() {
+  const wrap = $("analytics-page-body");
+  if (!wrap) return;
+  if ($("analytics-filter-subtitle") && $("active-filters")) {
+    $("analytics-filter-subtitle").textContent = `当前统计维度：${$("active-filters").textContent} · 点击分类/月份/节点/设备可联动筛选`;
+  }
+
+  const files = state.files || [];
+  const nodes = state.pool?.nodes || [];
+  let totalBytes = 0;
+  let versionedFilesCount = 0;
+  let totalHistoricalVersions = 0;
+  let historicalVersionBytes = 0;
+
+  const catMap = new Map();
+  const monthMap = new Map();
+  const devMap = new Map();
+  const nodeFileCount = new Map();
+
+  for (const rec of files) {
+    const sz = Number(rec.size || 0);
+    totalBytes += sz;
+
+    const vCnt = Number(rec.version_count || (Array.isArray(rec.versions) ? rec.versions.length + 1 : 1));
+    if (vCnt > 1) {
+      versionedFilesCount += 1;
+      totalHistoricalVersions += vCnt - 1;
+      for (const hv of rec.versions || []) {
+        historicalVersionBytes += Number(hv.size || 0);
+      }
+    }
+
+    const catKey = rec.category || "other";
+    const curCat = catMap.get(catKey) || {
+      key: catKey,
+      label: categoryNames[catKey] || catKey,
+      count: 0,
+      size: 0,
+      color: categoryColors[catKey] || categoryColors.other,
+    };
+    curCat.count += 1;
+    curCat.size += sz;
+    catMap.set(catKey, curCat);
+
+    const monthKey = rec.month_key || String(rec.uploaded_at || "").slice(0, 7) || "未知";
+    const curMonth = monthMap.get(monthKey) || { key: monthKey, count: 0, size: 0 };
+    curMonth.count += 1;
+    curMonth.size += sz;
+    monthMap.set(monthKey, curMonth);
+
+    const devKey = rec.device_fp || "__unknown__";
+    const curDev = devMap.get(devKey) || {
+      key: devKey,
+      label: rec.device_fp ? `${rec.device_name || "未知设备"} (${rec.device_fp})` : "未记录指纹",
+      count: 0,
+      size: 0,
+    };
+    curDev.count += 1;
+    curDev.size += sz;
+    devMap.set(devKey, curDev);
+
+    if (rec.node_id) {
+      nodeFileCount.set(rec.node_id, (nodeFileCount.get(rec.node_id) || 0) + 1);
+    }
+  }
+
+  let totalDiskBytes = 0;
+  let totalDiskFreeBytes = 0;
+  let totalUpBps = 0;
+  let totalDownBps = 0;
+  let totalIOErrors = 0;
+  for (const n of nodes) {
+    if (!n.online) continue;
+    totalDiskBytes += Number(n.disk_total_bytes || 0);
+    totalDiskFreeBytes += Number(n.disk_free_bytes || 0);
+    totalUpBps += Number(n.upload_bps || 0);
+    totalDownBps += Number(n.download_bps || 0);
+    totalIOErrors += Number(n.io_total_errors || (Number(n.io_read_errors || 0) + Number(n.io_write_errors || 0)));
+  }
+
+  const metric = state.chartMetric === "size" ? "size" : "count";
+  const catList = [...catMap.values()].sort((a, b) => (metric === "size" ? b.size - a.size : b.count - a.count));
+  const totalMetric = catList.reduce((acc, item) => acc + (metric === "size" ? item.size : item.count), 0);
+
+  const radius = 62;
+  const circ = 2 * Math.PI * radius;
+  let offset = 0;
+  const circlesHtml = totalMetric > 0
+    ? catList
+        .map((item) => {
+          const val = metric === "size" ? item.size : item.count;
+          if (val <= 0) return "";
+          const seg = Math.min(circ, (val / totalMetric) * circ);
+          const dashArray = `${seg.toFixed(2)} ${Math.max(0, circ - seg).toFixed(2)}`;
+          const circle = `<circle cx="82" cy="82" r="${radius}" fill="none" stroke="${item.color}" stroke-width="20" stroke-dasharray="${dashArray}" stroke-dashoffset="${(-offset).toFixed(2)}" />`;
+          offset += seg;
+          return circle;
+        })
+        .join("")
+    : "";
+
+  const legendHtml = catList.length > 0
+    ? catList
+        .map((item) => {
+          const val = metric === "size" ? item.size : item.count;
+          const pct = totalMetric > 0 ? Math.round((val / totalMetric) * 100) : 0;
+          const active = state.selectedCategory === item.key ? "active" : "";
+          const metricText = metric === "size" ? formatSize(item.size) : `${item.count} 个 · ${formatSize(item.size)}`;
+          return `
+            <button type="button" class="legend-row ${active}" data-chart-category="${escapeHtml(item.key)}">
+              <span class="legend-left">
+                <span class="legend-dot" style="background:${item.color}"></span>
+                <span>${escapeHtml(item.label)}</span>
+              </span>
+              <span class="legend-right">${metricText} (${pct}%)</span>
+            </button>
+          `;
+        })
+        .join("")
+    : `<div class="chart-empty">暂无分类统计数据</div>`;
+
+  const monthsAll = [...monthMap.values()].sort((a, b) => a.key.localeCompare(b.key));
+  const monthsRecent = monthsAll.slice(-12);
+  const maxMonthCount = monthsRecent.reduce((m, b) => Math.max(m, b.count), 1);
+  const monthBarsHtml = monthsRecent.length > 0
+    ? `<div class="vbar-chart">
+        ${monthsRecent
+          .map((m) => {
+            const pct = Math.max(8, Math.round((m.count / maxMonthCount) * 100));
+            const active = state.selectedMonth === m.key ? "active" : "";
+            return `
+              <button type="button" class="vbar-col ${active}" data-chart-month="${escapeHtml(m.key)}" title="${escapeHtml(m.key)} · ${m.count} 个 · ${formatSize(m.size)}">
+                <span class="vbar-val">${m.count}</span>
+                <div class="vbar-track">
+                  <div class="vbar-fill" style="height:${pct}%"></div>
+                </div>
+                <span class="vbar-lbl">${escapeHtml(m.key)}</span>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>`
+    : `<div class="chart-empty">当前筛选条件下暂无月份记录</div>`;
+
+  const nodesHtml = nodes.length > 0
+    ? `<div class="hbar-list">
+        ${nodes
+          .map((n) => {
+            const pct = n.quota_bytes > 0 ? Math.min(100, Math.round((n.used_bytes / n.quota_bytes) * 100)) : 0;
+            const active = state.selectedNode === n.node_id ? "active" : "";
+            const filteredCount = nodeFileCount.get(n.node_id) || 0;
+            const diskSub = n.disk_total_bytes > 0
+              ? ` · 物理磁盘已用 ${formatSize(n.disk_used_bytes)} / 总 ${formatSize(n.disk_total_bytes)}`
+              : "";
+            return `
+              <button type="button" class="hbar-row ${active}" data-chart-node="${escapeHtml(n.node_id)}">
+                <div class="hbar-head">
+                  <span><span class="node-dot ${n.online ? "online" : "offline"}" style="display:inline-block;margin-right:6px;"></span><strong>${escapeHtml(n.node_name)}</strong> (${filteredCount} 文件 · ${escapeHtml(n.version || "-")})</span>
+                  <span style="color:var(--muted)">预留已用 ${formatSize(n.used_bytes)} / ${formatQuotaDisplay(n.quota_bytes)} (${pct}%)${diskSub}</span>
+                </div>
+                <div class="hbar-track"><div class="hbar-fill" style="width:${pct}%"></div></div>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>`
+    : `<div class="chart-empty">暂无集群节点信息</div>`;
+
+  const versionedTop = [...files]
+    .sort((a, b) => {
+      const va = Number(a.version_count || 1);
+      const vb = Number(b.version_count || 1);
+      if (va !== vb) return vb - va;
+      return Number(b.size || 0) - Number(a.size || 0);
+    })
+    .slice(0, 8);
+  const versionedHtml = versionedTop.length > 0
+    ? `<div class="hbar-list">
+        ${versionedTop
+          .map((f) => {
+            const vNum = Number(f.version || 1);
+            const vCnt = Number(f.version_count || 1);
+            return `
+              <button type="button" class="hbar-row" data-open-version-id="${escapeHtml(f.id)}" title="点击打开版本控制详情">
+                <div class="hbar-head">
+                  <span><strong>${escapeHtml(f.name)}</strong> ${f.folder_path ? `<span style="color:var(--muted)">(${escapeHtml(f.folder_path)})</span>` : ""}</span>
+                  <span style="color:var(--link-text)">当前 v${vNum} · 共 ${vCnt} 个版本 · ${formatSize(f.size)}</span>
+                </div>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>`
+    : `<div class="chart-empty">暂无文件版本记录</div>`;
+
+  const quotaTotal = state.pool?.total_quota_bytes || 0;
+  const quotaUsed = state.pool?.total_used_bytes || totalBytes;
+  const quotaPct = quotaTotal > 0 ? Math.round((quotaUsed / quotaTotal) * 100) : 0;
+
+  wrap.innerHTML = `
+    <div class="health-kpi-strip">
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>当前文件总数</span>${ICON_SERVER_SVG}</div>
+        <div class="health-kpi-val">${files.length} 个</div>
+        <div class="health-kpi-sub">当前活跃版本总占用 ${formatSize(totalBytes)}</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>多版本受控文件</span>${ICON_VERSION_BRANCH_SVG}</div>
+        <div class="health-kpi-val">${versionedFilesCount} 个文件</div>
+        <div class="health-kpi-sub">累计归档 ${totalHistoricalVersions} 个历史版本 (${formatSize(historicalVersionBytes)})</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>集群预留配额池</span>${ICON_DISK_SVG}</div>
+        <div class="health-kpi-val">${formatSize(quotaUsed)} / ${formatQuotaDisplay(quotaTotal)}</div>
+        <div class="health-kpi-sub">配额使用率 ${quotaPct}% · 剩余 ${formatSize(state.pool?.total_free_bytes || 0)}</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>物理磁盘总可用 / 总容量</span>${ICON_DISK_SVG}</div>
+        <div class="health-kpi-val">${totalDiskBytes > 0 ? `${formatSize(totalDiskFreeBytes)} / ${formatSize(totalDiskBytes)}` : "-"}</div>
+        <div class="health-kpi-sub">已用物理空间 ${totalDiskBytes > 0 ? formatSize(Math.max(0, totalDiskBytes - totalDiskFreeBytes)) : "-"}</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>实时吞吐速率</span>${ICON_NET_SVG}</div>
+        <div class="health-kpi-val">↑ ${formatRate(totalUpBps)}</div>
+        <div class="health-kpi-sub">↓ 下载速率 ${formatRate(totalDownBps)}</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>存储读写错误计数</span>${ICON_CPU_SVG}</div>
+        <div class="health-kpi-val" style="color:${totalIOErrors > 0 ? "var(--danger-text)" : "var(--success-text)"}">${totalIOErrors} 次</div>
+        <div class="health-kpi-sub">${totalIOErrors === 0 ? "所有在线节点读写正常" : "检测到磁盘/IO异常，请检查节点健康页"}</div>
+      </div>
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-card-head">
+          <div>
+            <div class="chart-card-title">文件类型分布</div>
+            <div class="chart-card-sub">点击分类可联动筛选文件</div>
+          </div>
+          <div class="chart-metric-switch">
+            <button type="button" class="btn btn-xs ${metric === "count" ? "btn-primary" : "btn-ghost"}" data-chart-metric="count">按文件数</button>
+            <button type="button" class="btn btn-xs ${metric === "size" ? "btn-primary" : "btn-ghost"}" data-chart-metric="size">按空间大小</button>
+          </div>
+        </div>
+        <div class="donut-wrap">
+          <div class="donut-svg-wrap">
+            <svg viewBox="0 0 164 164">
+              <circle cx="82" cy="82" r="${radius}" fill="none" stroke="var(--surface-3)" stroke-width="20" />
+              ${circlesHtml}
+            </svg>
+            <div class="donut-center">
+              <div class="donut-center-val">${metric === "size" ? formatSize(totalBytes) : `${files.length} 个`}</div>
+              <div class="donut-center-lbl">${metric === "size" ? "总大小" : "总文件"}</div>
+            </div>
+          </div>
+          <div class="donut-legend">${legendHtml}</div>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-card-head">
+          <div>
+            <div class="chart-card-title">按月份上传趋势</div>
+            <div class="chart-card-sub">最近 ${monthsRecent.length} 个月，点击柱条按月份筛选</div>
+          </div>
+        </div>
+        ${monthBarsHtml}
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-card-head">
+          <div>
+            <div class="chart-card-title">集群存储节点容量与物理磁盘对比</div>
+            <div class="chart-card-sub">点击节点筛选该节点上的文件</div>
+          </div>
+        </div>
+        ${nodesHtml}
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-card-head">
+          <div>
+            <div class="chart-card-title">文件版本控制与容量排行</div>
+            <div class="chart-card-sub">点击任意文件直接打开「版本历史控制」管理弹窗</div>
+          </div>
+        </div>
+        ${versionedHtml}
+      </div>
+    </div>
+  `;
+}
+
+function renderNodeHealthPage() {
+  const wrap = $("health-page-body");
+  if (!wrap) return;
+  const pool = state.pool;
+  const nodes = pool?.nodes || [];
+  if (nodes.length === 0) {
+    wrap.innerHTML = `<div class="empty-state">正在加载集群节点遥测数据...</div>`;
+    return;
+  }
+
+  let onlineCount = 0;
+  let cpuSum = 0;
+  let cpuCount = 0;
+  let memUsedSum = 0;
+  let memTotalSum = 0;
+  let diskTotalSum = 0;
+  let diskUsedSum = 0;
+  let diskFreeSum = 0;
+  let latSum = 0;
+  let latCount = 0;
+  let totalErrors = 0;
+
+  for (const n of nodes) {
+    if (n.online) {
+      onlineCount++;
+      if (n.cpu_percent > 0 || n.is_self || n.mem_total_bytes > 0) {
+        cpuSum += Number(n.cpu_percent || 0);
+        cpuCount++;
+      }
+      memUsedSum += Number(n.mem_used_bytes || 0);
+      memTotalSum += Number(n.mem_total_bytes || 0);
+      diskTotalSum += Number(n.disk_total_bytes || 0);
+      diskUsedSum += Number(n.disk_used_bytes || 0);
+      diskFreeSum += Number(n.disk_free_bytes || 0);
+      if (n.net_latency_ms > 0) {
+        latSum += Number(n.net_latency_ms);
+        latCount++;
+      }
+    }
+    totalErrors += Number(n.io_total_errors || (Number(n.io_read_errors || 0) + Number(n.io_write_errors || 0)));
+  }
+
+  const avgCPU = cpuCount > 0 ? (cpuSum / cpuCount).toFixed(1) : "0.0";
+  const avgMemPct = memTotalSum > 0 ? ((memUsedSum * 100) / memTotalSum).toFixed(1) : "0.0";
+  const avgLat = latCount > 0 ? (latSum / latCount).toFixed(1) : "0.3";
+
+  const cardsHtml = nodes
+    .map((n) => {
+      const cpuPct = Number(n.cpu_percent || 0);
+      const memPct = Number(n.mem_percent || 0);
+      const hasHostMem = Number(n.mem_total_bytes || 0) > 0;
+      const diskTotal = Number(n.disk_total_bytes || 0);
+      const diskUsed = Number(n.disk_used_bytes || 0);
+      const diskFree = Number(n.disk_free_bytes || 0);
+      const diskPct = diskTotal > 0 ? Math.min(100, Math.round((diskUsed * 1000) / diskTotal) / 10) : 0;
+      const quotaTotal = Number(n.quota_bytes || 0);
+      const quotaUsed = Number(n.used_bytes || 0);
+      const quotaFree = Number(n.free_bytes || 0);
+      const quotaPct = quotaTotal > 0 ? Math.min(100, Math.round((quotaUsed * 1000) / quotaTotal) / 10) : 0;
+
+      const netLat = Number(n.net_latency_ms || 0);
+      const hbLat = Number(n.heartbeat_latency_ms || netLat || 0);
+      const upBps = Number(n.upload_bps || 0);
+      const downBps = Number(n.download_bps || 0);
+      const totalUp = Number(n.total_upload_bytes || 0);
+      const totalDown = Number(n.total_download_bytes || 0);
+      const rErr = Number(n.io_read_errors || 0);
+      const wErr = Number(n.io_write_errors || 0);
+      const totErr = Number(n.io_total_errors || rErr + wErr);
+      const syncTime = n.last_sync_at || n.last_seen;
+      const nodeVer = n.version || (n.is_self ? state.appVersion : "V0.11.21.4");
+      const roleBadge = n.role === "entry"
+        ? `<span class="status-pill status-ok">主节点 (Entry)</span>`
+        : `<span class="cat-tag">从节点 (Worker)</span>`;
+      const onlineBadge = n.online
+        ? `<span class="status-pill status-ok">在线健康</span>`
+        : `<span class="status-pill status-off">离线 (${escapeHtml(formatRelativeTime(n.last_seen))})</span>`;
+
+      return `
+        <div class="health-node-card ${n.online ? "" : "offline"}">
+          <div class="health-node-top">
+            <div>
+              <div class="health-node-title">
+                <span class="node-dot ${n.online ? "online" : "offline"}"></span>
+                <span>${escapeHtml(n.node_name)}</span>
+                ${n.is_self ? `<span class="cat-tag">本机</span>` : ""}
+                ${roleBadge}
+                ${onlineBadge}
+              </div>
+              <div class="health-node-url">${escapeHtml(n.http_url || "本机直连")} · ${escapeHtml(n.os || "-")}/${escapeHtml(n.arch || "-")} · 文件数 ${Number(n.file_count || 0)} 个</div>
+            </div>
+            <span class="ver-badge">${escapeHtml(nodeVer)}</span>
+          </div>
+
+          <div class="health-gauge-grid">
+            <div class="health-gauge-box">
+              <div class="health-gauge-head">
+                <span class="health-gauge-lbl">${ICON_CPU_SVG}<span>CPU 使用率</span></span>
+                <span class="health-gauge-pct">${hasHostMem || n.is_self ? `${cpuPct.toFixed(1)}%` : "远端旧版未上报"}</span>
+              </div>
+              <div class="health-bar-track">
+                <div class="health-bar-fill ${gaugeBarClass(cpuPct)}" style="width:${Math.min(100, Math.max(2, cpuPct))}%"></div>
+              </div>
+              <div class="health-gauge-sub">
+                <span>逻辑核心：${n.cpu_cores ? `${n.cpu_cores} 核` : "-"}</span>
+                <span>状态：${cpuPct >= 85 ? "高负载" : "正常"}</span>
+              </div>
+            </div>
+
+            <div class="health-gauge-box">
+              <div class="health-gauge-head">
+                <span class="health-gauge-lbl">${ICON_MEM_SVG}<span>内存使用率</span></span>
+                <span class="health-gauge-pct">${hasHostMem ? `${memPct.toFixed(1)}%` : "远端旧版未上报"}</span>
+              </div>
+              <div class="health-bar-track">
+                <div class="health-bar-fill ${gaugeBarClass(memPct)}" style="width:${Math.min(100, Math.max(2, memPct))}%"></div>
+              </div>
+              <div class="health-gauge-sub">
+                <span>已用：${hasHostMem ? formatSize(n.mem_used_bytes) : "-"}</span>
+                <span>总内存：${hasHostMem ? formatSize(n.mem_total_bytes) : "-"}</span>
+              </div>
+            </div>
+
+            <div class="health-gauge-box">
+              <div class="health-gauge-head">
+                <span class="health-gauge-lbl">${ICON_DISK_SVG}<span>物理磁盘容量</span></span>
+                <span class="health-gauge-pct">${diskTotal > 0 ? `${diskPct.toFixed(1)}%` : "-"}</span>
+              </div>
+              <div class="health-bar-track">
+                <div class="health-bar-fill ${gaugeBarClass(diskPct)}" style="width:${Math.min(100, Math.max(2, diskPct))}%"></div>
+              </div>
+              <div class="health-gauge-sub">
+                <span>总容量：${diskTotal > 0 ? formatSize(diskTotal) : "-"}</span>
+                <span>已用：${diskTotal > 0 ? formatSize(diskUsed) : "-"}</span>
+                <span>剩余：${diskTotal > 0 ? formatSize(diskFree) : "-"}</span>
+              </div>
+            </div>
+
+            <div class="health-gauge-box">
+              <div class="health-gauge-head">
+                <span class="health-gauge-lbl">${ICON_SERVER_SVG}<span>LFH 预留空间池</span></span>
+                <span class="health-gauge-pct">${quotaPct.toFixed(1)}%</span>
+              </div>
+              <div class="health-bar-track">
+                <div class="health-bar-fill ${gaugeBarClass(quotaPct)}" style="width:${Math.min(100, Math.max(2, quotaPct))}%"></div>
+              </div>
+              <div class="health-gauge-sub">
+                <span>总预留：${formatQuotaDisplay(quotaTotal)}</span>
+                <span>已用：${formatSize(quotaUsed)}</span>
+                <span>剩余：${formatSize(quotaFree)}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="health-meta-grid">
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_NET_SVG}<span>网络延迟</span></div>
+              <div class="health-meta-v">${n.online ? `${(netLat > 0 ? netLat : 0.3).toFixed(1)} ms` : "离线"}</div>
+              <div class="health-meta-sub">${netLat < 15 ? "局域网极速连接" : netLat < 80 ? "连接良好" : "延迟偏高"}</div>
+            </div>
+
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_NET_SVG}<span>上传 / 下载速度</span></div>
+              <div class="health-meta-v">↑ ${formatRate(upBps)} · ↓ ${formatRate(downBps)}</div>
+              <div class="health-meta-sub">累计 ↑ ${formatSize(totalUp)} / ↓ ${formatSize(totalDown)}</div>
+            </div>
+
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_CLOCK_SVG}<span>心跳延迟</span></div>
+              <div class="health-meta-v">${n.online ? `${(hbLat > 0 ? hbLat : 0.3).toFixed(1)} ms` : "-"}</div>
+              <div class="health-meta-sub">3秒周期双向心跳校验</div>
+            </div>
+
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_SERVER_SVG}<span>节点版本</span></div>
+              <div class="health-meta-v">${escapeHtml(nodeVer)}</div>
+              <div class="health-meta-sub">${escapeHtml(n.os || "-")}/${escapeHtml(n.arch || "-")}</div>
+            </div>
+
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_CLOCK_SVG}<span>最近一次成功同步</span></div>
+              <div class="health-meta-v">${escapeHtml(formatRelativeTime(syncTime))}</div>
+              <div class="health-meta-sub">${escapeHtml(formatTime(syncTime))}</div>
+            </div>
+
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_DISK_SVG}<span>存储读写错误数量</span></div>
+              <div class="health-meta-v" style="color:${totErr > 0 ? "var(--danger-text)" : "var(--success-text)"}">${totErr} 次错误</div>
+              <div class="health-meta-sub">读错误 ${rErr} 次 · 写错误 ${wErr} 次</div>
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  wrap.innerHTML = `
+    <div class="health-kpi-strip">
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>在线健康节点</span>${ICON_SERVER_SVG}</div>
+        <div class="health-kpi-val">${onlineCount} / ${nodes.length}</div>
+        <div class="health-kpi-sub">全部在线节点文件实时汇总可见</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>平均 CPU 使用率</span>${ICON_CPU_SVG}</div>
+        <div class="health-kpi-val">${avgCPU}%</div>
+        <div class="health-kpi-sub">节点实时内核时间片采样</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>集群物理内存使用</span>${ICON_MEM_SVG}</div>
+        <div class="health-kpi-val">${avgMemPct}%</div>
+        <div class="health-kpi-sub">${memTotalSum > 0 ? `已用 ${formatSize(memUsedSum)} / 总 ${formatSize(memTotalSum)}` : "-"}</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>物理磁盘总容量 / 剩余</span>${ICON_DISK_SVG}</div>
+        <div class="health-kpi-val">${diskTotalSum > 0 ? formatSize(diskTotalSum) : "-"}</div>
+        <div class="health-kpi-sub">${diskTotalSum > 0 ? `已用 ${formatSize(diskUsedSum)} · 剩余 ${formatSize(diskFreeSum)}` : "-"}</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>平均网络 / 心跳延迟</span>${ICON_NET_SVG}</div>
+        <div class="health-kpi-val">${avgLat} ms</div>
+        <div class="health-kpi-sub">局域网直连免代理通道</div>
+      </div>
+      <div class="health-kpi-card">
+        <div class="health-kpi-head"><span>集群存储读写错误总数</span>${ICON_DISK_SVG}</div>
+        <div class="health-kpi-val" style="color:${totalErrors > 0 ? "var(--danger-text)" : "var(--success-text)"}">${totalErrors} 次</div>
+        <div class="health-kpi-sub">${totalErrors === 0 ? "零读写错误 · 存储健康" : "存在读写异常，请检查磁盘"}</div>
+      </div>
+    </div>
+
+    <div class="health-nodes-grid">${cardsHtml}</div>
+  `;
+}
+
+async function openFileVersionsModal(fileId) {
+  if (!fileId) return;
+  state.versionModalFileId = fileId;
+  $("versions-modal").classList.remove("hidden");
+  $("versions-list-wrap").innerHTML = `<div class="empty-state">正在加载文件版本历史...</div>`;
+  if ($("version-file-input")) $("version-file-input").value = "";
+  if ($("version-note-input")) $("version-note-input").value = "";
+  try {
+    const data = await api(`/api/files/${encodeURIComponent(fileId)}/versions`);
+    state.versionModalData = data;
+    renderFileVersionsModal();
+  } catch (err) {
+    $("versions-list-wrap").innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function closeFileVersionsModal() {
+  state.versionModalFileId = null;
+  state.versionModalData = null;
+  if ($("versions-modal")) $("versions-modal").classList.add("hidden");
+}
+
+function renderFileVersionsModal() {
+  const data = state.versionModalData;
+  if (!data || !data.file) return;
+  const f = data.file;
+  const versions = Array.isArray(data.versions) ? data.versions : [];
+  const curVer = Number(data.current_version || f.version || 1);
+  const canManage = Boolean(state.user && (state.user.role === "admin" || state.user.username === f.uploader));
+
+  if ($("versions-title")) {
+    $("versions-title").textContent = `文件版本控制 — ${f.name}`;
+  }
+  if ($("versions-file-summary")) {
+    $("versions-file-summary").innerHTML = `
+      <div>
+        <strong>${escapeHtml(f.name)}</strong>
+        ${f.folder_path ? `<span style="color:var(--muted);margin-left:6px;">目录：${escapeHtml(f.folder_path)}</span>` : ""}
+        <div style="font-size:12px;color:var(--muted);margin-top:3px;">
+          所在节点：${escapeHtml(f.node_name || f.node_id || "本机")} · 当前生效版本：<strong>v${curVer}</strong> · 历史版本总数：<strong>${versions.length}</strong> 个
+        </div>
+      </div>
+      <a class="btn btn-primary btn-xs" href="/api/files/${encodeURIComponent(f.id)}/download">下载当前生效版本 (v${curVer})</a>
+    `;
+  }
+
+  const rowsHtml = versions
+    .map((v) => {
+      const isCurrent = Number(v.version) === curVer;
+      const badge = isCurrent
+        ? `<span class="status-pill status-ok">v${v.version} · 当前生效</span>`
+        : `<span class="cat-tag">v${v.version} · 历史版本</span>`;
+      const restoreBtn = !isCurrent && canManage
+        ? `<button type="button" class="btn btn-primary btn-xs" data-restore-version="${v.version}">设为当前版本</button>`
+        : "";
+      const delBtn = versions.length > 1 && canManage
+        ? `<button type="button" class="btn btn-danger btn-xs" data-delete-version="${v.version}">删除此版本</button>`
+        : "";
+      return `
+        <tr>
+          <td>${badge}</td>
+          <td>${escapeHtml(v.note || (isCurrent ? "当前版本" : "历史归档版本"))}</td>
+          <td>${formatSize(v.size)}</td>
+          <td>${escapeHtml(v.uploader || "-")}</td>
+          <td>${formatTime(v.uploaded_at)}</td>
+          <td>${escapeHtml(v.device_name || v.device_fp || "-")}</td>
+          <td>
+            <div class="row-actions">
+              <a class="btn btn-ghost btn-xs" href="/api/files/${encodeURIComponent(f.id)}/versions/${v.version}/download">下载 v${v.version}</a>
+              ${restoreBtn}
+              ${delBtn}
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  $("versions-list-wrap").innerHTML = `
+    <table class="files-table">
+      <thead>
+        <tr>
+          <th>版本号</th>
+          <th>版本备注说明</th>
+          <th>大小</th>
+          <th>提交人</th>
+          <th>提交时间</th>
+          <th>来源设备</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  `;
+}
+
 function buildPropsBodyHtml(fileRec, meta, metaError) {
   const ext = (fileRec.ext || "").toLowerCase().replace(/^\./, "");
   const online = fileRec.node_online !== false;
@@ -2552,7 +3303,7 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
   const allowedList = Array.isArray(fileRec.allowed_users) ? fileRec.allowed_users : [];
   const accessText = allowedList.length === 0
     ? "全部系统用户可见与下载"
-    : `🔒 仅指定用户可下载：${allowedList.join("、")}（其余用户隐藏）`;
+    : `${ICON_LOCK_SVG}<span>仅指定用户可下载：${escapeHtml(allowedList.join("、"))}（其余用户隐藏）</span>`;
   const accessEditBtn = canManage
     ? ` <button type="button" class="btn btn-ghost btn-xs" id="props-edit-access">修改权限</button>`
     : "";
@@ -2775,7 +3526,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.5";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.6";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -3466,6 +4217,8 @@ function bindEvents() {
     const { action, id } = btn.dataset;
     if (action === "preview") {
       openPreview(id);
+    } else if (action === "versions") {
+      openFileVersionsModal(id);
     } else if (action === "props") {
       openFileProperties(id);
     } else if (action === "access") {
@@ -3706,13 +4459,141 @@ function bindEvents() {
   // Cluster & Endpoint controls
   if ($("topbar-cluster-pill")) {
     $("topbar-cluster-pill").onclick = () => {
-      if (state.user && state.user.role === "admin") {
-        openSettingsModal("cluster");
-      } else if (state.pool) {
-        showToast(
-          `当前集群 ${state.pool.online_nodes}/${state.pool.total_nodes} 个节点在线，离线节点文件已自动隐藏`,
-          "info"
-        );
+      switchWorkspacePage("health");
+    };
+  }
+  if ($("workspace-nav")) {
+    $("workspace-nav").onclick = (e) => {
+      const btn = e.target.closest("[data-workspace-page]");
+      if (!btn) return;
+      switchWorkspacePage(btn.dataset.workspacePage);
+    };
+  }
+  if ($("btn-analytics-refresh")) {
+    $("btn-analytics-refresh").onclick = async () => {
+      await refreshAll();
+      renderAnalyticsPage();
+      showToast("数据统计已刷新", "success");
+    };
+  }
+  if ($("btn-health-refresh")) {
+    $("btn-health-refresh").onclick = async () => {
+      await loadCluster();
+      renderNodeHealthPage();
+      showToast("已刷新节点健康遥测状态", "success");
+    };
+  }
+  if ($("btn-health-open-cluster-settings")) {
+    $("btn-health-open-cluster-settings").onclick = () => openSettingsModal("cluster");
+  }
+  if ($("analytics-page-body")) {
+    $("analytics-page-body").onclick = (e) => {
+      const verBtn = e.target.closest("[data-open-version-id]");
+      if (verBtn) {
+        openFileVersionsModal(verBtn.dataset.openVersionId);
+        return;
+      }
+      const metricBtn = e.target.closest("[data-chart-metric]");
+      if (metricBtn) {
+        state.chartMetric = metricBtn.dataset.chartMetric === "size" ? "size" : "count";
+        renderAnalyticsPage();
+        return;
+      }
+      const catBtn = e.target.closest("[data-chart-category]");
+      if (catBtn) {
+        const key = catBtn.dataset.chartCategory;
+        state.selectedCategory = state.selectedCategory === key ? "all" : key;
+        refreshAll();
+        return;
+      }
+      const monthBtn = e.target.closest("[data-chart-month]");
+      if (monthBtn) {
+        const key = monthBtn.dataset.chartMonth;
+        state.selectedMonth = state.selectedMonth === key ? "all" : key;
+        refreshAll();
+        return;
+      }
+      const nodeBtn = e.target.closest("[data-chart-node]");
+      if (nodeBtn) {
+        const nid = nodeBtn.dataset.chartNode;
+        state.selectedNode = state.selectedNode === nid ? "all" : nid;
+        refreshAll();
+      }
+    };
+  }
+  if ($("versions-close")) $("versions-close").onclick = closeFileVersionsModal;
+  if ($("versions-backdrop")) $("versions-backdrop").onclick = closeFileVersionsModal;
+  if ($("version-upload-form")) {
+    $("version-upload-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const fileId = state.versionModalFileId;
+      const fileInput = $("version-file-input");
+      const noteInput = $("version-note-input");
+      const btn = $("btn-submit-version");
+      if (!fileId || !fileInput || !fileInput.files || fileInput.files.length === 0) {
+        showToast("请选择要上传的新版本文件", "error");
+        return;
+      }
+      const fd = new FormData();
+      fd.append("file", fileInput.files[0]);
+      fd.append("note", (noteInput?.value || "").trim());
+      if (state.device.fp) fd.append("device_fp", state.device.fp);
+      if (state.device.name) fd.append("device_name", state.device.name);
+      if (state.device.detail) fd.append("device_detail", state.device.detail);
+
+      btn.disabled = true;
+      try {
+        await api(`/api/files/${encodeURIComponent(fileId)}/versions`, {
+          method: "POST",
+          body: fd,
+        });
+        showToast("新版本已上传并设为当前版本", "success");
+        await Promise.all([openFileVersionsModal(fileId), refreshAll()]);
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  }
+  if ($("versions-list-wrap")) {
+    $("versions-list-wrap").onclick = async (e) => {
+      const fileId = state.versionModalFileId;
+      if (!fileId) return;
+      const restBtn = e.target.closest("[data-restore-version]");
+      if (restBtn) {
+        const ver = Number(restBtn.dataset.restoreVersion);
+        if (!confirm(`确定将版本 v${ver} 恢复为当前生效版本吗？（当前版本仍会保留在历史记录中）`)) return;
+        restBtn.disabled = true;
+        try {
+          await api(`/api/files/${encodeURIComponent(fileId)}/versions/${ver}/restore`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ note: `从历史版本 v${ver} 恢复` }),
+          });
+          showToast(`已切换至版本 v${ver}`, "success");
+          await Promise.all([openFileVersionsModal(fileId), refreshAll()]);
+        } catch (err) {
+          restBtn.disabled = false;
+          showToast(err.message, "error");
+        }
+        return;
+      }
+      const delBtn = e.target.closest("[data-delete-version]");
+      if (delBtn) {
+        const ver = Number(delBtn.dataset.deleteVersion);
+        if (!confirm(`确定删除版本 v${ver} 吗？`)) return;
+        delBtn.disabled = true;
+        try {
+          await api(`/api/files/${encodeURIComponent(fileId)}/versions/${ver}`, {
+            method: "DELETE",
+          });
+          showToast(`已删除版本 v${ver}`, "success");
+          await Promise.all([openFileVersionsModal(fileId), refreshAll()]);
+        } catch (err) {
+          delBtn.disabled = false;
+          showToast(err.message, "error");
+        }
       }
     };
   }

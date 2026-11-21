@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,28 +24,46 @@ type DeviceInfo struct {
 	Detail string `json:"device_detail,omitempty"`
 }
 
-type FileRecord struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	FolderPath   string    `json:"folder_path,omitempty"`
+type FileVersion struct {
+	Version      int       `json:"version"`
 	StoredName   string    `json:"stored_name"`
 	Size         int64     `json:"size"`
-	Ext          string    `json:"ext"`
-	Category     string    `json:"category"` // video, audio, document, markdown, image, archive, other
 	Uploader     string    `json:"uploader"`
 	UploadedAt   time.Time `json:"uploaded_at"`
-	MonthKey     string    `json:"month_key"` // YYYY-MM
-	DateKey      string    `json:"date_key"`  // YYYY-MM-DD
 	DeviceFP     string    `json:"device_fp,omitempty"`
 	DeviceName   string    `json:"device_name,omitempty"`
 	DeviceIP     string    `json:"device_ip,omitempty"`
 	DeviceDetail string    `json:"device_detail,omitempty"`
-	AllowedUsers []string  `json:"allowed_users,omitempty"`
 	StorageDir   string    `json:"storage_dir,omitempty"`
-	NodeID       string    `json:"node_id,omitempty"`
-	NodeName     string    `json:"node_name,omitempty"`
-	NodeOS       string    `json:"node_os,omitempty"`
-	NodeOnline   bool      `json:"node_online"`
+	Note         string    `json:"note,omitempty"`
+}
+
+type FileRecord struct {
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	FolderPath   string        `json:"folder_path,omitempty"`
+	StoredName   string        `json:"stored_name"`
+	Size         int64         `json:"size"`
+	Ext          string        `json:"ext"`
+	Category     string        `json:"category"` // video, audio, document, markdown, image, archive, other
+	Uploader     string        `json:"uploader"`
+	UploadedAt   time.Time     `json:"uploaded_at"`
+	MonthKey     string        `json:"month_key"` // YYYY-MM
+	DateKey      string        `json:"date_key"`  // YYYY-MM-DD
+	DeviceFP     string        `json:"device_fp,omitempty"`
+	DeviceName   string        `json:"device_name,omitempty"`
+	DeviceIP     string        `json:"device_ip,omitempty"`
+	DeviceDetail string        `json:"device_detail,omitempty"`
+	AllowedUsers []string      `json:"allowed_users,omitempty"`
+	StorageDir   string        `json:"storage_dir,omitempty"`
+	Version      int           `json:"version"`
+	VersionCount int           `json:"version_count"`
+	VersionNote  string        `json:"version_note,omitempty"`
+	Versions     []FileVersion `json:"versions,omitempty"`
+	NodeID       string        `json:"node_id,omitempty"`
+	NodeName     string        `json:"node_name,omitempty"`
+	NodeOS       string        `json:"node_os,omitempty"`
+	NodeOnline   bool          `json:"node_online"`
 }
 
 type SummaryBucket struct {
@@ -63,12 +82,30 @@ type SummaryResponse struct {
 	ByNode     []SummaryBucket `json:"by_node,omitempty"`
 }
 
+type rateBucket struct {
+	sec   int64
+	up    int64
+	down  int64
+}
+
 type Store struct {
 	mu               sync.RWMutex
 	defaultUploadDir string
 	uploadDir        string
 	indexPath        string
 	records          map[string]FileRecord
+
+	readErrors         atomic.Int64
+	writeErrors        atomic.Int64
+	totalUploadBytes   atomic.Int64
+	totalDownloadBytes atomic.Int64
+
+	rateMu      sync.Mutex
+	rateBuckets [8]rateBucket
+	lastUpBps   int64
+	lastUpAt    time.Time
+	lastDownBps int64
+	lastDownAt  time.Time
 }
 
 var categoryLabels = map[string]string{
@@ -136,6 +173,91 @@ func (s *Store) recordDiskPathLocked(rec FileRecord) string {
 	return filepath.Join(s.recordDirLocked(rec), rec.StoredName)
 }
 
+func (s *Store) versionDirLocked(rec FileRecord, v FileVersion) string {
+	if d := strings.TrimSpace(v.StorageDir); d != "" {
+		return filepath.Clean(d)
+	}
+	return s.recordDirLocked(rec)
+}
+
+func (s *Store) versionDiskPathLocked(rec FileRecord, v FileVersion) string {
+	return filepath.Join(s.versionDirLocked(rec, v), v.StoredName)
+}
+
+func (s *Store) RecordReadError() {
+	s.readErrors.Add(1)
+}
+
+func (s *Store) RecordWriteError() {
+	s.writeErrors.Add(1)
+}
+
+func (s *Store) IOStats() (readErrs, writeErrs int64) {
+	return s.readErrors.Load(), s.writeErrors.Load()
+}
+
+func (s *Store) AddUploadBytes(n int64) {
+	if n <= 0 {
+		return
+	}
+	s.totalUploadBytes.Add(n)
+	now := time.Now()
+	sec := now.Unix()
+	s.rateMu.Lock()
+	idx := int(sec % int64(len(s.rateBuckets)))
+	if s.rateBuckets[idx].sec != sec {
+		s.rateBuckets[idx] = rateBucket{sec: sec}
+	}
+	s.rateBuckets[idx].up += n
+	s.lastUpBps = max(s.rateBuckets[idx].up, n)
+	s.lastUpAt = now
+	s.rateMu.Unlock()
+}
+
+func (s *Store) AddDownloadBytes(n int64) {
+	if n <= 0 {
+		return
+	}
+	s.totalDownloadBytes.Add(n)
+	now := time.Now()
+	sec := now.Unix()
+	s.rateMu.Lock()
+	idx := int(sec % int64(len(s.rateBuckets)))
+	if s.rateBuckets[idx].sec != sec {
+		s.rateBuckets[idx] = rateBucket{sec: sec}
+	}
+	s.rateBuckets[idx].down += n
+	s.lastDownBps = max(s.rateBuckets[idx].down, n)
+	s.lastDownAt = now
+	s.rateMu.Unlock()
+}
+
+func (s *Store) TransferStats() (upBps, downBps, totalUp, totalDown int64) {
+	totalUp = s.totalUploadBytes.Load()
+	totalDown = s.totalDownloadBytes.Load()
+	now := time.Now()
+	sec := now.Unix()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	var sumUp, sumDown int64
+	const windowSecs = int64(3)
+	for _, b := range s.rateBuckets {
+		if b.sec > 0 && sec-b.sec >= 0 && sec-b.sec < windowSecs {
+			sumUp += b.up
+			sumDown += b.down
+		}
+	}
+	upBps = sumUp / windowSecs
+	downBps = sumDown / windowSecs
+	if upBps == 0 && !s.lastUpAt.IsZero() && now.Sub(s.lastUpAt) <= 4*time.Second {
+		upBps = s.lastUpBps
+	}
+	if downBps == 0 && !s.lastDownAt.IsZero() && now.Sub(s.lastDownAt) <= 4*time.Second {
+		downBps = s.lastDownBps
+	}
+	return upBps, downBps, totalUp, totalDown
+}
+
 func (s *Store) UploadDir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -163,6 +285,28 @@ func (s *Store) load() error {
 					}
 					rec.Category = ClassifyExt(rec.Ext)
 					rec.AllowedUsers = NormalizeAllowedUsers(rec.AllowedUsers)
+					if rec.Version <= 0 {
+						rec.Version = 1
+					}
+					if len(rec.Versions) > 0 {
+						validVers := make([]FileVersion, 0, len(rec.Versions))
+						for _, v := range rec.Versions {
+							if v.StoredName == "" {
+								continue
+							}
+							if _, vErr := os.Stat(s.versionDiskPathLocked(rec, v)); vErr == nil {
+								if v.Version <= 0 {
+									v.Version = 1
+								}
+								validVers = append(validVers, v)
+							}
+						}
+						sort.Slice(validVers, func(i, j int) bool {
+							return validVers[i].Version > validVers[j].Version
+						})
+						rec.Versions = validVers
+					}
+					rec.VersionCount = 1 + len(rec.Versions)
 					s.records[rec.ID] = rec
 				}
 			}
@@ -283,61 +427,429 @@ func (s *Store) SaveUploadWithFolder(origName, folderPath, uploader string, dev 
 }
 
 func (s *Store) SaveUploadWithOptions(origName, folderPath, uploader string, allowedUsers []string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
+	return s.SaveUploadWithVersionNote(origName, folderPath, "", uploader, allowedUsers, dev, r)
+}
+
+func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, uploader string, allowedUsers []string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
 	origName = sanitizeFilename(origName)
 	folderPath = SanitizeFolderPath(folderPath)
 	ext := strings.ToLower(filepath.Ext(origName))
-	id := newID()
-	storedName := id + ext
+	blobID := newID()
+	storedName := blobID + ext
 	activeDir := s.UploadDir()
 	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		s.RecordWriteError()
 		return FileRecord{}, err
 	}
 	dstPath := filepath.Join(activeDir, storedName)
 
 	f, err := os.Create(dstPath)
 	if err != nil {
+		s.RecordWriteError()
 		return FileRecord{}, err
 	}
 	n, copyErr := io.Copy(f, r)
 	closeErr := f.Close()
 	if copyErr != nil {
+		s.RecordWriteError()
 		_ = os.Remove(dstPath)
 		return FileRecord{}, copyErr
 	}
 	if closeErr != nil {
+		s.RecordWriteError()
 		_ = os.Remove(dstPath)
 		return FileRecord{}, closeErr
 	}
+	s.AddUploadBytes(n)
 
 	now := time.Now()
-	rec := FileRecord{
-		ID:           id,
-		Name:         origName,
-		FolderPath:   folderPath,
-		StoredName:   storedName,
-		Size:         n,
-		Ext:          ext,
-		Category:     ClassifyExt(ext),
-		Uploader:     uploader,
-		UploadedAt:   now,
-		MonthKey:     now.Format("2006-01"),
-		DateKey:      now.Format("2006-01-02"),
-		DeviceFP:     strings.TrimSpace(dev.FP),
-		DeviceName:   strings.TrimSpace(dev.Name),
-		DeviceIP:     strings.TrimSpace(dev.IP),
-		DeviceDetail: strings.TrimSpace(dev.Detail),
-		AllowedUsers: NormalizeAllowedUsers(allowedUsers),
-		StorageDir:   activeDir,
-		NodeOnline:   true,
-	}
+	cleanNote := strings.TrimSpace(versionNote)
+	normAllowed := NormalizeAllowedUsers(allowedUsers)
 
 	s.mu.Lock()
-	s.records[id] = rec
+	var existingID string
+	for id, cur := range s.records {
+		if strings.EqualFold(cur.Name, origName) && cur.FolderPath == folderPath {
+			existingID = id
+			break
+		}
+	}
+
+	var rec FileRecord
+	if existingID != "" {
+		cur := s.records[existingID]
+		curVer := cur.Version
+		if curVer <= 0 {
+			curVer = 1
+		}
+		maxVer := curVer
+		for _, v := range cur.Versions {
+			if v.Version > maxVer {
+				maxVer = v.Version
+			}
+		}
+		prevSnap := FileVersion{
+			Version:      curVer,
+			StoredName:   cur.StoredName,
+			Size:         cur.Size,
+			Uploader:     cur.Uploader,
+			UploadedAt:   cur.UploadedAt,
+			DeviceFP:     cur.DeviceFP,
+			DeviceName:   cur.DeviceName,
+			DeviceIP:     cur.DeviceIP,
+			DeviceDetail: cur.DeviceDetail,
+			StorageDir:   cur.StorageDir,
+			Note:         cur.VersionNote,
+		}
+		cur.Versions = append([]FileVersion{prevSnap}, cur.Versions...)
+		sort.Slice(cur.Versions, func(i, j int) bool {
+			return cur.Versions[i].Version > cur.Versions[j].Version
+		})
+		cur.Version = maxVer + 1
+		cur.VersionCount = 1 + len(cur.Versions)
+		cur.VersionNote = cleanNote
+		cur.StoredName = storedName
+		cur.Size = n
+		cur.Ext = ext
+		cur.Category = ClassifyExt(ext)
+		cur.Uploader = uploader
+		cur.UploadedAt = now
+		cur.MonthKey = now.Format("2006-01")
+		cur.DateKey = now.Format("2006-01-02")
+		cur.DeviceFP = strings.TrimSpace(dev.FP)
+		cur.DeviceName = strings.TrimSpace(dev.Name)
+		cur.DeviceIP = strings.TrimSpace(dev.IP)
+		cur.DeviceDetail = strings.TrimSpace(dev.Detail)
+		if len(normAllowed) > 0 {
+			cur.AllowedUsers = normAllowed
+		}
+		cur.StorageDir = activeDir
+		cur.NodeOnline = true
+		rec = cur
+		s.records[existingID] = rec
+	} else {
+		rec = FileRecord{
+			ID:           blobID,
+			Name:         origName,
+			FolderPath:   folderPath,
+			StoredName:   storedName,
+			Size:         n,
+			Ext:          ext,
+			Category:     ClassifyExt(ext),
+			Uploader:     uploader,
+			UploadedAt:   now,
+			MonthKey:     now.Format("2006-01"),
+			DateKey:      now.Format("2006-01-02"),
+			DeviceFP:     strings.TrimSpace(dev.FP),
+			DeviceName:   strings.TrimSpace(dev.Name),
+			DeviceIP:     strings.TrimSpace(dev.IP),
+			DeviceDetail: strings.TrimSpace(dev.Detail),
+			AllowedUsers: normAllowed,
+			StorageDir:   activeDir,
+			Version:      1,
+			VersionCount: 1,
+			VersionNote:  cleanNote,
+			NodeOnline:   true,
+		}
+		s.records[blobID] = rec
+	}
 	err = s.saveLocked()
 	s.mu.Unlock()
 	if err != nil {
+		s.RecordWriteError()
 		return FileRecord{}, err
 	}
+	return rec, nil
+}
+
+// SaveNewVersion appends a new version to an existing file record by ID.
+func (s *Store) SaveNewVersion(id, origName, note, uploader string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
+	s.mu.RLock()
+	cur, ok := s.records[id]
+	s.mu.RUnlock()
+	if !ok {
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	ext := cur.Ext
+	if ext == "" {
+		ext = strings.ToLower(filepath.Ext(sanitizeFilename(origName)))
+	}
+	blobID := newID()
+	storedName := blobID + ext
+	activeDir := s.UploadDir()
+	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	dstPath := filepath.Join(activeDir, storedName)
+	f, err := os.Create(dstPath)
+	if err != nil {
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	n, copyErr := io.Copy(f, r)
+	closeErr := f.Close()
+	if copyErr != nil {
+		s.RecordWriteError()
+		_ = os.Remove(dstPath)
+		return FileRecord{}, copyErr
+	}
+	if closeErr != nil {
+		s.RecordWriteError()
+		_ = os.Remove(dstPath)
+		return FileRecord{}, closeErr
+	}
+	s.AddUploadBytes(n)
+
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	latest, exists := s.records[id]
+	if !exists {
+		_ = os.Remove(dstPath)
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	curVer := latest.Version
+	if curVer <= 0 {
+		curVer = 1
+	}
+	maxVer := curVer
+	for _, v := range latest.Versions {
+		if v.Version > maxVer {
+			maxVer = v.Version
+		}
+	}
+	prevSnap := FileVersion{
+		Version:      curVer,
+		StoredName:   latest.StoredName,
+		Size:         latest.Size,
+		Uploader:     latest.Uploader,
+		UploadedAt:   latest.UploadedAt,
+		DeviceFP:     latest.DeviceFP,
+		DeviceName:   latest.DeviceName,
+		DeviceIP:     latest.DeviceIP,
+		DeviceDetail: latest.DeviceDetail,
+		StorageDir:   latest.StorageDir,
+		Note:         latest.VersionNote,
+	}
+	latest.Versions = append([]FileVersion{prevSnap}, latest.Versions...)
+	sort.Slice(latest.Versions, func(i, j int) bool {
+		return latest.Versions[i].Version > latest.Versions[j].Version
+	})
+	latest.Version = maxVer + 1
+	latest.VersionCount = 1 + len(latest.Versions)
+	latest.VersionNote = strings.TrimSpace(note)
+	latest.StoredName = storedName
+	latest.Size = n
+	latest.Uploader = uploader
+	latest.UploadedAt = now
+	latest.MonthKey = now.Format("2006-01")
+	latest.DateKey = now.Format("2006-01-02")
+	latest.DeviceFP = strings.TrimSpace(dev.FP)
+	latest.DeviceName = strings.TrimSpace(dev.Name)
+	latest.DeviceIP = strings.TrimSpace(dev.IP)
+	latest.DeviceDetail = strings.TrimSpace(dev.Detail)
+	latest.StorageDir = activeDir
+	latest.NodeOnline = true
+	s.records[id] = latest
+	if err := s.saveLocked(); err != nil {
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	return latest, nil
+}
+
+// GetVersion locates either the current active version or a historical version of a file record.
+func (s *Store) GetVersion(id string, version int) (FileRecord, FileVersion, string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return FileRecord{}, FileVersion{}, "", false
+	}
+	curVer := rec.Version
+	if curVer <= 0 {
+		curVer = 1
+	}
+	if version <= 0 || version == curVer {
+		fv := FileVersion{
+			Version:      curVer,
+			StoredName:   rec.StoredName,
+			Size:         rec.Size,
+			Uploader:     rec.Uploader,
+			UploadedAt:   rec.UploadedAt,
+			DeviceFP:     rec.DeviceFP,
+			DeviceName:   rec.DeviceName,
+			DeviceIP:     rec.DeviceIP,
+			DeviceDetail: rec.DeviceDetail,
+			StorageDir:   rec.StorageDir,
+			Note:         rec.VersionNote,
+		}
+		return rec, fv, s.recordDiskPathLocked(rec), true
+	}
+	for _, v := range rec.Versions {
+		if v.Version == version {
+			return rec, v, s.versionDiskPathLocked(rec, v), true
+		}
+	}
+	return FileRecord{}, FileVersion{}, "", false
+}
+
+// RestoreVersion promotes a historical version to become the active version while preserving the prior active version in history.
+func (s *Store) RestoreVersion(id string, targetVer int, note string) (FileRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	curVer := rec.Version
+	if curVer <= 0 {
+		curVer = 1
+	}
+	if targetVer == curVer {
+		if strings.TrimSpace(note) != "" {
+			rec.VersionNote = strings.TrimSpace(note)
+			s.records[id] = rec
+			_ = s.saveLocked()
+		}
+		return rec, nil
+	}
+	foundIdx := -1
+	for i, v := range rec.Versions {
+		if v.Version == targetVer {
+			foundIdx = i
+			break
+		}
+	}
+	if foundIdx < 0 {
+		return FileRecord{}, fmt.Errorf("未找到历史版本 v%d", targetVer)
+	}
+	target := rec.Versions[foundIdx]
+	if _, err := os.Stat(s.versionDiskPathLocked(rec, target)); err != nil {
+		s.RecordReadError()
+		return FileRecord{}, fmt.Errorf("历史版本 v%d 的底层文件已丢失", targetVer)
+	}
+
+	prevActive := FileVersion{
+		Version:      curVer,
+		StoredName:   rec.StoredName,
+		Size:         rec.Size,
+		Uploader:     rec.Uploader,
+		UploadedAt:   rec.UploadedAt,
+		DeviceFP:     rec.DeviceFP,
+		DeviceName:   rec.DeviceName,
+		DeviceIP:     rec.DeviceIP,
+		DeviceDetail: rec.DeviceDetail,
+		StorageDir:   rec.StorageDir,
+		Note:         rec.VersionNote,
+	}
+	remaining := make([]FileVersion, 0, len(rec.Versions))
+	for i, v := range rec.Versions {
+		if i != foundIdx {
+			remaining = append(remaining, v)
+		}
+	}
+	remaining = append(remaining, prevActive)
+	sort.Slice(remaining, func(i, j int) bool {
+		return remaining[i].Version > remaining[j].Version
+	})
+
+	rec.Version = target.Version
+	rec.StoredName = target.StoredName
+	rec.Size = target.Size
+	rec.Uploader = target.Uploader
+	rec.UploadedAt = target.UploadedAt
+	rec.MonthKey = target.UploadedAt.Format("2006-01")
+	rec.DateKey = target.UploadedAt.Format("2006-01-02")
+	rec.DeviceFP = target.DeviceFP
+	rec.DeviceName = target.DeviceName
+	rec.DeviceIP = target.DeviceIP
+	rec.DeviceDetail = target.DeviceDetail
+	if target.StorageDir != "" {
+		rec.StorageDir = target.StorageDir
+	}
+	if strings.TrimSpace(note) != "" {
+		rec.VersionNote = strings.TrimSpace(note)
+	} else {
+		rec.VersionNote = target.Note
+	}
+	rec.Versions = remaining
+	rec.VersionCount = 1 + len(rec.Versions)
+	s.records[id] = rec
+	if err := s.saveLocked(); err != nil {
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	return rec, nil
+}
+
+// DeleteVersion removes a specific historical version (or promotes the latest historical version if deleting the active version).
+func (s *Store) DeleteVersion(id string, targetVer int) (FileRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	curVer := rec.Version
+	if curVer <= 0 {
+		curVer = 1
+	}
+	if targetVer == curVer {
+		if len(rec.Versions) == 0 {
+			return FileRecord{}, errors.New("该文件仅剩最后一个版本，如需删除请直接删除文件")
+		}
+		sort.Slice(rec.Versions, func(i, j int) bool {
+			return rec.Versions[i].Version > rec.Versions[j].Version
+		})
+		nextActive := rec.Versions[0]
+		oldPath := s.recordDiskPathLocked(rec)
+		rec.Versions = rec.Versions[1:]
+		rec.Version = nextActive.Version
+		rec.StoredName = nextActive.StoredName
+		rec.Size = nextActive.Size
+		rec.Uploader = nextActive.Uploader
+		rec.UploadedAt = nextActive.UploadedAt
+		rec.MonthKey = nextActive.UploadedAt.Format("2006-01")
+		rec.DateKey = nextActive.UploadedAt.Format("2006-01-02")
+		rec.DeviceFP = nextActive.DeviceFP
+		rec.DeviceName = nextActive.DeviceName
+		rec.DeviceIP = nextActive.DeviceIP
+		rec.DeviceDetail = nextActive.DeviceDetail
+		if nextActive.StorageDir != "" {
+			rec.StorageDir = nextActive.StorageDir
+		}
+		rec.VersionNote = nextActive.Note
+		rec.VersionCount = 1 + len(rec.Versions)
+		s.records[id] = rec
+		if err := s.saveLocked(); err != nil {
+			s.RecordWriteError()
+			return FileRecord{}, err
+		}
+		_ = os.Remove(oldPath)
+		return rec, nil
+	}
+
+	foundIdx := -1
+	for i, v := range rec.Versions {
+		if v.Version == targetVer {
+			foundIdx = i
+			break
+		}
+	}
+	if foundIdx < 0 {
+		return FileRecord{}, fmt.Errorf("未找到历史版本 v%d", targetVer)
+	}
+	vPath := s.versionDiskPathLocked(rec, rec.Versions[foundIdx])
+	rec.Versions = append(rec.Versions[:foundIdx], rec.Versions[foundIdx+1:]...)
+	rec.VersionCount = 1 + len(rec.Versions)
+	s.records[id] = rec
+	if err := s.saveLocked(); err != nil {
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	_ = os.Remove(vPath)
 	return rec, nil
 }
 
@@ -435,6 +947,17 @@ func (s *Store) SetUploadDir(newDir string, migrateExisting bool) (int, error) {
 		}
 		s.mu.Lock()
 		if latest, ok := s.records[cur.ID]; ok {
+			for i, v := range latest.Versions {
+				vSrc := s.versionDiskPathLocked(latest, v)
+				vDst := filepath.Join(cleanDir, v.StoredName)
+				if vSrc != vDst {
+					if err := moveFileCrossDevice(vSrc, vDst); err == nil || os.IsNotExist(err) {
+						latest.Versions[i].StorageDir = cleanDir
+					}
+				} else {
+					latest.Versions[i].StorageDir = cleanDir
+				}
+			}
 			latest.StorageDir = cleanDir
 			s.records[cur.ID] = latest
 			if saveErr := s.saveLocked(); saveErr != nil {
@@ -494,6 +1017,9 @@ func (s *Store) Delete(id string) error {
 		return errors.New("文件不存在")
 	}
 	_ = os.Remove(s.recordDiskPathLocked(rec))
+	for _, v := range rec.Versions {
+		_ = os.Remove(s.versionDiskPathLocked(rec, v))
+	}
 	delete(s.records, id)
 	return s.saveLocked()
 }
@@ -504,6 +1030,9 @@ func (s *Store) LocalStats() (int, int64) {
 	var total int64
 	for _, rec := range s.records {
 		total += rec.Size
+		for _, v := range rec.Versions {
+			total += v.Size
+		}
 	}
 	return len(s.records), total
 }

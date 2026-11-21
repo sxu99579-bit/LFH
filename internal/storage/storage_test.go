@@ -217,3 +217,90 @@ func TestStorageACLAndUploadDirMigration(t *testing.T) {
 		t.Fatalf("expected 3 records after reload across custom StorageDir, got %d", len(reloaded.AllRecords()))
 	}
 }
+
+func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := NewStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	dev1 := DeviceInfo{FP: "FP-1", Name: "PC-1", IP: "192.168.3.10"}
+	dev2 := DeviceInfo{FP: "FP-2", Name: "PC-2", IP: "192.168.3.20"}
+
+	// 1. Upload initial v1
+	v1Rec, err := st.SaveUploadWithVersionNote("design.md", "docs", "初版草稿", "alice", nil, dev1, strings.NewReader("version-1"))
+	if err != nil {
+		t.Fatalf("SaveUpload v1: %v", err)
+	}
+	if v1Rec.Version != 1 || v1Rec.VersionCount != 1 || len(v1Rec.Versions) != 0 {
+		t.Fatalf("expected v1 with VersionCount=1, got %+v", v1Rec)
+	}
+
+	// 2. Uploading the same filename + folderPath automatically creates v2 while preserving v1
+	v2Rec, err := st.SaveUploadWithVersionNote("design.md", "docs", "补充架构图", "bob", nil, dev2, strings.NewReader("version-2-longer"))
+	if err != nil {
+		t.Fatalf("SaveUpload v2: %v", err)
+	}
+	if v2Rec.ID != v1Rec.ID || v2Rec.Version != 2 || v2Rec.VersionCount != 2 || len(v2Rec.Versions) != 1 {
+		t.Fatalf("expected same ID and Version=2 VersionCount=2, got %+v", v2Rec)
+	}
+	if v2Rec.Versions[0].Version != 1 || v2Rec.Versions[0].Note != "初版草稿" {
+		t.Fatalf("unexpected archived v1: %+v", v2Rec.Versions[0])
+	}
+
+	// 3. Explicit SaveNewVersion creates v3
+	v3Rec, err := st.SaveNewVersion(v1Rec.ID, "design.md", "定稿发布", "alice", dev1, strings.NewReader("version-3-final"))
+	if err != nil {
+		t.Fatalf("SaveNewVersion v3: %v", err)
+	}
+	if v3Rec.Version != 3 || v3Rec.VersionCount != 3 || len(v3Rec.Versions) != 2 {
+		t.Fatalf("expected Version=3 VersionCount=3, got %+v", v3Rec)
+	}
+
+	// 4. GetVersion reads both current (v3) and historical (v1) versions from disk
+	_, fv1, path1, ok := st.GetVersion(v1Rec.ID, 1)
+	if !ok || fv1.Version != 1 {
+		t.Fatalf("GetVersion(1) failed: ok=%v fv=%+v", ok, fv1)
+	}
+	raw1, err := os.ReadFile(path1)
+	if err != nil || string(raw1) != "version-1" {
+		t.Fatalf("unexpected v1 content: %q err=%v", string(raw1), err)
+	}
+
+	// 5. RestoreVersion promotes v1 back to active while keeping v3 and v2 in history
+	restored, err := st.RestoreVersion(v1Rec.ID, 1, "回滚至初版")
+	if err != nil {
+		t.Fatalf("RestoreVersion(1): %v", err)
+	}
+	if restored.Version != 1 || restored.VersionCount != 3 || restored.VersionNote != "回滚至初版" {
+		t.Fatalf("unexpected restored record: %+v", restored)
+	}
+	_, curPath, ok := st.Get(v1Rec.ID)
+	if !ok {
+		t.Fatalf("Get after restore failed")
+	}
+	curBytes, _ := os.ReadFile(curPath)
+	if string(curBytes) != "version-1" {
+		t.Fatalf("expected active content 'version-1' after restore, got %q", string(curBytes))
+	}
+
+	// 6. DeleteVersion removes historical v2
+	afterDelV2, err := st.DeleteVersion(v1Rec.ID, 2)
+	if err != nil || afterDelV2.VersionCount != 2 || len(afterDelV2.Versions) != 1 {
+		t.Fatalf("DeleteVersion(2) mismatch: rec=%+v err=%v", afterDelV2, err)
+	}
+
+	// 7. Transfer and IO error stats work accurately
+	st.AddDownloadBytes(2048)
+	upBps, downBps, totalUp, totalDown := st.TransferStats()
+	if totalUp <= 0 || totalDown != 2048 || upBps <= 0 || downBps <= 0 {
+		t.Fatalf("unexpected TransferStats: upBps=%d downBps=%d totalUp=%d totalDown=%d", upBps, downBps, totalUp, totalDown)
+	}
+	st.RecordReadError()
+	st.RecordWriteError()
+	st.RecordWriteError()
+	rErr, wErr := st.IOStats()
+	if rErr != 1 || wErr != 2 {
+		t.Fatalf("unexpected IOStats: r=%d w=%d", rErr, wErr)
+	}
+}

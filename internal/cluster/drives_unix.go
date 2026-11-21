@@ -3,9 +3,23 @@
 package cluster
 
 import (
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
+)
+
+var (
+	unixCPUMu       sync.Mutex
+	prevUnixIdle    uint64
+	prevUnixTotal   uint64
+	lastUnixCPUAt   time.Time
+	lastUnixCPUPct  float64
 )
 
 // ListDrives enumerates common mounted Unix storage paths with free/total space.
@@ -88,4 +102,148 @@ func clampInt64(v uint64) int64 {
 		return int64(maxInt64)
 	}
 	return int64(v)
+}
+
+func readProcStatCPU() (idle, total uint64, ok bool) {
+	raw, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0, false
+	}
+	line := strings.SplitN(string(raw), "\n", 2)[0]
+	fields := strings.Fields(line)
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return 0, 0, false
+	}
+	for i := 1; i < len(fields); i++ {
+		v, err := strconv.ParseUint(fields[i], 10, 64)
+		if err != nil {
+			continue
+		}
+		total += v
+		if i == 4 || i == 5 {
+			idle += v
+		}
+	}
+	return idle, total, total > 0
+}
+
+func sampleUnixCPUPercent() float64 {
+	unixCPUMu.Lock()
+	defer unixCPUMu.Unlock()
+
+	now := time.Now()
+	if prevUnixTotal > 0 && now.Sub(lastUnixCPUAt) < 350*time.Millisecond {
+		return lastUnixCPUPct
+	}
+	idle1, total1, ok := readProcStatCPU()
+	if !ok {
+		return lastUnixCPUPct
+	}
+	if prevUnixTotal == 0 {
+		prevUnixIdle = idle1
+		prevUnixTotal = total1
+		time.Sleep(15 * time.Millisecond)
+		idle2, total2, ok2 := readProcStatCPU()
+		if !ok2 || total2 <= total1 {
+			lastUnixCPUAt = time.Now()
+			return 0
+		}
+		idle1, total1 = idle2, total2
+	}
+	totalDelta := total1 - prevUnixTotal
+	idleDelta := idle1 - prevUnixIdle
+	prevUnixIdle = idle1
+	prevUnixTotal = total1
+	lastUnixCPUAt = time.Now()
+
+	if totalDelta > 0 && totalDelta >= idleDelta {
+		pct := float64(totalDelta-idleDelta) * 100.0 / float64(totalDelta)
+		if pct < 0 {
+			pct = 0
+		} else if pct > 100 {
+			pct = 100
+		}
+		lastUnixCPUPct = math.Round(pct*10) / 10
+	}
+	return lastUnixCPUPct
+}
+
+func readProcMemInfo() (totalBytes, usedBytes int64, ok bool) {
+	raw, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, false
+	}
+	var memTotalKB, memAvailKB, memFreeKB, buffersKB, cachedKB int64
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		val, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSuffix(fields[0], ":") {
+		case "MemTotal":
+			memTotalKB = val
+		case "MemAvailable":
+			memAvailKB = val
+		case "MemFree":
+			memFreeKB = val
+		case "Buffers":
+			buffersKB = val
+		case "Cached":
+			cachedKB = val
+		}
+	}
+	if memTotalKB <= 0 {
+		return 0, 0, false
+	}
+	if memAvailKB <= 0 {
+		memAvailKB = memFreeKB + buffersKB + cachedKB
+	}
+	totalBytes = memTotalKB * 1024
+	usedBytes = max(0, (memTotalKB-memAvailKB)*1024)
+	return totalBytes, usedBytes, true
+}
+
+func collectHostMetrics(storageDir string) hostMetrics {
+	hm := hostMetrics{
+		CPUCores:   runtime.NumCPU(),
+		CPUPercent: sampleUnixCPUPercent(),
+	}
+	if total, used, ok := readProcMemInfo(); ok && total > 0 {
+		hm.MemTotalBytes = total
+		hm.MemUsedBytes = used
+		hm.MemPercent = math.Round((float64(used)*100.0/float64(total))*10) / 10
+	} else {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		if ms.Sys > 0 {
+			hm.MemTotalBytes = int64(ms.Sys)
+			hm.MemUsedBytes = int64(ms.Alloc)
+			hm.MemPercent = math.Round((float64(hm.MemUsedBytes)*100.0/float64(hm.MemTotalBytes))*10) / 10
+		}
+	}
+
+	candidates := []string{storageDir, filepath.Dir(storageDir), "/"}
+	for _, p := range candidates {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(p, &st); err == nil && st.Blocks > 0 {
+			bsize := uint64(st.Bsize)
+			dTotal := clampInt64(uint64(st.Blocks) * bsize)
+			dFree := clampInt64(uint64(st.Bavail) * bsize)
+			hm.DiskTotalBytes = dTotal
+			hm.DiskFreeBytes = dFree
+			hm.DiskUsedBytes = max(0, dTotal-dFree)
+			if dTotal > 0 {
+				hm.DiskPercent = math.Round((float64(hm.DiskUsedBytes)*100.0/float64(dTotal))*10) / 10
+			}
+			break
+		}
+	}
+	return hm
 }

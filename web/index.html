@@ -28,7 +28,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.5</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.6</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -106,10 +106,12 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.5</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.6</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
-        <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button">✕</button>
+        <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
 
       <div class="sidebar-stats">
@@ -185,14 +187,31 @@
     <div class="main-area">
       <header class="topbar">
         <div class="topbar-left">
-          <button id="btn-toggle-sidebar" class="btn btn-ghost btn-sm mobile-only" type="button">☰ 分类</button>
+          <button id="btn-toggle-sidebar" class="btn btn-ghost btn-sm mobile-only" type="button">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            <span>分类</span>
+          </button>
+          <nav class="workspace-nav" id="workspace-nav" aria-label="主功能导航">
+            <button class="workspace-nav-btn active" type="button" data-workspace-page="files">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <span>文件中心</span>
+            </button>
+            <button class="workspace-nav-btn" type="button" data-workspace-page="analytics">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+              <span>数据统计</span>
+            </button>
+            <button class="workspace-nav-btn" type="button" data-workspace-page="health">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              <span>节点健康</span>
+            </button>
+          </nav>
           <div class="home-access-bar" id="home-access-bar">
             <span class="access-dot"></span>
             <span class="access-label">唯一入口：</span>
             <span id="top-entry-url" class="access-url">正在获取...</span>
             <button id="btn-copy-entry-url" class="btn btn-ghost btn-xs" type="button">复制</button>
           </div>
-          <button id="topbar-cluster-pill" class="cluster-status-pill" type="button" title="查看集群在线节点状态与组网管理">
+          <button id="topbar-cluster-pill" class="cluster-status-pill" type="button" title="点击查看节点健康状态与实时监控">
             <span class="node-dot online" id="topbar-cluster-dot"></span>
             <span id="topbar-cluster-text">1/1 节点在线</span>
           </button>
@@ -206,6 +225,7 @@
           <span class="user-badge" id="user-badge">-</span>
           <button id="btn-top-theme" class="btn btn-ghost btn-xs" type="button">浅色</button>
           <button id="btn-open-settings" class="btn btn-primary btn-xs" type="button">
+            <svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             <span>设置</span>
             <span id="pending-badge" class="pending-badge hidden">0</span>
           </button>
@@ -214,78 +234,132 @@
       </header>
 
       <div class="workspace-body">
-        <!-- 紧凑拖拽上传条 -->
-        <section class="upload-strip" id="dropzone">
-          <input id="file-input" type="file" multiple hidden />
-          <input id="folder-input" type="file" webkitdirectory directory multiple hidden />
-          <div class="upload-strip-left">
-            <div class="upload-icon">⬆</div>
-            <div>
-              <div class="upload-title">拖入任意文件 / 文件夹 / 压缩包到页面任意位置即可自动上传</div>
-              <div class="upload-desc" id="upload-device-hint">
-                支持视频 / 音乐 / Office / PDF / Markdown / 压缩包 · 上传时将自动记录设备指纹并按配额调度
+        <!-- 页面 1：文件中心 -->
+        <div id="page-files" class="workspace-page">
+          <!-- 紧凑拖拽上传条 -->
+          <section class="upload-strip" id="dropzone">
+            <input id="file-input" type="file" multiple hidden />
+            <input id="folder-input" type="file" webkitdirectory directory multiple hidden />
+            <div class="upload-strip-left">
+              <div class="upload-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
               </div>
-              <div class="upload-policy-hint hidden" id="upload-policy-hint"></div>
+              <div>
+                <div class="upload-title">拖入任意文件 / 文件夹 / 压缩包到页面任意位置即可自动上传（同名同目录自动生成新版本）</div>
+                <div class="upload-desc" id="upload-device-hint">
+                  支持视频 / 音乐 / Office / PDF / Markdown / 压缩包 · 自动记录设备指纹与文件版本历史
+                </div>
+                <div class="upload-policy-hint hidden" id="upload-policy-hint"></div>
+              </div>
+            </div>
+            <div class="upload-strip-right">
+              <button id="btn-upload-access" class="access-pill-btn" type="button" title="指定哪些系统用户可以下载此次上传的文件，未授权用户将完全隐藏">可见：全部用户</button>
+              <select id="upload-target-node" class="node-select admin-only-control hidden" title="选择存储节点">
+                <option value="auto">自动分配（剩余空间最大）</option>
+              </select>
+              <div id="upload-progress-wrap" class="progress-wrap hidden">
+                <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
+                <div id="upload-progress-text" class="progress-text">0%</div>
+              </div>
+              <div class="upload-btn-group">
+                <button id="btn-pick-files" class="btn btn-primary btn-sm" type="button">选择文件</button>
+                <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">选择文件夹</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- 文件列表主面板（铺满剩余屏幕） -->
+          <section class="files-panel">
+            <div class="files-toolbar">
+              <div class="files-toolbar-left">
+                <div class="files-heading">文件列表</div>
+                <div class="active-filters" id="active-filters">全部时间 · 全部类型 · 全部设备 · 全部节点</div>
+                <button id="btn-auto-refresh" class="live-sync-pill connected" type="button" title="点击开启或暂停自动刷新">
+                  <span class="live-dot"></span>
+                  <span id="live-sync-text">实时同步</span>
+                </button>
+              </div>
+              <div class="files-actions">
+                <input id="search-input" class="search-input" type="search" placeholder="搜索文件名 / 文件夹 / 上传者 / 节点 / 指纹..." />
+                <div class="view-switcher" id="view-switcher" role="group" aria-label="文件显示方式">
+                  <button class="view-btn active" type="button" data-view-mode="list" title="列表视图">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                    <span>列表</span>
+                  </button>
+                  <button class="view-btn" type="button" data-view-mode="grid" title="图标缩略图视图">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+                    <span>图标</span>
+                  </button>
+                  <button class="view-btn" type="button" data-view-mode="chart" title="统计图表视图">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                    <span>图表</span>
+                  </button>
+                </div>
+                <button id="btn-refresh" class="btn btn-ghost btn-sm" type="button">刷新</button>
+              </div>
+            </div>
+
+            <div class="table-scroll" id="files-scroll-container">
+              <table class="files-table files-cards-mobile" id="files-main-table">
+                <thead>
+                  <tr>
+                    <th>文件名 / 版本</th>
+                    <th>分类</th>
+                    <th>大小</th>
+                    <th>更新时间</th>
+                    <th>上传者</th>
+                    <th>存储节点</th>
+                    <th>上传设备 / 指纹</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="files-tbody"></tbody>
+              </table>
+              <div id="files-grid" class="files-grid hidden"></div>
+              <div id="files-charts" class="files-charts hidden"></div>
+              <div id="empty-state" class="empty-state hidden">暂无符合条件的文件，试着拖拽文件到上方上传条吧。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- 页面 2：数据统计中心 -->
+        <section id="page-analytics" class="workspace-page page-panel hidden">
+          <div class="page-panel-header">
+            <div class="page-panel-title-wrap">
+              <div class="page-panel-icon">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+              </div>
+              <div>
+                <h2 class="page-panel-title">全网数据统计分析中心</h2>
+                <div class="page-panel-sub" id="analytics-filter-subtitle">汇总展示集群文件分布、容量趋势、设备来源与多版本文件统计</div>
+              </div>
+            </div>
+            <div class="page-panel-actions">
+              <button id="btn-analytics-refresh" class="btn btn-ghost btn-sm" type="button">刷新统计</button>
             </div>
           </div>
-          <div class="upload-strip-right">
-            <button id="btn-upload-access" class="access-pill-btn" type="button" title="指定哪些系统用户可以下载此次上传的文件，未授权用户将完全隐藏">可见：全部用户 ▾</button>
-            <select id="upload-target-node" class="node-select admin-only-control hidden" title="选择存储节点">
-              <option value="auto">自动分配（剩余空间最大）</option>
-            </select>
-            <div id="upload-progress-wrap" class="progress-wrap hidden">
-              <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
-              <div id="upload-progress-text" class="progress-text">0%</div>
-            </div>
-            <div class="upload-btn-group">
-              <button id="btn-pick-files" class="btn btn-primary btn-sm" type="button">选择文件</button>
-              <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">选择文件夹</button>
-            </div>
-          </div>
+          <div id="analytics-page-body" class="page-panel-scroll"></div>
         </section>
 
-        <!-- 文件列表主面板（铺满剩余屏幕） -->
-        <section class="files-panel">
-          <div class="files-toolbar">
-            <div class="files-toolbar-left">
-              <div class="files-heading">文件列表</div>
-              <div class="active-filters" id="active-filters">全部时间 · 全部类型 · 全部设备 · 全部节点</div>
-              <button id="btn-auto-refresh" class="live-sync-pill connected" type="button" title="点击开启或暂停自动刷新">
-                <span class="live-dot"></span>
-                <span id="live-sync-text">实时同步</span>
-              </button>
-            </div>
-            <div class="files-actions">
-              <input id="search-input" class="search-input" type="search" placeholder="搜索文件名 / 文件夹 / 上传者 / 节点 / 指纹..." />
-              <div class="view-switcher" id="view-switcher" role="group" aria-label="文件显示方式">
-                <button class="view-btn active" type="button" data-view-mode="list" title="列表视图">☰ 列表</button>
-                <button class="view-btn" type="button" data-view-mode="grid" title="图标缩略图视图">⊞ 图标</button>
-                <button class="view-btn" type="button" data-view-mode="chart" title="统计图表视图">📊 图表</button>
+        <!-- 页面 3：节点健康状态监控中心 -->
+        <section id="page-health" class="workspace-page page-panel hidden">
+          <div class="page-panel-header">
+            <div class="page-panel-title-wrap">
+              <div class="page-panel-icon health">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
               </div>
-              <button id="btn-refresh" class="btn btn-ghost btn-sm" type="button">刷新</button>
+              <div>
+                <h2 class="page-panel-title">集群节点健康状态与实时遥测</h2>
+                <div class="page-panel-sub">实时监控各节点 CPU / 内存使用率、物理磁盘容量、网络与心跳延迟、上下行速率、节点版本、同步时间及存储读写错误</div>
+              </div>
+            </div>
+            <div class="page-panel-actions">
+              <span class="live-sync-pill connected"><span class="live-dot"></span><span>3秒自动采样</span></span>
+              <button id="btn-health-open-cluster-settings" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">集群组网设置</button>
+              <button id="btn-health-refresh" class="btn btn-primary btn-sm" type="button">立即刷新采样</button>
             </div>
           </div>
-
-          <div class="table-scroll">
-            <table class="files-table files-cards-mobile" id="files-main-table">
-              <thead>
-                <tr>
-                  <th>文件名</th>
-                  <th>分类</th>
-                  <th>大小</th>
-                  <th>上传时间</th>
-                  <th>上传者</th>
-                  <th>存储节点</th>
-                  <th>上传设备 / 指纹</th>
-                  <th class="col-actions">操作</th>
-                </tr>
-              </thead>
-              <tbody id="files-tbody"></tbody>
-            </table>
-            <div id="files-grid" class="files-grid hidden"></div>
-            <div id="files-charts" class="files-charts hidden"></div>
-            <div id="empty-state" class="empty-state hidden">暂无符合条件的文件，试着拖拽文件到上方上传条吧。</div>
-          </div>
+          <div id="health-page-body" class="page-panel-scroll"></div>
         </section>
       </div>
     </div>
@@ -682,7 +756,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.5</strong>
+                  <strong id="upd-cur-version">V0.11.21.6</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>
@@ -780,12 +854,39 @@
     </div>
   </div>
 
+  <!-- 文件版本信息控制弹窗 -->
+  <div id="versions-modal" class="modal hidden">
+    <div class="modal-backdrop" id="versions-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title" id="versions-title">文件版本控制与历史记录</div>
+        <div class="modal-header-actions">
+          <button id="versions-close" class="btn btn-ghost btn-xs" type="button">关闭</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="versions-file-summary" class="version-summary-banner"></div>
+        <form id="version-upload-form" class="version-upload-bar">
+          <input id="version-file-input" type="file" required />
+          <input id="version-note-input" class="search-input" type="text" placeholder="版本说明备注（选填，例如：修复表格数据 / v2 修订版）" style="flex:1;min-width:200px;" />
+          <button id="btn-submit-version" class="btn btn-primary btn-sm" type="submit">上传新版本</button>
+        </form>
+        <div class="switch-desc" style="margin-bottom:10px;">
+          提示：在主界面上传同名同目录文件时也会自动归档旧版本并递增版本号；可随时下载任意历史版本或一键回滚为当前生效版本。
+        </div>
+        <div id="versions-list-wrap" class="admin-table-wrap"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 全屏拖拽上传遮罩 -->
   <div id="global-drop-overlay" class="drop-overlay hidden">
     <div class="drop-overlay-card">
-      <div class="drop-overlay-icon">⬆</div>
+      <div class="drop-overlay-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="38" height="38" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      </div>
       <div class="drop-overlay-title">松开鼠标，立即自动上传</div>
-      <div class="drop-overlay-desc">支持多文件、整个文件夹（保留目录结构）与压缩包</div>
+      <div class="drop-overlay-desc">支持多文件、整个文件夹（保留目录结构）与压缩包 · 同名文件自动版本控制</div>
     </div>
   </div>
 

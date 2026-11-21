@@ -1806,3 +1806,126 @@ func TestPrimarySwitchEvictOnlineNodeAndWorkerLeaveSelf(t *testing.T) {
 	}
 	_ = tsC
 }
+
+func TestFileVersionControlAndNodeHealthTelemetryAPI(t *testing.T) {
+	srv, _, _, ts := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Telemetry-Entry",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+
+	uploadFile := func(url, fieldName, filename, note, content string) (*http.Response, []byte) {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		if note != "" {
+			_ = mw.WriteField("note", note)
+		}
+		fw, err := mw.CreateFormFile(fieldName, filename)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		_, _ = fw.Write([]byte(content))
+		_ = mw.Close()
+
+		res, err := adminClient.Post(url, mw.FormDataContentType(), &buf)
+		if err != nil {
+			t.Fatalf("POST %s: %v", url, err)
+		}
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return res, raw
+	}
+
+	// 1. Upload v1 of spec.txt
+	res1, raw1 := uploadFile(ts.URL+"/api/upload", "files", "spec.txt", "", "spec-v1")
+	if res1.StatusCode != http.StatusCreated {
+		t.Fatalf("upload v1 failed: %d %s", res1.StatusCode, string(raw1))
+	}
+	var up1 struct {
+		Uploaded []storage.FileRecord `json:"uploaded"`
+	}
+	_ = json.Unmarshal(raw1, &up1)
+	if len(up1.Uploaded) != 1 || up1.Uploaded[0].Version != 1 {
+		t.Fatalf("expected v1 uploaded: %+v", up1)
+	}
+	fileID := up1.Uploaded[0].ID
+
+	// 2. Re-uploading spec.txt creates v2 automatically on the same record ID
+	res2, raw2 := uploadFile(ts.URL+"/api/upload", "files", "spec.txt", "", "spec-v2")
+	if res2.StatusCode != http.StatusCreated {
+		t.Fatalf("upload v2 failed: %d %s", res2.StatusCode, string(raw2))
+	}
+	var up2 struct {
+		Uploaded []storage.FileRecord `json:"uploaded"`
+	}
+	_ = json.Unmarshal(raw2, &up2)
+	if len(up2.Uploaded) != 1 || up2.Uploaded[0].ID != fileID || up2.Uploaded[0].Version != 2 || up2.Uploaded[0].VersionCount != 2 {
+		t.Fatalf("expected automatic v2 on same fileID: %+v", up2)
+	}
+
+	// 3. Explicit POST /api/files/{id}/versions creates v3 with note
+	res3, raw3 := uploadFile(ts.URL+"/api/files/"+fileID+"/versions", "file", "spec.txt", "正式版定稿", "spec-v3")
+	if res3.StatusCode != http.StatusCreated {
+		t.Fatalf("upload v3 failed: %d %s", res3.StatusCode, string(raw3))
+	}
+
+	// 4. GET /api/files/{id}/versions lists all 3 versions
+	vListRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/versions")
+	var vListOut struct {
+		CurrentVersion int                   `json:"current_version"`
+		VersionCount   int                   `json:"version_count"`
+		Versions       []storage.FileVersion `json:"versions"`
+	}
+	_ = json.NewDecoder(vListRes.Body).Decode(&vListOut)
+	vListRes.Body.Close()
+	if vListRes.StatusCode != http.StatusOK || vListOut.CurrentVersion != 3 || vListOut.VersionCount != 3 || len(vListOut.Versions) != 3 {
+		t.Fatalf("unexpected versions list: %+v", vListOut)
+	}
+
+	// 5. Download historical v1
+	dl1Res, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/versions/1/download")
+	dl1Bytes, _ := io.ReadAll(dl1Res.Body)
+	dl1Res.Body.Close()
+	if dl1Res.StatusCode != http.StatusOK || string(dl1Bytes) != "spec-v1" {
+		t.Fatalf("download v1 mismatch: status=%d body=%q", dl1Res.StatusCode, string(dl1Bytes))
+	}
+
+	// 6. Restore v2 as active version
+	restoreBody, _ := json.Marshal(map[string]string{"note": "切回v2"})
+	restRes, _ := adminClient.Post(ts.URL+"/api/files/"+fileID+"/versions/2/restore", "application/json", bytes.NewReader(restoreBody))
+	restRes.Body.Close()
+	if restRes.StatusCode != http.StatusOK {
+		t.Fatalf("restore v2 failed: %d", restRes.StatusCode)
+	}
+	dlCurRes, _ := adminClient.Get(ts.URL + "/api/files/" + fileID + "/download")
+	dlCurBytes, _ := io.ReadAll(dlCurRes.Body)
+	dlCurRes.Body.Close()
+	if string(dlCurBytes) != "spec-v2" {
+		t.Fatalf("expected active content 'spec-v2' after restore, got %q", string(dlCurBytes))
+	}
+
+	// 7. Delete historical v1
+	delReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/files/"+fileID+"/versions/1", nil)
+	delRes, _ := adminClient.Do(delReq)
+	delRes.Body.Close()
+	if delRes.StatusCode != http.StatusOK {
+		t.Fatalf("delete v1 failed: %d", delRes.StatusCode)
+	}
+
+	// 8. Verify Node Health telemetry fields in /api/cluster
+	clRes, _ := adminClient.Get(ts.URL + "/api/cluster")
+	var clOut struct {
+		Pool cluster.PoolSummary `json:"pool"`
+	}
+	_ = json.NewDecoder(clRes.Body).Decode(&clOut)
+	clRes.Body.Close()
+	if len(clOut.Pool.Nodes) != 1 {
+		t.Fatalf("expected 1 node in pool, got %d", len(clOut.Pool.Nodes))
+	}
+	n := clOut.Pool.Nodes[0]
+	if n.Version == "" || n.DiskTotalBytes <= 0 || n.MemTotalBytes <= 0 || n.CPUCores <= 0 || n.LastSyncAt.IsZero() || n.TotalUploadBytes <= 0 || n.TotalDownloadBytes <= 0 {
+		t.Fatalf("expected populated node telemetry fields, got %+v", n)
+	}
+}
