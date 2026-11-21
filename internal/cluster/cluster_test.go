@@ -1,12 +1,15 @@
 package cluster
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lfh/internal/storage"
 )
@@ -239,5 +242,108 @@ func TestStorageDirRoleFilteringAndDrives(t *testing.T) {
 	}
 	if reloaded.StorageDir() != customDir {
 		t.Fatalf("expected persisted storage_dir=%q, got %q", customDir, reloaded.StorageDir())
+	}
+}
+
+func TestOfflinePeerFilesHiddenNormalizeProbeAndRemove(t *testing.T) {
+	u1, err := NormalizePeerURL("192.168.3.88", "8080")
+	if err != nil || u1 != "http://192.168.3.88:8080" {
+		t.Fatalf("NormalizePeerURL bare ip: u=%q err=%v", u1, err)
+	}
+	u2, err := NormalizePeerURL("https://10.0.0.5:9443/", "8080")
+	if err != nil || u2 != "https://10.0.0.5:9443" {
+		t.Fatalf("NormalizePeerURL https: u=%q err=%v", u2, err)
+	}
+	if _, err := NormalizePeerURL("   ", "8080"); err == nil {
+		t.Fatalf("expected empty URL error")
+	}
+
+	dir := t.TempDir()
+	st, err := storage.NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	mgr, err := NewManager(dir, st, Options{
+		Role:             RoleEntry,
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:8080",
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Register an online peer carrying 1 file.
+	changed := mgr.HandleHeartbeat(HeartbeatPayload{
+		Node: NodeStatus{
+			NodeID:     "node-peer-1",
+			NodeName:   "Peer-One",
+			Role:       RoleWorker,
+			OS:         "linux",
+			HTTPURL:    "http://192.168.3.90:8080",
+			QuotaBytes: 10 * GB,
+			FreeBytes:  10 * GB,
+			FileCount:  1,
+		},
+		Files: []storage.FileRecord{
+			{ID: "f-peer-1", Name: "peer-doc.txt", Size: 128, UploadedAt: time.Now()},
+		},
+	})
+	if !changed {
+		t.Fatalf("expected first heartbeat changed=true")
+	}
+	if files := mgr.AllClusterFiles(); len(files) != 1 || files[0].ID != "f-peer-1" {
+		t.Fatalf("expected online peer file visible, got %+v", files)
+	}
+	// Online peer cannot be removed.
+	if err := mgr.RemovePeer("node-peer-1"); err == nil {
+		t.Fatalf("expected error removing online peer")
+	}
+
+	// Expire peer -> AllClusterFiles hides peer's files, PoolSummary marks offline, RemovePeer works.
+	mgr.SetPeerLastSeenForTest("node-peer-1", time.Now().Add(-30*time.Second))
+	if files := mgr.AllClusterFiles(); len(files) != 0 {
+		t.Fatalf("expected offline peer files hidden, got %+v", files)
+	}
+	pool := mgr.PoolSummary()
+	if len(pool.Nodes) != 2 || pool.Nodes[1].Online || pool.OnlineNodes != 1 {
+		t.Fatalf("expected peer listed offline in PoolSummary, got %+v", pool)
+	}
+
+	// ProbeNodeURL probes an HTTP /api/info endpoint cleanly.
+	mockTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/info" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app_name": "LFH",
+			"version":  "V0.11.21.3",
+			"role":     "entry",
+			"pool": PoolSummary{
+				Nodes: []NodeStatus{{
+					NodeID:     "node-mock-2",
+					NodeName:   "Mock-PC",
+					Role:       "entry",
+					OS:         "windows",
+					Arch:       "amd64",
+					QuotaBytes: 20 * GB,
+					IsSelf:     true,
+				}},
+			},
+		})
+	}))
+	defer mockTS.Close()
+
+	dn, err := mgr.ProbeNodeURL(context.Background(), strings.TrimPrefix(mockTS.URL, "http://"), "manual")
+	if err != nil || dn.NodeID != "node-mock-2" || dn.NodeName != "Mock-PC" || dn.AlreadyInPool {
+		t.Fatalf("ProbeNodeURL failed: dn=%+v err=%v", dn, err)
+	}
+
+	if err := mgr.RemovePeer("node-peer-1"); err != nil {
+		t.Fatalf("RemovePeer offline peer: %v", err)
+	}
+	if len(mgr.PoolSummary().Nodes) != 1 {
+		t.Fatalf("expected 1 node after RemovePeer")
 	}
 }

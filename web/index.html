@@ -28,7 +28,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.2</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.3</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -106,7 +106,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.2</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.3</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button">✕</button>
@@ -192,6 +192,10 @@
             <span id="top-entry-url" class="access-url">正在获取...</span>
             <button id="btn-copy-entry-url" class="btn btn-ghost btn-xs" type="button">复制</button>
           </div>
+          <button id="topbar-cluster-pill" class="cluster-status-pill" type="button" title="查看集群在线节点状态与组网管理">
+            <span class="node-dot online" id="topbar-cluster-dot"></span>
+            <span id="topbar-cluster-text">1/1 节点在线</span>
+          </button>
         </div>
 
         <div class="topbar-right">
@@ -578,6 +582,7 @@
                 <span>集群密钥：<code id="admin-cluster-secret">••••••••</code></span>
                 <button id="btn-toggle-secret" class="btn btn-ghost btn-xs" type="button">显示</button>
                 <button id="btn-copy-secret" class="btn btn-ghost btn-xs" type="button">复制密钥</button>
+                <button id="btn-copy-join-cmd" class="btn btn-ghost btn-xs" type="button">复制加入命令</button>
               </div>
             </div>
             <div class="endpoint-form">
@@ -599,15 +604,19 @@
                 <button id="btn-save-endpoint" class="btn btn-primary btn-sm" type="button">保存入口设置</button>
               </div>
             </div>
+            <div class="cluster-hint-bar">
+              <span class="switch-desc">节点在线时实时汇总展示该节点上的文件；节点离线（超过 12 秒无心跳）后，其上的文件会自动从列表隐藏，上线后自动恢复显示。</span>
+              <button id="btn-refresh-cluster" class="btn btn-ghost btn-xs" type="button">刷新节点状态</button>
+            </div>
             <div class="admin-table-wrap">
               <table class="files-table">
                 <thead>
                   <tr>
-                    <th>节点名称</th>
+                    <th>节点名称 / 地址</th>
                     <th>角色</th>
                     <th>系统</th>
-                    <th>状态</th>
-                    <th>已用空间</th>
+                    <th>在线状态</th>
+                    <th>文件 / 已用</th>
                     <th>预留空间（可自选单位）</th>
                     <th>操作</th>
                   </tr>
@@ -615,6 +624,44 @@
                 <tbody id="cluster-nodes-tbody"></tbody>
               </table>
             </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">局域网节点主动探测与手动组网</div>
+              <span id="discover-status-hint" class="switch-desc">可主动扫描同局域网 LFH 实例，或直接输入对方 IP:端口 进行探测并纳管</span>
+            </div>
+            <div class="discover-toolbar">
+              <input id="lan-scan-ports" class="discover-port-input" type="text" value="8080" placeholder="扫描端口（默认 8080，逗号分隔）" title="要扫描的端口列表" />
+              <button id="btn-scan-lan" class="btn btn-primary btn-sm" type="button">主动扫描局域网</button>
+              <input id="manual-probe-addr" class="search-input" type="text" placeholder="手动输入节点 IP:端口（如 192.168.3.88:8080）" />
+              <button id="btn-manual-probe" class="btn btn-ghost btn-sm" type="button">手动探测</button>
+            </div>
+            <div id="discovered-nodes-list" class="discovered-grid"></div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">或：将当前本机作为扩容节点加入其他主入口</div>
+            <div class="switch-desc" style="margin-bottom:10px;">
+              如果另一台电脑已经作为唯一主入口运行，可在此填写主入口地址和密钥，本机将验证连通性后直接切换为 Worker 节点加入对方集群（无需重启）。
+            </div>
+            <form id="join-cluster-form" class="join-cluster-grid">
+              <div class="field">
+                <label for="join-entry-url">目标主入口地址</label>
+                <input id="join-entry-url" type="text" placeholder="如：http://192.168.3.53:8080" required />
+              </div>
+              <div class="field">
+                <label for="join-cluster-secret">目标主节点集群密钥</label>
+                <input id="join-cluster-secret" type="text" placeholder="在主节点设置中心复制的密钥" required />
+              </div>
+              <div class="field">
+                <label for="join-quota-text">本机贡献预留空间（可选）</label>
+                <input id="join-quota-text" type="text" placeholder="如：20GB / 500MB（留空保持当前）" />
+              </div>
+              <div class="endpoint-form-submit">
+                <button id="btn-join-cluster" class="btn btn-primary btn-sm" type="submit">验证并加入集群</button>
+              </div>
+            </form>
           </div>
         </div>
 
@@ -634,7 +681,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.2</strong>
+                  <strong id="upd-cur-version">V0.11.21.3</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>
@@ -686,6 +733,48 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 纳管远端节点加入集群认证弹窗 -->
+  <div id="adopt-modal" class="modal hidden">
+    <div class="modal-backdrop" id="adopt-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title" id="adopt-modal-title">纳管远端节点加入本集群</div>
+        <button id="adopt-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+      </div>
+      <div class="modal-body">
+        <div id="adopt-target-info" class="info-box" style="margin-bottom:12px;">-</div>
+        <div class="auth-tabs" style="margin-bottom:12px;">
+          <button id="adopt-auth-tab-admin" class="tab-btn active" type="button">目标节点管理员账号密码</button>
+          <button id="adopt-auth-tab-secret" class="tab-btn" type="button">目标节点集群密钥</button>
+        </div>
+        <form id="adopt-form" class="auth-form">
+          <div id="adopt-admin-panel">
+            <div class="field">
+              <label for="adopt-admin-user">目标节点管理员用户名</label>
+              <input id="adopt-admin-user" type="text" placeholder="如：lfh_xxxxxx" autocomplete="off" />
+            </div>
+            <div class="field" style="margin-top:8px;">
+              <label for="adopt-admin-pass">目标节点管理员密码</label>
+              <input id="adopt-admin-pass" type="password" placeholder="输入对方节点的管理员密码" autocomplete="off" />
+            </div>
+          </div>
+          <div id="adopt-secret-panel" class="hidden">
+            <div class="field">
+              <label for="adopt-target-secret">目标节点当前的集群密钥</label>
+              <input id="adopt-target-secret" type="text" placeholder="输入对方节点设置中心的 cluster_secret" autocomplete="off" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="adopt-quota-text">加入后分配预留空间（可选）</label>
+            <input id="adopt-quota-text" type="text" placeholder="如：20GB / 500MB（留空保留对方原配额）" />
+          </div>
+          <div id="adopt-error" class="error-box hidden"></div>
+          <button id="adopt-submit-btn" class="btn btn-primary btn-block" type="submit">验证并纳管加入</button>
+        </form>
       </div>
     </div>
   </div>

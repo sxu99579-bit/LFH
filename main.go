@@ -240,6 +240,12 @@ func main() {
 		log.Fatalf("init server failed: %v", err)
 	}
 	srv.SetUpdater(updaterMgr)
+	clusterMgr.SetOnPeerChange(func(nodeName string, online bool) {
+		srv.PublishEvent(server.FileChangeEvent{
+			Kind:     "cluster_sync",
+			NodeName: nodeName,
+		})
+	})
 
 	isHandoff := os.Getenv(envUpgradeHandoff) == "1"
 	readyEnvPath := os.Getenv(envReadyFile)

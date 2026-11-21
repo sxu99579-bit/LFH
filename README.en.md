@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.2</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.3</code>
 </p>
 
 ---
@@ -20,7 +20,10 @@ Ships as a single binary with zero database setup required—ready for both Dock
 
 ## Key Features
 
-- **Heterogeneous LAN Clustering (`entry` / `worker`)**: Automatically discovers peer nodes over LAN UDP broadcast, honors per-node customizable storage quotas (e.g. `500MB`, `10GB`, `1.5TB`), routes uploads automatically by available capacity, and presents one unified entry URL.
+- **Heterogeneous LAN Clustering & Web-Based Discovery / Join (`entry` / `worker`)**:
+  - Combines passive UDP broadcast discovery (`53319/udp`) with **active LAN subnet scanning** and **manual IP:port probing** right inside **Settings -> Cluster & Entry**;
+  - Join or adopt standalone LFH hosts directly from the Web UI using the peer's admin credentials or cluster secret—zero CLI restart needed, with customizable storage quotas (`500MB`, `10GB`, `1.5TB`) behind one unified entry URL;
+  - **Live Node Status & Online-Only File Visibility**: Real-time node health indicators appear in the top bar, sidebar, and cluster table. Files on **online nodes appear normally**, while files stored on **offline nodes are automatically hidden** and seamlessly restored when the node comes back online.
 - **Instant Drag-and-Drop & Folder Structure**: Drop individual files, entire directory trees, or archives directly into the workspace with real-time progress and configurable extension allow/deny policies.
 - **Three Views & Live Auto-Refresh**: Switch cleanly between **List**, Windows Explorer-style **Grid**, and **Chart** views. Powered by Server-Sent Events (SSE), new uploads appear across connected clients automatically without page reloads.
 - **Online Preview & Detailed File Properties**: Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser. Open **Properties** on any file to inspect exact byte size, MIME type, on-demand SHA-256 checksum (up to 256 MB), visibility scope, storage node location, and uploader device fingerprint—plus exact physical disk path for administrators.
@@ -61,7 +64,7 @@ Your generated initial credentials are also written to `./lfh-data/initial-admin
 Manual `docker build` / `docker run` equivalent:
 
 ```bash
-docker build -t lfh:V0.11.21.2 .
+docker build -t lfh:V0.11.21.3 .
 
 docker run -d \
   --name lfh \
@@ -69,7 +72,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/lfh-data:/data \
-  lfh:V0.11.21.2 -data /data -port 8080 -expose-ip 192.168.1.100
+  lfh:V0.11.21.3 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---

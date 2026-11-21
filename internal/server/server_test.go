@@ -1420,3 +1420,163 @@ func TestAdminStorageDirSwitchAndMigration(t *testing.T) {
 		t.Fatalf("download after migration failed: status=%d body=%q", dlRes.StatusCode, string(dlBytes))
 	}
 }
+
+func TestOfflinePeerFilesHiddenAndWebAdoptJoin(t *testing.T) {
+	// Entry A and Entry B start as standalone Entry servers with distinct secrets.
+	entrySrvA, entryMgrA, _, entryTSA := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Node-A",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	entrySrvB, entryMgrB, storeB, entryTSB := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Node-B",
+		QuotaGB:  20,
+		QuotaSet: true,
+	})
+	// Keep one file on Node-B before Node-B joins Node-A.
+	if _, err := storeB.SaveUpload("node-b-file.txt", "admin_b", storage.DeviceInfo{Name: "PC-B"}, strings.NewReader("from-node-b")); err != nil {
+		t.Fatalf("SaveUpload on B: %v", err)
+	}
+
+	adminClientA := loginTestAdmin(t, entrySrvA, entryTSA.URL)
+	userB, passB, _ := entrySrvB.auth.InitialAdminCredentials()
+
+	// 1. Manual probe discovers Node-B cleanly.
+	probeBody, _ := json.Marshal(map[string]any{
+		"mode":    "manual",
+		"address": entryTSB.URL,
+	})
+	probeRes, err := adminClientA.Post(entryTSA.URL+"/api/admin/cluster/discover", "application/json", bytes.NewReader(probeBody))
+	if err != nil {
+		t.Fatalf("POST discover manual: %v", err)
+	}
+	var probeOut struct {
+		Node cluster.DiscoveredNode `json:"node"`
+	}
+	_ = json.NewDecoder(probeRes.Body).Decode(&probeOut)
+	probeRes.Body.Close()
+	if probeRes.StatusCode != http.StatusOK || probeOut.Node.NodeID != entryMgrB.NodeID() || probeOut.Node.AlreadyInPool {
+		t.Fatalf("unexpected probe result: status=%d out=%+v", probeRes.StatusCode, probeOut)
+	}
+
+	// 2. Adopt with wrong credentials fails and keeps Node-B standalone.
+	badAdopt, _ := json.Marshal(map[string]any{
+		"address":           entryTSB.URL,
+		"target_admin_user": userB,
+		"target_admin_pass": "wrong-pass",
+	})
+	badRes, _ := adminClientA.Post(entryTSA.URL+"/api/admin/cluster/adopt-peer", "application/json", bytes.NewReader(badAdopt))
+	badRes.Body.Close()
+	if badRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 adopt with wrong password, got %d", badRes.StatusCode)
+	}
+	if entryMgrB.Role() != cluster.RoleEntry {
+		t.Fatalf("expected Node-B to remain entry on failed adopt")
+	}
+
+	// 3. Adopt with Node-B admin credentials succeeds -> Node-B joins live and its file shows on Node-A.
+	goodAdopt, _ := json.Marshal(map[string]any{
+		"address":           entryTSB.URL,
+		"target_admin_user": userB,
+		"target_admin_pass": passB,
+		"quota_text":        "25GB",
+	})
+	goodRes, err := adminClientA.Post(entryTSA.URL+"/api/admin/cluster/adopt-peer", "application/json", bytes.NewReader(goodAdopt))
+	if err != nil {
+		t.Fatalf("adopt-peer: %v", err)
+	}
+	goodRes.Body.Close()
+	if goodRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 adopt-peer, got %d", goodRes.StatusCode)
+	}
+	if entryMgrB.Role() != cluster.RoleWorker {
+		t.Fatalf("expected Node-B switched to worker, got %s", entryMgrB.Role())
+	}
+
+	filesRes1, _ := adminClientA.Get(entryTSA.URL + "/api/files")
+	var fOut1 struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(filesRes1.Body).Decode(&fOut1)
+	filesRes1.Body.Close()
+	if len(fOut1.Files) != 1 || fOut1.Files[0].Name != "node-b-file.txt" {
+		t.Fatalf("expected Node-B file visible on Node-A while online, got %+v", fOut1.Files)
+	}
+
+	// 4. Mark Node-B offline -> Node-B still appears in /api/cluster (online=false), but its file is hidden!
+	entryMgrA.SetPeerLastSeenForTest(entryMgrB.NodeID(), time.Now().Add(-30*time.Second))
+
+	clResOff, _ := adminClientA.Get(entryTSA.URL + "/api/cluster")
+	var clOff struct {
+		Pool cluster.PoolSummary `json:"pool"`
+	}
+	_ = json.NewDecoder(clResOff.Body).Decode(&clOff)
+	clResOff.Body.Close()
+	if len(clOff.Pool.Nodes) != 2 || clOff.Pool.Nodes[1].Online {
+		t.Fatalf("expected Node-B listed offline in pool, got %+v", clOff.Pool.Nodes)
+	}
+
+	filesResOff, _ := adminClientA.Get(entryTSA.URL + "/api/files")
+	var fOutOff struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(filesResOff.Body).Decode(&fOutOff)
+	filesResOff.Body.Close()
+	if len(fOutOff.Files) != 0 {
+		t.Fatalf("expected Node-B files hidden while offline, got %+v", fOutOff.Files)
+	}
+
+	sumResOff, _ := adminClientA.Get(entryTSA.URL + "/api/summary")
+	var sumOff storage.SummaryResponse
+	_ = json.NewDecoder(sumResOff.Body).Decode(&sumOff)
+	sumResOff.Body.Close()
+	if sumOff.TotalCount != 0 {
+		t.Fatalf("expected summary TotalCount=0 while Node-B offline, got %+v", sumOff)
+	}
+
+	// 5. Node-B sends heartbeat -> file reappears automatically!
+	if err := entryMgrB.SendHeartbeatNow(); err != nil {
+		t.Fatalf("SendHeartbeatNow recovery: %v", err)
+	}
+	filesResBack, _ := adminClientA.Get(entryTSA.URL + "/api/files")
+	var fOutBack struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(filesResBack.Body).Decode(&fOutBack)
+	filesResBack.Body.Close()
+	if len(fOutBack.Files) != 1 || fOutBack.Files[0].Name != "node-b-file.txt" {
+		t.Fatalf("expected Node-B file visible again once back online, got %+v", fOutBack.Files)
+	}
+
+	// 6. Test Push join from standalone Node-C -> wrong secret fails without changing role; valid secret joins cleanly.
+	entrySrvC, entryMgrC, _, entryTSC := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Node-C",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	adminClientC := loginTestAdmin(t, entrySrvC, entryTSC.URL)
+
+	badJoin, _ := json.Marshal(map[string]any{
+		"entry_url":      entryTSA.URL,
+		"cluster_secret": "wrong-secret",
+	})
+	badJoinRes, _ := adminClientC.Post(entryTSC.URL+"/api/admin/cluster/join", "application/json", bytes.NewReader(badJoin))
+	badJoinRes.Body.Close()
+	if badJoinRes.StatusCode != http.StatusBadRequest || entryMgrC.Role() != cluster.RoleEntry {
+		t.Fatalf("expected bad join to fail 400 without mutating C, status=%d role=%s", badJoinRes.StatusCode, entryMgrC.Role())
+	}
+
+	goodJoin, _ := json.Marshal(map[string]any{
+		"entry_url":      entryTSA.URL,
+		"cluster_secret": entryMgrA.Secret(),
+		"quota_text":     "15GB",
+	})
+	goodJoinRes, _ := adminClientC.Post(entryTSC.URL+"/api/admin/cluster/join", "application/json", bytes.NewReader(goodJoin))
+	goodJoinRes.Body.Close()
+	if goodJoinRes.StatusCode != http.StatusOK || entryMgrC.Role() != cluster.RoleWorker {
+		t.Fatalf("expected valid join 200 and C->worker, status=%d role=%s", goodJoinRes.StatusCode, entryMgrC.Role())
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"lfh/internal/storage"
+	"lfh/internal/version"
 )
 
 const (
@@ -123,12 +124,18 @@ type beaconPacket struct {
 	ClusterHash string `json:"cluster_hash"`
 	NodeID      string `json:"node_id"`
 	NodeName    string `json:"node_name"`
+	Role        string `json:"role,omitempty"`
+	OS          string `json:"os,omitempty"`
+	Arch        string `json:"arch,omitempty"`
+	Version     string `json:"version,omitempty"`
+	HTTPURL     string `json:"http_url,omitempty"`
 	EntryURL    string `json:"entry_url"`
 }
 
 type peerRecord struct {
-	status NodeStatus
-	files  []storage.FileRecord
+	status    NodeStatus
+	files     []storage.FileRecord
+	wasOnline bool
 }
 
 type Manager struct {
@@ -139,9 +146,13 @@ type Manager struct {
 	selfURL            string
 	discoveredEntryURL string
 	peers              map[string]*peerRecord
+	discovered         map[string]DiscoveredNode
 	apiClient          *http.Client
 	streamClient       *http.Client
 	hbTrigger          chan struct{}
+	parentCtx          context.Context
+	loopCancel         context.CancelFunc
+	onPeerChange       func(nodeName string, online bool)
 }
 
 func ParseQuotaBytes(input string) (int64, error) {
@@ -316,6 +327,7 @@ func NewManager(dataDir string, store *storage.Store, opts Options) (*Manager, e
 		store:        store,
 		selfURL:      strings.TrimRight(strings.TrimSpace(opts.SelfURL), "/"),
 		peers:        make(map[string]*peerRecord),
+		discovered:   make(map[string]DiscoveredNode),
 		apiClient:    &http.Client{Timeout: 10 * time.Second},
 		streamClient: &http.Client{},
 		hbTrigger:    make(chan struct{}, 1),
@@ -510,6 +522,7 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	m.mu.Lock()
 	prev, exists := m.peers[n.NodeID]
 	changed := !exists ||
+		!prev.wasOnline ||
 		now.Sub(prev.status.LastSeen) > PeerTimeout ||
 		prev.status.NodeName != n.NodeName ||
 		prev.status.QuotaBytes != n.QuotaBytes ||
@@ -528,11 +541,28 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		}
 	}
 	m.peers[n.NodeID] = &peerRecord{
-		status: n,
-		files:  files,
+		status:    n,
+		files:     files,
+		wasOnline: true,
 	}
 	m.mu.Unlock()
 	return changed
+}
+
+func (m *Manager) SetOnPeerChange(fn func(nodeName string, online bool)) {
+	m.mu.Lock()
+	m.onPeerChange = fn
+	m.mu.Unlock()
+}
+
+// SetPeerLastSeenForTest adjusts a peer's recorded heartbeat time for offline/recovery testing.
+func (m *Manager) SetPeerLastSeenForTest(nodeID string, ts time.Time) {
+	m.mu.Lock()
+	if p, ok := m.peers[nodeID]; ok {
+		p.status.LastSeen = ts
+		p.wasOnline = time.Since(ts) <= PeerTimeout
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) PoolSummary() PoolSummary {
@@ -622,6 +652,9 @@ func (m *Manager) AllClusterFiles() []storage.FileRecord {
 	m.mu.RLock()
 	for _, p := range m.peers {
 		online := now.Sub(p.status.LastSeen) <= PeerTimeout
+		if !online {
+			continue
+		}
 		for _, rec := range p.files {
 			rec.NodeID = p.status.NodeID
 			rec.NodeName = p.status.NodeName
@@ -1190,21 +1223,244 @@ func (m *Manager) UpdateFileAccess(fileID string, allowedUsers []string) (storag
 // ==================== Discovery & Heartbeat Loops ====================
 
 func (m *Manager) Start(ctx context.Context) {
-	m.mu.RLock()
+	m.mu.Lock()
+	m.parentCtx = ctx
+	m.restartLoopsLocked()
+	m.mu.Unlock()
+}
+
+func (m *Manager) restartLoopsLocked() {
+	if m.loopCancel != nil {
+		m.loopCancel()
+		m.loopCancel = nil
+	}
+	if m.parentCtx == nil {
+		return
+	}
+	loopCtx, cancel := context.WithCancel(m.parentCtx)
+	m.loopCancel = cancel
 	role := m.cfg.Role
 	discPort := m.cfg.DiscoveryPort
-	m.mu.RUnlock()
 
 	if discPort > 0 {
-		if role == RoleEntry {
-			go m.runEntryBeacon(ctx, discPort)
-		} else {
-			go m.runWorkerDiscoveryListener(ctx, discPort)
-		}
+		go m.runPresenceBeacon(loopCtx, discPort)
+		go m.runDiscoveryListener(loopCtx, discPort)
+	}
+	if role == RoleEntry {
+		go m.runPeerLivenessWatcher(loopCtx)
+	} else if role == RoleWorker {
+		go m.runWorkerHeartbeat(loopCtx)
+	}
+}
+
+func (m *Manager) SendTestHeartbeat(entryURL, secret string) error {
+	cleanEntry, err := NormalizePeerURL(entryURL, m.Port())
+	if err != nil {
+		return err
+	}
+	sec := strings.TrimSpace(secret)
+	if sec == "" {
+		return errors.New("主节点集群密钥不能为空")
 	}
 
-	if role == RoleWorker {
-		go m.runWorkerHeartbeat(ctx)
+	self := m.SelfStatus()
+	self.Role = RoleWorker
+	payload := HeartbeatPayload{
+		Node:  self,
+		Files: m.store.AllRecords(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	target := strings.TrimRight(cleanEntry, "/") + "/internal/cluster/heartbeat"
+	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, sec, m.NodeID())
+
+	client := &http.Client{Timeout: 6 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("无法连接到主入口节点 %s: %w", cleanEntry, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return errors.New("主节点集群密钥不匹配")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("主节点返回异常状态 (%d)", resp.StatusCode)
+	}
+	return nil
+}
+
+// JoinEntryCluster verifies reachability + secret and switches the local node live to worker mode under entryURL.
+func (m *Manager) JoinEntryCluster(entryURL, secret string, quotaBytes int64) error {
+	cleanEntry, err := NormalizePeerURL(entryURL, m.Port())
+	if err != nil {
+		return err
+	}
+	sec := strings.TrimSpace(secret)
+	if sec == "" {
+		return errors.New("主节点集群密钥不能为空")
+	}
+	m.mu.RLock()
+	selfURL := m.selfURL
+	m.mu.RUnlock()
+	if selfURL != "" && strings.EqualFold(cleanEntry, selfURL) {
+		return errors.New("不能将本机加入自身作为主入口")
+	}
+	if quotaBytes > 0 && (quotaBytes < MinUserQuotaBytes || quotaBytes > MaxUserQuotaBytes) {
+		return errors.New("预留空间范围需在 1 MB 到 100 TB 之间")
+	}
+
+	if err := m.SendTestHeartbeat(cleanEntry, sec); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.cfg.Role = RoleWorker
+	m.cfg.ClusterSecret = sec
+	m.cfg.EntryHint = cleanEntry
+	m.discoveredEntryURL = cleanEntry
+	if quotaBytes > 0 {
+		m.cfg.QuotaBytes = quotaBytes
+		m.cfg.QuotaGB = float64(quotaBytes) / float64(GB)
+	}
+	m.peers = make(map[string]*peerRecord)
+	err = m.saveLocked()
+	if err == nil && m.parentCtx != nil {
+		m.restartLoopsLocked()
+	}
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	m.TriggerHeartbeat()
+	return nil
+}
+
+// AdoptPeer instructs a remote standalone LFH node to authenticate and join this Entry node's cluster live.
+func (m *Manager) AdoptPeer(peerURL, targetAdminUser, targetAdminPass, targetAuthSecret, quotaText string) (NodeStatus, error) {
+	if m.Role() != RoleEntry {
+		return NodeStatus{}, errors.New("仅主入口节点可执行纳管操作")
+	}
+	entryURL := m.EntryURL()
+	if entryURL == "" {
+		return NodeStatus{}, errors.New("当前主入口地址未就绪")
+	}
+	cleanPeer, err := NormalizePeerURL(peerURL, m.Port())
+	if err != nil {
+		return NodeStatus{}, err
+	}
+	if strings.EqualFold(cleanPeer, entryURL) {
+		return NodeStatus{}, errors.New("不能纳管当前本机主节点")
+	}
+
+	reqBody := map[string]any{
+		"entry_url":          entryURL,
+		"cluster_secret":     m.Secret(),
+		"target_admin_user":  strings.TrimSpace(targetAdminUser),
+		"target_admin_pass":  targetAdminPass,
+		"target_auth_secret": strings.TrimSpace(targetAuthSecret),
+		"quota_text":         strings.TrimSpace(quotaText),
+	}
+	raw, _ := json.Marshal(reqBody)
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, cleanPeer+"/api/cluster/adopt", bytes.NewReader(raw))
+	if err != nil {
+		return NodeStatus{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return NodeStatus{}, fmt.Errorf("连接目标节点 %s 失败: %w", cleanPeer, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return NodeStatus{}, errors.New(errBody.Error)
+		}
+		return NodeStatus{}, fmt.Errorf("纳管目标节点失败 (%d)", resp.StatusCode)
+	}
+
+	var out struct {
+		OK   bool       `json:"ok"`
+		Node NodeStatus `json:"node"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return NodeStatus{}, err
+	}
+
+	m.mu.Lock()
+	if dn, ok := m.discovered[out.Node.NodeID]; ok {
+		dn.AlreadyInPool = true
+		dn.Role = RoleWorker
+		m.discovered[out.Node.NodeID] = dn
+	}
+	m.mu.Unlock()
+	return out.Node, nil
+}
+
+// RemovePeer removes a retired offline peer from the in-memory cluster registry.
+func (m *Manager) RemovePeer(nodeID string) error {
+	cleanID := strings.TrimSpace(nodeID)
+	if cleanID == "" || cleanID == m.NodeID() {
+		return errors.New("不能移除本机节点")
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.peers[cleanID]
+	if !ok {
+		return errors.New("节点不存在")
+	}
+	if now.Sub(p.status.LastSeen) <= PeerTimeout {
+		return errors.New("节点当前在线，请先停止该节点服务后再移除")
+	}
+	delete(m.peers, cleanID)
+	if dn, exists := m.discovered[cleanID]; exists {
+		dn.AlreadyInPool = false
+		m.discovered[cleanID] = dn
+	}
+	return nil
+}
+
+func (m *Manager) runPeerLivenessWatcher(ctx context.Context) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			var offlineNames []string
+			m.mu.Lock()
+			for _, p := range m.peers {
+				if p.wasOnline && now.Sub(p.status.LastSeen) > PeerTimeout {
+					p.wasOnline = false
+					offlineNames = append(offlineNames, p.status.NodeName)
+				}
+			}
+			cb := m.onPeerChange
+			m.mu.Unlock()
+
+			if cb != nil {
+				for _, name := range offlineNames {
+					cb(name, false)
+				}
+			}
+		}
 	}
 }
 
@@ -1276,7 +1532,7 @@ func (m *Manager) runWorkerHeartbeat(ctx context.Context) {
 	}
 }
 
-func (m *Manager) runEntryBeacon(ctx context.Context, discPort int) {
+func (m *Manager) runPresenceBeacon(ctx context.Context, discPort int) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		log.Printf("[cluster] udp beacon disabled: %v", err)
@@ -1285,14 +1541,17 @@ func (m *Manager) runEntryBeacon(ctx context.Context, discPort int) {
 	defer conn.Close()
 
 	sendOnce := func() {
+		self := m.SelfStatus()
 		entryURL := m.EntryURL()
-		if entryURL == "" {
-			return
-		}
 		pkt := beaconPacket{
 			ClusterHash: SecretHash(m.Secret()),
-			NodeID:      m.NodeID(),
-			NodeName:    m.NodeName(),
+			NodeID:      self.NodeID,
+			NodeName:    self.NodeName,
+			Role:        self.Role,
+			OS:          self.OS,
+			Arch:        self.Arch,
+			Version:     version.Version,
+			HTTPURL:     self.HTTPURL,
 			EntryURL:    entryURL,
 		}
 		raw, err := json.Marshal(pkt)
@@ -1317,10 +1576,10 @@ func (m *Manager) runEntryBeacon(ctx context.Context, discPort int) {
 	}
 }
 
-func (m *Manager) runWorkerDiscoveryListener(ctx context.Context, discPort int) {
+func (m *Manager) runDiscoveryListener(ctx context.Context, discPort int) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: discPort})
 	if err != nil {
-		log.Printf("[cluster] udp discovery listener on :%d skipped (%v); using entry_hint=%s", discPort, err, m.EntryURL())
+		log.Printf("[cluster] udp discovery listener on :%d skipped (%v); passive UDP listen disabled on this port", discPort, err)
 		return
 	}
 	defer conn.Close()
@@ -1330,10 +1589,9 @@ func (m *Manager) runWorkerDiscoveryListener(ctx context.Context, discPort int) 
 		_ = conn.Close()
 	}()
 
-	expectedHash := SecretHash(m.Secret())
 	buf := make([]byte, 4096)
 	for {
-		n, _, err := conn.ReadFromUDP(buf)
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -1344,16 +1602,52 @@ func (m *Manager) runWorkerDiscoveryListener(ctx context.Context, discPort int) 
 		if json.Unmarshal(buf[:n], &pkt) != nil {
 			continue
 		}
-		if pkt.ClusterHash != expectedHash || pkt.EntryURL == "" || pkt.NodeID == m.NodeID() {
+		if pkt.NodeID == "" || pkt.NodeID == m.NodeID() {
 			continue
 		}
-		cleanURL := strings.TrimRight(strings.TrimSpace(pkt.EntryURL), "/")
+
+		peerURL := strings.TrimRight(strings.TrimSpace(pkt.HTTPURL), "/")
+		if peerURL == "" && pkt.Role != RoleWorker {
+			peerURL = strings.TrimRight(strings.TrimSpace(pkt.EntryURL), "/")
+		}
+		if peerURL == "" && remoteAddr != nil {
+			peerURL = fmt.Sprintf("http://%s:%s", remoteAddr.IP.String(), m.Port())
+		}
+
 		m.mu.Lock()
-		changed := m.discoveredEntryURL != cleanURL
-		m.discoveredEntryURL = cleanURL
+		if peerURL != "" {
+			_, inPool := m.peers[pkt.NodeID]
+			m.discovered[pkt.NodeID] = DiscoveredNode{
+				NodeID:        pkt.NodeID,
+				NodeName:      pkt.NodeName,
+				Role:          pkt.Role,
+				OS:            pkt.OS,
+				Arch:          pkt.Arch,
+				Version:       pkt.Version,
+				URL:           peerURL,
+				EntryURL:      strings.TrimRight(strings.TrimSpace(pkt.EntryURL), "/"),
+				AlreadyInPool: inPool,
+				Online:        true,
+				Source:        "udp",
+				LastSeen:      time.Now(),
+			}
+		}
+
+		isWorker := m.cfg.Role == RoleWorker
+		expectedHash := SecretHash(m.cfg.ClusterSecret)
+		cleanEntry := strings.TrimRight(strings.TrimSpace(pkt.EntryURL), "/")
+		isEntryBeacon := pkt.Role == "" || pkt.Role == RoleEntry
+		entryUpdated := false
+		if isWorker && isEntryBeacon && pkt.ClusterHash == expectedHash && cleanEntry != "" {
+			if m.discoveredEntryURL != cleanEntry {
+				m.discoveredEntryURL = cleanEntry
+				entryUpdated = true
+			}
+		}
 		m.mu.Unlock()
-		if changed {
-			log.Printf("[cluster] discovered entry node %s at %s", pkt.NodeName, cleanURL)
+
+		if entryUpdated {
+			log.Printf("[cluster] discovered entry node %s at %s", pkt.NodeName, cleanEntry)
 			m.TriggerHeartbeat()
 		}
 	}

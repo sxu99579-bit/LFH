@@ -18,8 +18,12 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.2",
+  appVersion: "V0.11.21.3",
   updateStatus: null,
+  discoveredNodes: [],
+  adoptAuthMode: "admin",
+  adoptTargetURL: "",
+  adoptTargetName: "",
   selectableUsers: [],
   uploadAllowedUsers: [],
   accessModalMode: "upload",
@@ -294,6 +298,19 @@ function formatTime(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatRelativeTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "-";
+  const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (sec < 8) return "刚刚";
+  if (sec < 60) return `${sec} 秒前`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  return `${Math.floor(hr / 24)} 天前`;
 }
 
 function escapeHtml(str) {
@@ -610,7 +627,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.2";
+  const ver = state.appVersion || "V0.11.21.3";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -888,6 +905,15 @@ function startLiveSync() {
       return;
     }
 
+    if (ev.kind === "cluster_sync") {
+      scheduleAutoRefresh();
+      const modal = $("settings-modal");
+      if (modal && !modal.classList.contains("hidden") && state.settingsTab === "cluster") {
+        loadPassiveDiscovered();
+      }
+      return;
+    }
+
     scheduleAutoRefresh();
     if (!state.isUploadingSelf) {
       const who = ev.uploader || "其他设备";
@@ -1053,6 +1079,18 @@ function renderPoolStatus() {
     : 0;
   $("pool-progress-fill").style.width = `${pct}%`;
   $("pool-capacity-text").textContent = `已用 ${formatSize(pool.total_used_bytes)} / 总预留 ${formatQuotaDisplay(pool.total_quota_bytes)}（剩 ${formatSize(pool.total_free_bytes)}）`;
+
+  const pill = $("topbar-cluster-pill");
+  const dot = $("topbar-cluster-dot");
+  const text = $("topbar-cluster-text");
+  if (pill && dot && text) {
+    const hasOffline = pool.total_nodes > pool.online_nodes;
+    pill.classList.toggle("has-offline", hasOffline);
+    dot.className = `node-dot ${hasOffline ? "offline" : "online"}`;
+    text.textContent = hasOffline
+      ? `${pool.online_nodes}/${pool.total_nodes} 在线（${pool.total_nodes - pool.online_nodes} 离线）`
+      : `${pool.online_nodes}/${pool.total_nodes} 节点在线`;
+  }
 }
 
 function renderNodeSummary() {
@@ -1068,7 +1106,7 @@ function renderNodeSummary() {
     <div class="nav-item-left">
       <span class="nav-label">全部节点</span>
     </div>
-    <span class="nav-count">${nodes.length} 台</span>
+    <span class="nav-count">${state.pool.online_nodes}/${nodes.length} 在线</span>
   `;
   allBtn.onclick = () => {
     state.selectedNode = "all";
@@ -1080,19 +1118,22 @@ function renderNodeSummary() {
   for (const n of nodes) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `nav-item ${state.selectedNode === n.node_id ? "active" : ""}`;
+    btn.className = `nav-item ${state.selectedNode === n.node_id ? "active" : ""} ${n.online ? "" : "is-offline"}`;
     const roleTag = n.role === "entry" ? "主入口" : "扩容节点";
+    const statusSub = n.online
+      ? `${escapeHtml(n.os)} · ${roleTag} · 在线`
+      : `${escapeHtml(n.os)} · 离线 (${formatRelativeTime(n.last_seen)}) · 文件已隐藏`;
     btn.innerHTML = `
       <div class="nav-item-left" style="flex-direction:column;align-items:flex-start;gap:1px;">
         <div style="display:flex;align-items:center;gap:6px;max-width:100%;">
           <span class="node-dot ${n.online ? "online" : "offline"}"></span>
           <span class="nav-label">${escapeHtml(n.node_name)}</span>
         </div>
-        <span class="nav-sub">${escapeHtml(n.os)} · ${roleTag}</span>
+        <span class="nav-sub">${statusSub}</span>
       </div>
       <div class="nav-right">
-        <span class="nav-count">${n.file_count}</span>
-        <span class="nav-size">${formatSize(n.used_bytes)} / ${formatQuotaDisplay(n.quota_bytes)}</span>
+        <span class="nav-count">${n.online ? n.file_count : "离线"}</span>
+        <span class="nav-size">${n.online ? `${formatSize(n.used_bytes)} / ${formatQuotaDisplay(n.quota_bytes)}` : "文件已隐藏"}</span>
       </div>
     `;
     btn.onclick = () => {
@@ -1401,13 +1442,27 @@ function buildRecordMeta(rec) {
   };
 }
 
+function updateEmptyFilesState(emptyEl) {
+  if (!emptyEl) return;
+  const selectedOffline =
+    state.selectedNode &&
+    state.selectedNode !== "all" &&
+    state.pool &&
+    Array.isArray(state.pool.nodes) &&
+    state.pool.nodes.some((n) => n.node_id === state.selectedNode && !n.online);
+  emptyEl.textContent = selectedOffline
+    ? "该节点当前离线，其上的文件已自动隐藏；待节点上线恢复心跳后会自动重新显示。"
+    : "暂无符合条件的文件，试着拖拽文件到上方上传条吧。";
+  emptyEl.classList.remove("hidden");
+}
+
 function renderFilesTable() {
   const tbody = $("files-tbody");
   const empty = $("empty-state");
   tbody.innerHTML = "";
 
   if (state.files.length === 0) {
-    empty.classList.remove("hidden");
+    updateEmptyFilesState(empty);
     return;
   }
   empty.classList.add("hidden");
@@ -1453,7 +1508,7 @@ function renderFilesGrid() {
   grid.innerHTML = "";
 
   if (state.files.length === 0) {
-    empty.classList.remove("hidden");
+    updateEmptyFilesState(empty);
     return;
   }
   empty.classList.add("hidden");
@@ -2657,6 +2712,9 @@ function switchSettingsTab(tab) {
     const panel = $(`panel-${name}`);
     if (panel) panel.classList.toggle("hidden", name !== tab);
   }
+  if (tab === "cluster" && state.user && state.user.role === "admin") {
+    loadPassiveDiscovered();
+  }
 }
 
 async function openSettingsModal(defaultTab = "general") {
@@ -2691,6 +2749,7 @@ async function refreshAdminData() {
     if (Array.isArray(clusterData.available_addrs)) state.availableAddrs = clusterData.available_addrs;
 
     renderAdminCluster();
+    loadPassiveDiscovered();
     renderInvitesTable(invData.invites || []);
     renderUsersTable(usersData.users || []);
     if (updateData && updateData.status) {
@@ -2705,7 +2764,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.2";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.3";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -2871,13 +2930,25 @@ function renderAdminCluster() {
   for (const n of state.pool.nodes || []) {
     const q = splitQuotaUnit(n.quota_bytes);
     const nid = escapeHtml(n.node_id);
+    const statusPill = n.online
+      ? `<span class="status-pill status-ok">在线</span>`
+      : `<span class="status-pill status-off">离线 (${escapeHtml(formatRelativeTime(n.last_seen))})</span>`;
+    const fileInfo = n.online
+      ? `${Number(n.file_count || 0)} 个文件 · ${formatSize(n.used_bytes)}`
+      : `<span style="color:var(--muted)">文件已隐藏</span>`;
+    const removeBtn = !n.is_self && !n.online
+      ? `<button class="btn btn-danger btn-xs" type="button" data-remove-node="${nid}" title="从节点列表清理已停止的离线节点">移除</button>`
+      : "";
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><strong>${escapeHtml(n.node_name)}</strong>${n.is_self ? ' <span class="cat-tag">本机</span>' : ""}</td>
+      <td>
+        <div><strong>${escapeHtml(n.node_name)}</strong>${n.is_self ? ' <span class="cat-tag">本机</span>' : ""}</div>
+        ${n.http_url ? `<div class="node-url-sub">${escapeHtml(n.http_url)}</div>` : ""}
+      </td>
       <td>${n.role === "entry" ? '<span class="status-pill status-ok">主入口</span>' : '<span class="cat-tag">扩容节点</span>'}</td>
       <td>${escapeHtml(n.os)}/${escapeHtml(n.arch)}</td>
-      <td>${n.online ? '<span class="status-pill status-ok">在线</span>' : '<span class="status-pill status-off">离线</span>'}</td>
-      <td>${formatSize(n.used_bytes)}</td>
+      <td>${statusPill}</td>
+      <td>${fileInfo}</td>
       <td>
         <div class="quota-editor">
           <input class="quota-input" type="number" step="any" min="1" value="${escapeHtml(q.value)}" data-quota-input="${nid}" />
@@ -2888,7 +2959,12 @@ function renderAdminCluster() {
           </select>
         </div>
       </td>
-      <td><button class="btn btn-primary btn-xs" type="button" data-save-quota="${nid}" ${n.online ? "" : "disabled"}>保存配额</button></td>
+      <td>
+        <div class="row-actions">
+          <button class="btn btn-primary btn-xs" type="button" data-save-quota="${nid}" ${n.online ? "" : "disabled"}>保存配额</button>
+          ${removeBtn}
+        </div>
+      </td>
     `;
     tbody.appendChild(tr);
 
@@ -2920,6 +2996,95 @@ function renderAdminCluster() {
     `;
     tbody.appendChild(storageTr);
   }
+}
+
+async function loadPassiveDiscovered() {
+  try {
+    const data = await api("/api/admin/cluster/discovered");
+    if (Array.isArray(data.nodes)) {
+      state.discoveredNodes = data.nodes;
+      renderDiscoveredNodes();
+    }
+  } catch {}
+}
+
+function renderDiscoveredNodes() {
+  const wrap = $("discovered-nodes-list");
+  if (!wrap) return;
+  const list = state.discoveredNodes || [];
+  if (list.length === 0) {
+    wrap.innerHTML = `<div style="color:var(--muted);font-size:12.5px;padding:6px 0;">暂未检测到局域网中的其他独立 LFH 节点。可点击上方「主动扫描局域网」或直接输入对方 IP:端口 进行探测。</div>`;
+    return;
+  }
+
+  const srcLabel = { udp: "UDP 广播发现", lan_scan: "局域网扫描", manual: "手动探测" };
+  wrap.innerHTML = "";
+  for (const d of list) {
+    const card = document.createElement("div");
+    card.className = "discovered-card";
+    const statusBadge = d.already_in_pool
+      ? `<span class="status-pill status-ok">已在当前集群</span>`
+      : `<span class="status-pill status-warn">未加入本集群</span>`;
+    const roleText = d.role === "worker" ? "Worker" : "Entry";
+    const srcText = srcLabel[d.source] || "探测";
+    const adoptBtn = d.already_in_pool
+      ? ""
+      : `<button class="btn btn-primary btn-xs" type="button" data-adopt-url="${escapeHtml(d.url)}" data-adopt-name="${escapeHtml(d.node_name)}">纳管加入本集群</button>`;
+    const joinBtn = d.role === "entry" && !d.already_in_pool
+      ? `<button class="btn btn-ghost btn-xs" type="button" data-prefill-join="${escapeHtml(d.url)}">将本机加入它</button>`
+      : "";
+
+    card.innerHTML = `
+      <div class="discovered-card-top">
+        <div>
+          <div class="discovered-name">${escapeHtml(d.node_name || d.node_id)}</div>
+          <div class="discovered-url">${escapeHtml(d.url)}</div>
+        </div>
+        ${statusBadge}
+      </div>
+      <div class="discovered-meta">
+        <span>${escapeHtml(roleText)}</span>
+        <span>·</span>
+        <span>${escapeHtml(d.os || "-")}/${escapeHtml(d.arch || "-")}</span>
+        ${d.version ? `<span>·</span><span>${escapeHtml(d.version)}</span>` : ""}
+        <span>·</span>
+        <span>${Number(d.file_count || 0)} 文件</span>
+        <span>·</span>
+        <span>${escapeHtml(srcText)}</span>
+      </div>
+      <div class="discovered-actions">
+        ${adoptBtn}
+        ${joinBtn}
+        <button class="btn btn-ghost btn-xs" type="button" data-copy-url="${escapeHtml(d.url)}">复制地址</button>
+      </div>
+    `;
+    wrap.appendChild(card);
+  }
+}
+
+function setAdoptAuthMode(mode) {
+  state.adoptAuthMode = mode === "secret" ? "secret" : "admin";
+  const isAdmin = state.adoptAuthMode === "admin";
+  if ($("adopt-auth-tab-admin")) $("adopt-auth-tab-admin").classList.toggle("active", isAdmin);
+  if ($("adopt-auth-tab-secret")) $("adopt-auth-tab-secret").classList.toggle("active", !isAdmin);
+  if ($("adopt-admin-panel")) $("adopt-admin-panel").classList.toggle("hidden", !isAdmin);
+  if ($("adopt-secret-panel")) $("adopt-secret-panel").classList.toggle("hidden", isAdmin);
+}
+
+function openAdoptModal(url, name) {
+  state.adoptTargetURL = url;
+  state.adoptTargetName = name || url;
+  if ($("adopt-target-info")) {
+    $("adopt-target-info").textContent = `准备将节点 ${state.adoptTargetName} (${url}) 切换为扩容节点并接入当前主入口 ${state.pool?.entry_url || location.origin}`;
+  }
+  if ($("adopt-form")) $("adopt-form").reset();
+  if ($("adopt-error")) $("adopt-error").classList.add("hidden");
+  setAdoptAuthMode("admin");
+  $("adopt-modal").classList.remove("hidden");
+}
+
+function closeAdoptModal() {
+  $("adopt-modal").classList.add("hidden");
 }
 
 function renderInvitesTable(invites) {
@@ -3515,6 +3680,18 @@ function bindEvents() {
   };
 
   // Cluster & Endpoint controls
+  if ($("topbar-cluster-pill")) {
+    $("topbar-cluster-pill").onclick = () => {
+      if (state.user && state.user.role === "admin") {
+        openSettingsModal("cluster");
+      } else if (state.pool) {
+        showToast(
+          `当前集群 ${state.pool.online_nodes}/${state.pool.total_nodes} 个节点在线，离线节点文件已自动隐藏`,
+          "info"
+        );
+      }
+    };
+  }
   $("btn-toggle-secret").onclick = () => {
     state.secretVisible = !state.secretVisible;
     renderAdminCluster();
@@ -3522,6 +3699,166 @@ function bindEvents() {
   $("btn-copy-secret").onclick = () => {
     if (state.clusterSecret) copyText(state.clusterSecret);
   };
+  if ($("btn-copy-join-cmd")) {
+    $("btn-copy-join-cmd").onclick = () => {
+      const entry = state.pool?.entry_url || state.serverInfo.entry_url || location.origin;
+      const cmd = `.\\lfh.exe -role worker -secret "${state.clusterSecret}" -entry "${entry}" -quota 20GB -data .\\data`;
+      copyText(cmd);
+    };
+  }
+  if ($("btn-refresh-cluster")) {
+    $("btn-refresh-cluster").onclick = async () => {
+      await Promise.all([loadCluster(), loadPassiveDiscovered(), loadFiles(), loadSummary()]);
+      renderAdminCluster();
+      showToast("已刷新节点在线状态与文件列表", "success");
+    };
+  }
+  if ($("btn-scan-lan")) {
+    $("btn-scan-lan").onclick = async () => {
+      const btn = $("btn-scan-lan");
+      const rawPorts = ($("lan-scan-ports")?.value || "8080")
+        .split(/[\s,，;]+/)
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= 65535);
+      btn.disabled = true;
+      btn.textContent = "扫描中...";
+      if ($("discover-status-hint")) {
+        $("discover-status-hint").textContent = "正在并发扫描同网段 LFH 实例，请稍候...";
+      }
+      try {
+        const data = await api("/api/admin/cluster/discover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "scan", ports: rawPorts }),
+        });
+        state.discoveredNodes = Array.isArray(data.nodes) ? data.nodes : [];
+        renderDiscoveredNodes();
+        if ($("discover-status-hint")) {
+          $("discover-status-hint").textContent = `扫描完成：共发现 ${state.discoveredNodes.length} 个其他节点`;
+        }
+        showToast(`扫描完成，发现 ${state.discoveredNodes.length} 个其他节点`, "success");
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "主动扫描局域网";
+      }
+    };
+  }
+  if ($("btn-manual-probe")) {
+    $("btn-manual-probe").onclick = async () => {
+      const addr = ($("manual-probe-addr")?.value || "").trim();
+      if (!addr) {
+        showToast("请输入目标节点的 IP:端口，例如 192.168.3.88:8080", "error");
+        return;
+      }
+      const btn = $("btn-manual-probe");
+      btn.disabled = true;
+      btn.textContent = "探测中...";
+      try {
+        const data = await api("/api/admin/cluster/discover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "manual", address: addr }),
+        });
+        state.discoveredNodes = Array.isArray(data.nodes) ? data.nodes : [];
+        renderDiscoveredNodes();
+        showToast(`探测成功：${data.node?.node_name || addr}`, "success");
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "手动探测";
+      }
+    };
+  }
+  if ($("discovered-nodes-list")) {
+    $("discovered-nodes-list").onclick = (e) => {
+      const adoptBtn = e.target.closest("[data-adopt-url]");
+      if (adoptBtn) {
+        openAdoptModal(adoptBtn.dataset.adoptUrl, adoptBtn.dataset.adoptName);
+        return;
+      }
+      const joinBtn = e.target.closest("[data-prefill-join]");
+      if (joinBtn && $("join-entry-url")) {
+        $("join-entry-url").value = joinBtn.dataset.prefillJoin;
+        $("join-cluster-secret")?.focus();
+        showToast("已填入对方主入口地址，请输入对方集群密钥后确认加入", "info");
+      }
+    };
+  }
+  if ($("adopt-close")) $("adopt-close").onclick = closeAdoptModal;
+  if ($("adopt-backdrop")) $("adopt-backdrop").onclick = closeAdoptModal;
+  if ($("adopt-auth-tab-admin")) $("adopt-auth-tab-admin").onclick = () => setAdoptAuthMode("admin");
+  if ($("adopt-auth-tab-secret")) $("adopt-auth-tab-secret").onclick = () => setAdoptAuthMode("secret");
+  if ($("adopt-form")) {
+    $("adopt-form").onsubmit = async (e) => {
+      e.preventDefault();
+      if ($("adopt-error")) $("adopt-error").classList.add("hidden");
+      const btn = $("adopt-submit-btn");
+      btn.disabled = true;
+      btn.textContent = "正在验证并接入...";
+      const isAdminMode = state.adoptAuthMode === "admin";
+      try {
+        const data = await api("/api/admin/cluster/adopt-peer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            address: state.adoptTargetURL,
+            target_admin_user: isAdminMode ? ($("adopt-admin-user")?.value || "").trim() : "",
+            target_admin_pass: isAdminMode ? ($("adopt-admin-pass")?.value || "") : "",
+            target_auth_secret: isAdminMode ? "" : ($("adopt-target-secret")?.value || "").trim(),
+            quota_text: ($("adopt-quota-text")?.value || "").trim(),
+          }),
+        });
+        if (data.pool) state.pool = data.pool;
+        closeAdoptModal();
+        await Promise.all([loadCluster(), loadPassiveDiscovered(), loadFiles(), loadSummary()]);
+        renderAdminCluster();
+        showToast(`节点 ${data.node?.node_name || state.adoptTargetName} 已成功接入集群`, "success");
+      } catch (err) {
+        if ($("adopt-error")) {
+          $("adopt-error").textContent = err.message;
+          $("adopt-error").classList.remove("hidden");
+        } else {
+          showToast(err.message, "error");
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "验证并纳管加入";
+      }
+    };
+  }
+  if ($("join-cluster-form")) {
+    $("join-cluster-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const entry_url = ($("join-entry-url")?.value || "").trim();
+      const cluster_secret = ($("join-cluster-secret")?.value || "").trim();
+      const quota_text = ($("join-quota-text")?.value || "").trim();
+      if (!confirm(`确定要将本机切换为 Worker 节点并加入主入口 ${entry_url} 吗？\n加入后浏览器将自动跳转到主入口管理。`)) {
+        return;
+      }
+      const btn = $("btn-join-cluster");
+      btn.disabled = true;
+      btn.textContent = "正在验证并加入...";
+      try {
+        const data = await api("/api/admin/cluster/join", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entry_url, cluster_secret, quota_text }),
+        });
+        showToast("已成功加入主集群，正在跳转至唯一入口...", "success");
+        setTimeout(() => {
+          location.href = data.entry_url || entry_url;
+        }, 900);
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "验证并加入集群";
+      }
+    };
+  }
 
   $("admin-expose-ip-select").onchange = (e) => {
     const isCustom = e.target.value === "__custom__";
@@ -3571,6 +3908,25 @@ function bindEvents() {
   };
 
   $("cluster-nodes-tbody").onclick = async (e) => {
+    const rmBtn = e.target.closest("[data-remove-node]");
+    if (rmBtn) {
+      const nodeID = rmBtn.dataset.removeNode;
+      if (!confirm(`确定要从集群列表中移除离线节点 ${nodeID} 吗？`)) return;
+      try {
+        const data = await api(`/api/admin/cluster/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" });
+        state.pool = data.pool || state.pool;
+        renderAdminCluster();
+        renderPoolStatus();
+        renderNodeSummary();
+        renderUploadTargetSelect();
+        loadPassiveDiscovered();
+        showToast("已移除离线节点记录", "success");
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+      return;
+    }
+
     const storageBtn = e.target.closest("[data-save-storage]");
     if (storageBtn && !storageBtn.disabled) {
       const nodeID = storageBtn.dataset.saveStorage;

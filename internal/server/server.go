@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -180,6 +181,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Public & user-facing endpoints
 	mux.HandleFunc("GET /api/info", s.handleInfo)
+	mux.HandleFunc("POST /api/cluster/adopt", s.handleClusterAdopt)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
@@ -188,6 +190,11 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/cluster", s.requireAuth(s.handleGetCluster))
 	mux.HandleFunc("GET /api/users/selectable", s.requireAuth(s.handleListSelectableUsers))
+	mux.HandleFunc("GET /api/admin/cluster/discovered", s.requireAdmin(s.handleAdminClusterDiscovered))
+	mux.HandleFunc("POST /api/admin/cluster/discover", s.requireAdmin(s.handleAdminClusterDiscover))
+	mux.HandleFunc("POST /api/admin/cluster/adopt-peer", s.requireAdmin(s.handleAdminClusterAdoptPeer))
+	mux.HandleFunc("POST /api/admin/cluster/join", s.requireAdmin(s.handleAdminClusterJoin))
+	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{nodeID}", s.requireAdmin(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
 	mux.HandleFunc("POST /api/admin/cluster/endpoint", s.requireAdmin(s.handleAdminClusterEndpoint))
@@ -224,7 +231,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", fileServer)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") || r.URL.Path == "/api/info" {
+		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") || r.URL.Path == "/api/info" || r.URL.Path == "/api/cluster/adopt" {
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -678,6 +685,184 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request, u auth
 		resp["available_addrs"] = DiscoverNetworkAddrs(port)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleClusterAdopt(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		EntryURL         string `json:"entry_url"`
+		ClusterSecret    string `json:"cluster_secret"`
+		TargetAdminUser  string `json:"target_admin_user"`
+		TargetAdminPass  string `json:"target_admin_pass"`
+		TargetAuthSecret string `json:"target_auth_secret"`
+		QuotaText        string `json:"quota_text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+
+	if strings.TrimSpace(req.TargetAuthSecret) != "" {
+		if !hmac.Equal([]byte(strings.TrimSpace(req.TargetAuthSecret)), []byte(s.cluster.Secret())) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "目标节点集群密钥验证失败"})
+			return
+		}
+	} else if strings.TrimSpace(req.TargetAdminUser) != "" && req.TargetAdminPass != "" {
+		u, _, authErr := s.auth.AuthenticateWithReason(req.TargetAdminUser, req.TargetAdminPass)
+		if authErr != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "目标节点管理员认证失败：" + authErr.Error()})
+			return
+		}
+		if u.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "该账号不是目标节点的管理员"})
+			return
+		}
+	} else {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请提供目标节点管理员账号密码或目标节点集群密钥"})
+		return
+	}
+
+	var quotaBytes int64
+	if strings.TrimSpace(req.QuotaText) != "" {
+		parsed, err := cluster.ParseQuotaBytes(req.QuotaText)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		quotaBytes = parsed
+	}
+
+	if err := s.cluster.JoinEntryCluster(req.EntryURL, req.ClusterSecret, quotaBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"node":      s.cluster.SelfStatus(),
+		"entry_url": s.cluster.EntryURL(),
+	})
+}
+
+func (s *Server) handleAdminClusterDiscovered(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes": s.cluster.PassiveDiscoveredNodes(),
+	})
+}
+
+func (s *Server) handleAdminClusterDiscover(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		Mode    string `json:"mode"` // "scan" or "manual"
+		Address string `json:"address"`
+		Ports   []int  `json:"ports"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		if strings.TrimSpace(req.Address) != "" {
+			mode = "manual"
+		} else {
+			mode = "scan"
+		}
+	}
+
+	if mode == "manual" {
+		dn, err := s.cluster.ProbeNodeURL(r.Context(), req.Address, "manual")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"node":  dn,
+			"nodes": s.cluster.PassiveDiscoveredNodes(),
+		})
+		return
+	}
+
+	nodes := s.cluster.ScanLAN(r.Context(), req.Ports)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes": nodes,
+	})
+}
+
+func (s *Server) handleAdminClusterAdoptPeer(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		Address          string `json:"address"`
+		TargetAdminUser  string `json:"target_admin_user"`
+		TargetAdminPass  string `json:"target_admin_pass"`
+		TargetAuthSecret string `json:"target_auth_secret"`
+		QuotaText        string `json:"quota_text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	node, err := s.cluster.AdoptPeer(req.Address, req.TargetAdminUser, req.TargetAdminPass, req.TargetAuthSecret, req.QuotaText)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: node.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node": node,
+		"pool": s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminClusterJoin(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		EntryURL      string `json:"entry_url"`
+		ClusterSecret string `json:"cluster_secret"`
+		QuotaText     string `json:"quota_text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	var quotaBytes int64
+	if strings.TrimSpace(req.QuotaText) != "" {
+		parsed, err := cluster.ParseQuotaBytes(req.QuotaText)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		quotaBytes = parsed
+	}
+	if err := s.cluster.JoinEntryCluster(req.EntryURL, req.ClusterSecret, quotaBytes); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: s.cluster.NodeName(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"entry_url": s.cluster.EntryURL(),
+		"node":      s.cluster.SelfStatus(),
+	})
+}
+
+func (s *Server) handleAdminClusterRemoveNode(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	nodeID := r.PathValue("nodeID")
+	if err := s.cluster.RemovePeer(nodeID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: nodeID,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"pool": s.cluster.PoolSummaryForRole(true),
+	})
 }
 
 func (s *Server) handleListSelectableUsers(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
