@@ -9,11 +9,12 @@ import (
 
 type FileChangeEvent struct {
 	Version      uint64          `json:"version"`
-	Kind         string          `json:"kind"` // "upload", "delete", "extract", "cluster_sync", "policy", "access", "role_change", "update_available", "update_progress", "upgrading"
+	Kind         string          `json:"kind"` // "upload", "delete", "extract", "cluster_sync", "entry_switched", "policy", "access", "role_change", "update_available", "update_progress", "upgrading"
 	Uploader     string          `json:"uploader,omitempty"`
 	Count        int             `json:"count,omitempty"`
 	FileNames    []string        `json:"file_names,omitempty"`
 	NodeName     string          `json:"node_name,omitempty"`
+	EntryURL     string          `json:"entry_url,omitempty"`
 	AllowedUsers []string        `json:"-"`
 	UpdateStatus *updater.Status `json:"update_status,omitempty"`
 	Timestamp    int64           `json:"timestamp"`

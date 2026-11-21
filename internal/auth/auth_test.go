@@ -363,3 +363,82 @@ func TestSetUserRoleAndSafeguards(t *testing.T) {
 		t.Fatalf("expected error for unknown username")
 	}
 }
+
+func TestExportAndImportSnapshot(t *testing.T) {
+	srcDir := t.TempDir()
+	src, err := NewManagerWithOptions(srcDir, InitOptions{AdminUser: "primaryadmin", AdminPass: "secret1234"})
+	if err != nil {
+		t.Fatalf("src NewManagerWithOptions: %v", err)
+	}
+	invReq := false
+	allowed := []string{".txt", ".png"}
+	blocked := []string{".exe"}
+	if _, err := src.UpdateSettings(&invReq, &allowed, &blocked); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if _, err := src.Register("member1", "memberpass", ""); err != nil {
+		t.Fatalf("Register member1: %v", err)
+	}
+	if _, err := src.ApproveUser("member1"); err != nil {
+		t.Fatalf("ApproveUser member1: %v", err)
+	}
+	if _, err := src.CreateInvite("primaryadmin", "HANDOFF99", "迁移邀请码", 5, 24); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	snap, err := src.ExportSnapshot()
+	if err != nil {
+		t.Fatalf("ExportSnapshot: %v", err)
+	}
+
+	dstDir := t.TempDir()
+	dst, err := NewManagerWithOptions(dstDir, InitOptions{AdminUser: "workeradmin", AdminPass: "otherpass1"})
+	if err != nil {
+		t.Fatalf("dst NewManagerWithOptions: %v", err)
+	}
+
+	// Invalid snapshots must be rejected without clobbering existing workeradmin.
+	if err := dst.ImportSnapshot([]byte(`{}` )); err == nil {
+		t.Fatalf("expected error for empty snapshot")
+	}
+	if err := dst.ImportSnapshot([]byte(`{"secret":"abcd","users":{"u":{"username":"u","role":"admin","status":"active"}}}`)); err == nil {
+		t.Fatalf("expected error for short secret")
+	}
+	if _, ok := dst.Authenticate("workeradmin", "otherpass1"); !ok {
+		t.Fatalf("existing state was corrupted after failed ImportSnapshot")
+	}
+
+	if err := dst.ImportSnapshot(snap); err != nil {
+		t.Fatalf("ImportSnapshot: %v", err)
+	}
+	if u, ok := dst.Authenticate("primaryadmin", "secret1234"); !ok || u.Role != "admin" {
+		t.Fatalf("primaryadmin auth failed after ImportSnapshot: ok=%v user=%+v", ok, u)
+	}
+	if _, ok := dst.Authenticate("member1", "memberpass"); !ok {
+		t.Fatalf("member1 auth failed after ImportSnapshot")
+	}
+	if _, ok := dst.Authenticate("workeradmin", "otherpass1"); ok {
+		t.Fatalf("old workeradmin should be replaced by snapshot")
+	}
+	if err := dst.CheckUploadAllowed("photo.png"); err != nil {
+		t.Fatalf("expected .png allowed by imported policy, got: %v", err)
+	}
+	if err := dst.CheckUploadAllowed("bad.exe"); err == nil {
+		t.Fatalf("expected .exe blocked by imported policy")
+	}
+	if len(dst.ListInvites()) != 1 || dst.ListInvites()[0].Code != "HANDOFF99" {
+		t.Fatalf("unexpected invites after ImportSnapshot: %+v", dst.ListInvites())
+	}
+
+	// Reload from disk to confirm atomic persistence to users.json.
+	reloaded, err := NewManager(dstDir)
+	if err != nil {
+		t.Fatalf("reload NewManager: %v", err)
+	}
+	if _, ok := reloaded.Authenticate("member1", "memberpass"); !ok {
+		t.Fatalf("reloaded manager missing imported member1")
+	}
+	if reloaded.Settings().InviteRequired {
+		t.Fatalf("expected InviteRequired=false persisted after reload")
+	}
+}

@@ -18,7 +18,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.4",
+  appVersion: "V0.11.21.5",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -627,7 +627,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.4";
+  const ver = state.appVersion || "V0.11.21.5";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -902,6 +902,17 @@ function startLiveSync() {
     if (ev.kind === "access") {
       loadFiles();
       loadSummary();
+      return;
+    }
+
+    if (ev.kind === "entry_switched") {
+      const nextURL = String(ev.entry_url || "").trim();
+      showToast(`主节点已切换至 ${ev.node_name || nextURL || "新主入口"}，正在跳转...`, "info");
+      if (nextURL && !nextURL.startsWith(location.origin)) {
+        setTimeout(() => { location.href = nextURL; }, 1200);
+      } else {
+        setTimeout(() => { location.reload(); }, 800);
+      }
       return;
     }
 
@@ -2764,7 +2775,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.4";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.5";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -2925,19 +2936,31 @@ function renderAdminCluster() {
 
   renderAdminEndpointControls();
 
+  const dissolveBtn = $("btn-dissolve-cluster");
+  if (dissolveBtn) {
+    const total = Number(state.pool.total_nodes || (state.pool.nodes ? state.pool.nodes.length : 1));
+    dissolveBtn.classList.toggle("hidden", total <= 1);
+  }
+
   const tbody = $("cluster-nodes-tbody");
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
     const q = splitQuotaUnit(n.quota_bytes);
     const nid = escapeHtml(n.node_id);
+    const nnameAttr = escapeHtml(n.node_name || n.node_id || "");
     const statusPill = n.online
       ? `<span class="status-pill status-ok">在线</span>`
       : `<span class="status-pill status-off">离线 (${escapeHtml(formatRelativeTime(n.last_seen))})</span>`;
     const fileInfo = n.online
       ? `${Number(n.file_count || 0)} 个文件 · ${formatSize(n.used_bytes)}`
       : `<span style="color:var(--muted)">文件已隐藏</span>`;
-    const removeBtn = !n.is_self && !n.online
-      ? `<button class="btn btn-danger btn-xs" type="button" data-remove-node="${nid}" title="从节点列表清理已停止的离线节点">移除</button>`
+    const promoteBtn = !n.is_self && n.online
+      ? `<button class="btn btn-ghost btn-xs" type="button" data-promote-node="${nid}" data-node-name="${nnameAttr}" title="将该在线节点切换为集群主入口节点">设为主节点</button>`
+      : "";
+    const removeBtn = !n.is_self
+      ? (n.online
+        ? `<button class="btn btn-danger btn-xs" type="button" data-remove-node="${nid}" data-node-online="1" data-node-name="${nnameAttr}" title="通知该节点退出当前集群并恢复为独立节点">移出集群</button>`
+        : `<button class="btn btn-danger btn-xs" type="button" data-remove-node="${nid}" data-node-online="0" data-node-name="${nnameAttr}" title="从节点列表删除已停止的离线节点">删除节点</button>`)
       : "";
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -2961,6 +2984,7 @@ function renderAdminCluster() {
       </td>
       <td>
         <div class="row-actions">
+          ${promoteBtn}
           <button class="btn btn-primary btn-xs" type="button" data-save-quota="${nid}" ${n.online ? "" : "disabled"}>保存配额</button>
           ${removeBtn}
         </div>
@@ -3713,6 +3737,30 @@ function bindEvents() {
       showToast("已刷新节点在线状态与文件列表", "success");
     };
   }
+  if ($("btn-dissolve-cluster")) {
+    $("btn-dissolve-cluster").onclick = async () => {
+      if (!confirm("确定要解散当前集群吗？\n\n所有在线从节点将收到通知并恢复为独立主入口，本机集群密钥也将重置。各节点上的文件均会完整保留。")) return;
+      const btn = $("btn-dissolve-cluster");
+      btn.disabled = true;
+      try {
+        const data = await api("/api/admin/cluster/leave", { method: "POST" });
+        state.pool = data.pool || state.pool;
+        if (data.cluster_secret) state.clusterSecret = data.cluster_secret;
+        renderAdminCluster();
+        renderPoolStatus();
+        renderNodeSummary();
+        renderUploadTargetSelect();
+        loadPassiveDiscovered();
+        loadFiles();
+        loadSummary();
+        showToast(`已解散集群（已通知 ${Number(data.detached || 0)} 个在线从节点退出）`, "success");
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  }
   if ($("btn-scan-lan")) {
     $("btn-scan-lan").onclick = async () => {
       const btn = $("btn-scan-lan");
@@ -3908,10 +3956,42 @@ function bindEvents() {
   };
 
   $("cluster-nodes-tbody").onclick = async (e) => {
+    const promoteBtn = e.target.closest("[data-promote-node]");
+    if (promoteBtn) {
+      const nodeID = promoteBtn.dataset.promoteNode;
+      const nodeName = promoteBtn.dataset.nodeName || nodeID;
+      if (!confirm(`确定将「${nodeName}」设为新的集群主节点吗？\n\n操作后：\n1. 所有账号、密码与权限规则将迁移到新主节点\n2. 本机将切换为从节点并保留所有本地文件\n3. 界面将自动跳转到新主节点入口`)) return;
+      promoteBtn.disabled = true;
+      try {
+        const data = await api("/api/admin/cluster/promote", {
+          method: "POST",
+          body: JSON.stringify({ target_node_id: nodeID })
+        });
+        showToast(`主节点已切换至「${nodeName}」，正在跳转...`, "success");
+        const nextURL = String(data.new_entry_url || "").trim();
+        setTimeout(() => {
+          if (nextURL && !nextURL.startsWith(location.origin)) {
+            location.href = nextURL;
+          } else {
+            location.reload();
+          }
+        }, 700);
+      } catch (err) {
+        promoteBtn.disabled = false;
+        showToast(err.message, "error");
+      }
+      return;
+    }
+
     const rmBtn = e.target.closest("[data-remove-node]");
     if (rmBtn) {
       const nodeID = rmBtn.dataset.removeNode;
-      if (!confirm(`确定要从集群列表中移除离线节点 ${nodeID} 吗？`)) return;
+      const nodeName = rmBtn.dataset.nodeName || nodeID;
+      const isOnline = rmBtn.dataset.nodeOnline === "1";
+      const confirmMsg = isOnline
+        ? `确定将在线节点「${nodeName}」移出集群吗？该节点将恢复为独立节点并保留其本地文件。`
+        : `确定删除离线节点「${nodeName}」记录吗？`;
+      if (!confirm(confirmMsg)) return;
       try {
         const data = await api(`/api/admin/cluster/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" });
         state.pool = data.pool || state.pool;
@@ -3920,7 +4000,9 @@ function bindEvents() {
         renderNodeSummary();
         renderUploadTargetSelect();
         loadPassiveDiscovered();
-        showToast("已移除离线节点记录", "success");
+        loadFiles();
+        loadSummary();
+        showToast(isOnline ? `已将「${nodeName}」移出集群` : `已删除离线节点「${nodeName}」记录`, "success");
       } catch (err) {
         showToast(err.message, "error");
       }

@@ -178,10 +178,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/files/{id}/access", s.requireClusterAuth(s.handleClusterUpdateAccess))
 	mux.HandleFunc("POST /internal/cluster/quota", s.requireClusterAuth(s.handleClusterSetQuota))
 	mux.HandleFunc("POST /internal/cluster/storage-dir", s.requireClusterAuth(s.handleClusterSetStorageDir))
+	mux.HandleFunc("POST /internal/cluster/promote", s.requireClusterAuth(s.handleClusterPromote))
+	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
+	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
 
 	// Public & user-facing endpoints
 	mux.HandleFunc("GET /api/info", s.handleInfo)
 	mux.HandleFunc("POST /api/cluster/adopt", s.handleClusterAdopt)
+	mux.HandleFunc("GET /worker", s.handleWorkerPage)
+	mux.HandleFunc("POST /api/cluster/leave-self", s.handleClusterLeaveSelf)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
@@ -194,6 +199,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/cluster/discover", s.requireAdmin(s.handleAdminClusterDiscover))
 	mux.HandleFunc("POST /api/admin/cluster/adopt-peer", s.requireAdmin(s.handleAdminClusterAdoptPeer))
 	mux.HandleFunc("POST /api/admin/cluster/join", s.requireAdmin(s.handleAdminClusterJoin))
+	mux.HandleFunc("POST /api/admin/cluster/promote", s.requireAdmin(s.handleAdminClusterPromote))
+	mux.HandleFunc("POST /api/admin/cluster/leave", s.requireAdmin(s.handleAdminClusterLeave))
 	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{nodeID}", s.requireAdmin(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
@@ -231,7 +238,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", fileServer)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") || r.URL.Path == "/api/info" || r.URL.Path == "/api/cluster/adopt" {
+		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") ||
+			r.URL.Path == "/api/info" ||
+			r.URL.Path == "/api/cluster/adopt" ||
+			r.URL.Path == "/worker" ||
+			r.URL.Path == "/api/cluster/leave-self" {
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -255,7 +266,7 @@ func (s *Server) redirectWorkerToEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = w.Write([]byte(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>LFH 存储节点</title></head><body style="font-family:sans-serif;background:#0b1120;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="text-align:center;"><h2>本机为 LFH 存储扩容节点（Worker）</h2><p>正在等待主入口节点上线或自动发现中，请从唯一主入口访问平台。</p></div></body></html>`))
+	_, _ = w.Write([]byte(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>LFH 存储节点</title></head><body style="font-family:sans-serif;background:#0b1120;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="text-align:center;"><h2>本机为 LFH 存储扩容节点（Worker）</h2><p>正在等待主入口节点上线或自动发现中，请从唯一主入口访问平台。</p><p style="margin-top:16px;"><a href="/worker" style="color:#38bdf8;text-decoration:underline;">打开本机节点管理 / 退出集群</a></p></div></body></html>`))
 }
 
 type authedHandler func(http.ResponseWriter, *http.Request, auth.PublicUser)
@@ -483,6 +494,368 @@ func (s *Server) handleClusterUpdateAccess(w http.ResponseWriter, r *http.Reques
 	s.cluster.TriggerHeartbeat()
 	writeJSON(w, http.StatusOK, rec)
 }
+
+func (s *Server) handleClusterPromote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ClusterSecret string `json:"cluster_secret"`
+		AuthSnapshot  []byte `json:"auth_snapshot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if len(req.AuthSnapshot) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少账号权限快照"})
+		return
+	}
+	backup, err := s.auth.ExportSnapshot()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "备份当前账号状态失败: " + err.Error()})
+		return
+	}
+	if err := s.auth.ImportSnapshot(req.AuthSnapshot); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	node, err := s.cluster.PromoteSelfToEntry(req.ClusterSecret)
+	if err != nil {
+		_ = s.auth.ImportSnapshot(backup)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: node.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"node": node,
+	})
+}
+
+func (s *Server) handleClusterRepoint(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NewEntryURL string `json:"new_entry_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if err := s.cluster.RepointEntry(req.NewEntryURL); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "entry_switched",
+		NodeName: s.cluster.NodeName(),
+		EntryURL: s.cluster.EntryURL(),
+	})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleClusterLeave(w http.ResponseWriter, r *http.Request) {
+	node, err := s.cluster.LeaveCluster()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: node.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"node": node,
+	})
+}
+
+func (s *Server) handleClusterLeaveSelf(w http.ResponseWriter, r *http.Request) {
+	if s.cluster.Role() != cluster.RoleWorker {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "当前节点已是独立主入口节点，无需退出集群"})
+		return
+	}
+	var req struct {
+		AdminUser     string `json:"admin_user"`
+		AdminPass     string `json:"admin_pass"`
+		ClusterSecret string `json:"cluster_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+
+	authorized := false
+	if strings.TrimSpace(req.AdminUser) != "" && req.AdminPass != "" {
+		if u, ok := s.auth.Authenticate(strings.TrimSpace(req.AdminUser), req.AdminPass); ok && u.Role == "admin" {
+			authorized = true
+		}
+	}
+	if !authorized {
+		providedSecret := strings.TrimSpace(req.ClusterSecret)
+		expectedSecret := strings.TrimSpace(s.cluster.Secret())
+		if providedSecret != "" && expectedSecret != "" && hmac.Equal([]byte(providedSecret), []byte(expectedSecret)) {
+			authorized = true
+		}
+	}
+	if !authorized {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "本机管理员账号密码或当前集群密钥验证失败"})
+		return
+	}
+
+	node, err := s.cluster.LeaveCluster()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "退出集群失败: " + err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: node.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":             true,
+		"node":           node,
+		"cluster_secret": s.cluster.Secret(),
+		"redirect_url":   "/",
+	})
+}
+
+func (s *Server) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(workerControlHTML))
+}
+
+const workerControlHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LFH 本机节点管理</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(circle at top, #1e293b 0%, #0b1120 60%);
+      color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 520px;
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 16px;
+      padding: 26px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    }
+    .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
+    .title { font-size: 20px; font-weight: 700; margin: 0; }
+    .badge {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+      background: rgba(56, 189, 248, 0.16);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .badge.entry { background: rgba(34, 197, 94, 0.16); color: #4ade80; border-color: rgba(34, 197, 94, 0.35); }
+    .meta {
+      background: rgba(30, 41, 59, 0.65);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 18px;
+      font-size: 13px;
+      line-height: 1.75;
+    }
+    .meta-row { display: flex; justify-content: space-between; gap: 12px; word-break: break-all; }
+    .meta-k { color: #94a3b8; white-space: nowrap; }
+    .meta-v { color: #f8fafc; font-weight: 500; text-align: right; }
+    .tip {
+      font-size: 12.5px;
+      color: #cbd5e1;
+      background: rgba(245, 158, 11, 0.1);
+      border: 1px solid rgba(245, 158, 11, 0.28);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      line-height: 1.6;
+    }
+    .field { margin-bottom: 12px; }
+    label { display: block; font-size: 12.5px; color: #cbd5e1; margin-bottom: 6px; }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 14px;
+    }
+    .divider { text-align: center; font-size: 12px; color: #94a3b8; margin: 10px 0; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+    .btn {
+      flex: 1;
+      min-width: 140px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 0;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .btn-danger { background: #dc2626; color: #fff; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-ghost { background: rgba(148, 163, 184, 0.16); color: #f1f5f9; }
+    .msg { margin-top: 12px; font-size: 13px; min-height: 20px; }
+    .msg.err { color: #f87171; }
+    .msg.ok { color: #4ade80; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <h1 class="title">LFH 本机节点控制台</h1>
+      <span id="role-badge" class="badge">加载中...</span>
+    </div>
+    <div class="meta">
+      <div class="meta-row"><span class="meta-k">节点名称</span><span id="m-name" class="meta-v">-</span></div>
+      <div class="meta-row"><span class="meta-k">节点 ID</span><span id="m-id" class="meta-v">-</span></div>
+      <div class="meta-row"><span class="meta-k">版本</span><span id="m-ver" class="meta-v">-</span></div>
+      <div class="meta-row"><span class="meta-k">当前主入口</span><span id="m-entry" class="meta-v">-</span></div>
+      <div id="m-dir-row" class="meta-row"><span class="meta-k">本机存储目录</span><span id="m-dir" class="meta-v">-</span></div>
+      <div class="meta-row"><span class="meta-k">本机文件数 / 容量</span><span id="m-cap" class="meta-v">-</span></div>
+    </div>
+
+    <div id="entry-box" class="hidden">
+      <div class="tip">当前本机已是主入口节点（Entry），可以直接打开完整 Web 控制台。</div>
+      <div class="actions">
+        <a class="btn btn-primary" href="/">进入 LFH 主界面</a>
+      </div>
+    </div>
+
+    <form id="leave-form" class="hidden">
+      <div class="tip">如果主入口节点已离线或需要解除当前节点从属关系，可在此验证本机管理员账号密码或当前集群密钥，将本机安全退出集群并恢复为独立主入口（本机文件与目录将完整保留）。</div>
+      <div class="field">
+        <label for="admin-user">本机管理员用户名（方式一）</label>
+        <input id="admin-user" type="text" autocomplete="username" placeholder="例如 admin_xxx" />
+      </div>
+      <div class="field">
+        <label for="admin-pass">本机管理员密码</label>
+        <input id="admin-pass" type="password" autocomplete="current-password" placeholder="输入本机管理员密码" />
+      </div>
+      <div class="divider">—— 或使用 ——</div>
+      <div class="field">
+        <label for="cluster-secret">当前集群密钥（方式二）</label>
+        <input id="cluster-secret" type="password" placeholder="输入当前集群的 Cluster Secret" />
+      </div>
+      <div class="actions">
+        <button id="btn-leave-self" class="btn btn-danger" type="submit">退出集群并恢复独立节点</button>
+        <a id="btn-go-entry" class="btn btn-ghost hidden" href="#">前往当前主入口</a>
+      </div>
+    </form>
+    <div id="status-msg" class="msg"></div>
+  </div>
+  <script>
+    function fmtBytes(n) {
+      if (!n || n <= 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let idx = 0, val = Number(n);
+      while (val >= 1024 && idx < units.length - 1) { val /= 1024; idx++; }
+      return (val >= 100 || idx === 0 ? val.toFixed(0) : val.toFixed(1)) + " " + units[idx];
+    }
+    async function loadNodeInfo() {
+      const msg = document.getElementById("status-msg");
+      try {
+        const res = await fetch("/api/info", { cache: "no-store" });
+        const data = await res.json();
+        const selfNode = (data.pool && Array.isArray(data.pool.nodes))
+          ? (data.pool.nodes.find((n) => n.is_self) || data.pool.nodes[0] || {})
+          : {};
+        document.getElementById("m-name").textContent = selfNode.node_name || "-";
+        document.getElementById("m-id").textContent = selfNode.node_id || "-";
+        document.getElementById("m-ver").textContent = (data.app_name || "LFH") + " " + (data.version || "");
+        document.getElementById("m-entry").textContent = data.entry_url || (data.role === "entry" ? "本机即主入口" : "未连接");
+        const dirRow = document.getElementById("m-dir-row");
+        if (selfNode.storage_dir) {
+          document.getElementById("m-dir").textContent = selfNode.storage_dir;
+          dirRow.classList.remove("hidden");
+        } else {
+          dirRow.classList.add("hidden");
+        }
+        document.getElementById("m-cap").textContent = String(selfNode.file_count || 0) + " 个文件 · " + fmtBytes(selfNode.used_bytes || 0) + " / " + fmtBytes(selfNode.quota_bytes || 0);
+
+        const badge = document.getElementById("role-badge");
+        if (data.role === "worker") {
+          badge.textContent = "Worker 从节点";
+          badge.classList.remove("entry");
+          document.getElementById("leave-form").classList.remove("hidden");
+          document.getElementById("entry-box").classList.add("hidden");
+          const goEntry = document.getElementById("btn-go-entry");
+          if (data.entry_url) {
+            goEntry.href = data.entry_url;
+            goEntry.classList.remove("hidden");
+          }
+        } else {
+          badge.textContent = "Entry 主入口";
+          badge.classList.add("entry");
+          document.getElementById("entry-box").classList.remove("hidden");
+          document.getElementById("leave-form").classList.add("hidden");
+        }
+      } catch (err) {
+        msg.className = "msg err";
+        msg.textContent = "读取节点状态失败: " + err.message;
+      }
+    }
+    document.getElementById("leave-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById("status-msg");
+      const btn = document.getElementById("btn-leave-self");
+      msg.className = "msg";
+      msg.textContent = "";
+      if (!confirm("确定退出当前集群并恢复为独立主入口节点吗？（本机所有文件将保留）")) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/cluster/leave-self", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            admin_user: document.getElementById("admin-user").value.trim(),
+            admin_pass: document.getElementById("admin-pass").value,
+            cluster_secret: document.getElementById("cluster-secret").value.trim()
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "请求失败");
+        msg.className = "msg ok";
+        msg.textContent = "已退出集群并恢复为独立主入口，正在跳转...";
+        setTimeout(() => { window.location.href = data.redirect_url || "/"; }, 800);
+      } catch (err) {
+        msg.className = "msg err";
+        msg.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    loadNodeInfo();
+  </script>
+</body>
+</html>`
 
 // ==================== Public & Entry Handlers ====================
 
@@ -851,17 +1224,76 @@ func (s *Server) handleAdminClusterJoin(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) handleAdminClusterRemoveNode(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	nodeID := r.PathValue("nodeID")
-	if err := s.cluster.RemovePeer(nodeID); err != nil {
+	notified, peerName, err := s.cluster.EvictPeer(nodeID)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	s.events.Publish(FileChangeEvent{
 		Kind:     "cluster_sync",
-		NodeName: nodeID,
+		NodeName: peerName,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":   true,
-		"pool": s.cluster.PoolSummaryForRole(true),
+		"ok":       true,
+		"notified": notified,
+		"pool":     s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminClusterPromote(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	if s.cluster.Role() != cluster.RoleEntry {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "仅主入口节点可执行主节点切换"})
+		return
+	}
+	var req struct {
+		TargetNodeID string `json:"target_node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	snap, err := s.auth.ExportSnapshot()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "导出账号快照失败: " + err.Error()})
+		return
+	}
+	newEntryURL, targetNode, err := s.cluster.PromotePeer(req.TargetNodeID, snap)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "entry_switched",
+		NodeName: targetNode.NodeName,
+		EntryURL: newEntryURL,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"new_entry_url": newEntryURL,
+		"target_node":   targetNode,
+		"pool":          s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminClusterLeave(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	if s.cluster.Role() != cluster.RoleEntry {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "仅主入口节点可执行解散/退出集群操作"})
+		return
+	}
+	detached, err := s.cluster.DissolveCluster()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "退出/解散集群失败: " + err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: s.cluster.NodeName(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":             true,
+		"detached":       detached,
+		"cluster_secret": s.cluster.Secret(),
+		"pool":           s.cluster.PoolSummaryForRole(true),
 	})
 }
 

@@ -218,6 +218,117 @@ func (m *Manager) saveLocked() error {
 	return os.WriteFile(m.filePath, raw, 0600)
 }
 
+// ExportSnapshot serializes the full auth state (secret, policies, users, invites) for entry-node handoff.
+func (m *Manager) ExportSnapshot() ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	invReq := m.inviteRequired
+	data := storeData{
+		Secret:         hex.EncodeToString(m.secret),
+		InviteRequired: &invReq,
+		AllowedExts:    m.allowedExts,
+		BlockedExts:    m.blockedExts,
+		Users:          m.users,
+		Invites:        m.invites,
+	}
+	return json.Marshal(data)
+}
+
+// ImportSnapshot atomically replaces auth state from an entry-node snapshot and persists users.json.
+func (m *Manager) ImportSnapshot(raw []byte) error {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return errors.New("账号快照内容为空")
+	}
+	var data storeData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return fmt.Errorf("解析账号快照失败: %w", err)
+	}
+	secret, err := hex.DecodeString(strings.TrimSpace(data.Secret))
+	if err != nil || len(secret) < 16 {
+		return errors.New("账号快照签名密钥无效")
+	}
+	if len(data.Users) == 0 {
+		return errors.New("账号快照缺少有效用户")
+	}
+
+	users := make(map[string]User, len(data.Users))
+	hasActiveAdmin := false
+	for key, u := range data.Users {
+		username := strings.TrimSpace(u.Username)
+		if username == "" {
+			username = strings.TrimSpace(key)
+		}
+		if username == "" {
+			continue
+		}
+		u.Username = username
+		u.Role = strings.ToLower(strings.TrimSpace(u.Role))
+		if u.Role != "admin" {
+			u.Role = "user"
+		}
+		u.Status = strings.ToLower(strings.TrimSpace(u.Status))
+		if u.Status == "" {
+			u.Status = StatusActive
+		}
+		if u.Role == "admin" && u.Status == StatusActive {
+			hasActiveAdmin = true
+		}
+		users[username] = u
+	}
+	if len(users) == 0 || !hasActiveAdmin {
+		return errors.New("账号快照必须包含至少一个可用管理员")
+	}
+
+	invites := make(map[string]InviteCode, len(data.Invites))
+	for k, inv := range data.Invites {
+		code := strings.TrimSpace(inv.Code)
+		if code == "" {
+			code = strings.TrimSpace(k)
+		}
+		if code == "" {
+			continue
+		}
+		inv.Code = code
+		invites[code] = inv
+	}
+
+	allowed := NormalizeExts(data.AllowedExts)
+	blocked := NormalizeExts(data.BlockedExts)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	invReq := m.inviteRequired
+	if data.InviteRequired != nil {
+		invReq = *data.InviteRequired
+	}
+
+	oldSecret := m.secret
+	oldInviteReq := m.inviteRequired
+	oldAllowed := m.allowedExts
+	oldBlocked := m.blockedExts
+	oldUsers := m.users
+	oldInvites := m.invites
+
+	m.secret = secret
+	m.inviteRequired = invReq
+	m.allowedExts = allowed
+	m.blockedExts = blocked
+	m.users = users
+	m.invites = invites
+
+	if err := m.saveLocked(); err != nil {
+		m.secret = oldSecret
+		m.inviteRequired = oldInviteReq
+		m.allowedExts = oldAllowed
+		m.blockedExts = oldBlocked
+		m.users = oldUsers
+		m.invites = oldInvites
+		return err
+	}
+	return nil
+}
+
 func hashPassword(password, salt string) string {
 	h := sha256.New()
 	h.Write([]byte(salt + ":" + password))

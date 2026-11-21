@@ -406,3 +406,127 @@ func TestDirectClusterClientIgnoresHTTPProxy(t *testing.T) {
 		t.Fatalf("SendTestHeartbeat failed with HTTP_PROXY set: %v", err)
 	}
 }
+
+func TestLeaveClusterRotatesSecretAndClearsPeers(t *testing.T) {
+	oldSecret := "shared-cluster-secret-01"
+
+	workerDir := t.TempDir()
+	workerStore, err := storage.NewStore(workerDir)
+	if err != nil {
+		t.Fatalf("worker NewStore: %v", err)
+	}
+	workerMgr, err := NewManager(workerDir, workerStore, Options{
+		Role:             RoleWorker,
+		NodeName:         "worker-node",
+		ClusterSecret:    oldSecret,
+		EntryHint:        "http://127.0.0.1:18080",
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:18081",
+	})
+	if err != nil {
+		t.Fatalf("worker NewManager: %v", err)
+	}
+	if workerMgr.Role() != RoleWorker || workerMgr.EntryURL() == "" {
+		t.Fatalf("expected initial worker role & entry URL, got role=%s entry=%s", workerMgr.Role(), workerMgr.EntryURL())
+	}
+
+	self, err := workerMgr.LeaveCluster()
+	if err != nil {
+		t.Fatalf("LeaveCluster: %v", err)
+	}
+	if self.Role != RoleEntry || workerMgr.Role() != RoleEntry {
+		t.Fatalf("expected standalone entry role after LeaveCluster, got %s", workerMgr.Role())
+	}
+	if workerMgr.EntryURL() == "http://127.0.0.1:18080" && workerMgr.Role() == RoleWorker {
+		t.Fatalf("expected entry hint cleared after LeaveCluster")
+	}
+	if workerMgr.Secret() == "" || workerMgr.Secret() == oldSecret {
+		t.Fatalf("expected rotated secret after LeaveCluster, got %q", workerMgr.Secret())
+	}
+
+	reloaded, err := NewManager(workerDir, workerStore, Options{
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+	})
+	if err != nil {
+		t.Fatalf("reload NewManager: %v", err)
+	}
+	if reloaded.Role() != RoleEntry || reloaded.Secret() != workerMgr.Secret() {
+		t.Fatalf("reloaded config mismatch: role=%s secret=%s", reloaded.Role(), reloaded.Secret())
+	}
+}
+
+func TestEvictPeerOnlineAndOffline(t *testing.T) {
+	secret := "evict-test-secret-01"
+	leaveCalls := 0
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/internal/cluster/leave" {
+			if !VerifyRequest(r, secret) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			leaveCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer peerSrv.Close()
+
+	entryDir := t.TempDir()
+	entryStore, err := storage.NewStore(entryDir)
+	if err != nil {
+		t.Fatalf("entry NewStore: %v", err)
+	}
+	entryMgr, err := NewManager(entryDir, entryStore, Options{
+		Role:             RoleEntry,
+		NodeName:         "entry-node",
+		ClusterSecret:    secret,
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:18090",
+	})
+	if err != nil {
+		t.Fatalf("entry NewManager: %v", err)
+	}
+
+	entryMgr.HandleHeartbeat(HeartbeatPayload{
+		Node: NodeStatus{
+			NodeID:   "online-peer",
+			NodeName: "Online-Worker",
+			Role:     RoleWorker,
+			HTTPURL:  peerSrv.URL,
+		},
+	})
+	entryMgr.HandleHeartbeat(HeartbeatPayload{
+		Node: NodeStatus{
+			NodeID:   "offline-peer",
+			NodeName: "Offline-Worker",
+			Role:     RoleWorker,
+			HTTPURL:  "http://127.0.0.1:1",
+		},
+	})
+	entryMgr.SetPeerLastSeenForTest("offline-peer", time.Now().Add(-30*time.Second))
+
+	if got := len(entryMgr.PoolSummary().Nodes); got != 3 {
+		t.Fatalf("expected 3 nodes before evict, got %d", got)
+	}
+
+	notified, name, err := entryMgr.EvictPeer("online-peer")
+	if err != nil || !notified || name != "Online-Worker" || leaveCalls != 1 {
+		t.Fatalf("EvictPeer(online) mismatch: notified=%v name=%q leaveCalls=%d err=%v", notified, name, leaveCalls, err)
+	}
+
+	notifiedOff, nameOff, err := entryMgr.EvictPeer("offline-peer")
+	if err != nil || notifiedOff || nameOff != "Offline-Worker" || leaveCalls != 1 {
+		t.Fatalf("EvictPeer(offline) mismatch: notified=%v name=%q leaveCalls=%d err=%v", notifiedOff, nameOff, leaveCalls, err)
+	}
+
+	if got := len(entryMgr.PoolSummary().Nodes); got != 1 {
+		t.Fatalf("expected only self remaining after evicting both peers, got %d", got)
+	}
+	if _, _, err := entryMgr.EvictPeer(entryMgr.NodeID()); err == nil {
+		t.Fatalf("expected error evicting self node")
+	}
+}

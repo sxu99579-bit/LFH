@@ -1457,6 +1457,321 @@ func (m *Manager) RemovePeer(nodeID string) error {
 	return nil
 }
 
+// PromoteSelfToEntry upgrades this node into the cluster entry node while keeping its cluster secret.
+func (m *Manager) PromoteSelfToEntry(clusterSecret string) (NodeStatus, error) {
+	m.mu.Lock()
+	expected := strings.TrimSpace(m.cfg.ClusterSecret)
+	incoming := strings.TrimSpace(clusterSecret)
+	if incoming != "" && expected != "" && incoming != expected {
+		m.mu.Unlock()
+		return NodeStatus{}, errors.New("集群密钥不匹配，拒绝升主")
+	}
+	oldRole := m.cfg.Role
+	oldHint := m.cfg.EntryHint
+	oldDiscEntry := m.discoveredEntryURL
+
+	m.cfg.Role = RoleEntry
+	m.cfg.EntryHint = ""
+	m.discoveredEntryURL = ""
+	if m.peers == nil {
+		m.peers = make(map[string]*peerRecord)
+	}
+	if err := m.saveLocked(); err != nil {
+		m.cfg.Role = oldRole
+		m.cfg.EntryHint = oldHint
+		m.discoveredEntryURL = oldDiscEntry
+		m.mu.Unlock()
+		return NodeStatus{}, err
+	}
+	m.restartLoopsLocked()
+	m.mu.Unlock()
+	return m.SelfStatus(), nil
+}
+
+// RepointEntry switches this node to worker role pointing at a new entry URL and sends an immediate heartbeat.
+func (m *Manager) RepointEntry(newEntryURL string) error {
+	cleanURL, err := NormalizePeerURL(newEntryURL, m.Port())
+	if err != nil {
+		return fmt.Errorf("新主节点地址无效: %w", err)
+	}
+
+	m.mu.Lock()
+	if m.selfURL != "" && strings.EqualFold(strings.TrimRight(cleanURL, "/"), strings.TrimRight(m.selfURL, "/")) {
+		m.mu.Unlock()
+		return errors.New("不能将本机作为远端主入口重指目标")
+	}
+	oldRole := m.cfg.Role
+	oldHint := m.cfg.EntryHint
+	oldDiscEntry := m.discoveredEntryURL
+	oldPeers := m.peers
+
+	m.cfg.Role = RoleWorker
+	m.cfg.EntryHint = cleanURL
+	m.discoveredEntryURL = cleanURL
+	m.peers = make(map[string]*peerRecord)
+	for id, dn := range m.discovered {
+		dn.AlreadyInPool = false
+		m.discovered[id] = dn
+	}
+	if err := m.saveLocked(); err != nil {
+		m.cfg.Role = oldRole
+		m.cfg.EntryHint = oldHint
+		m.discoveredEntryURL = oldDiscEntry
+		m.peers = oldPeers
+		m.mu.Unlock()
+		return err
+	}
+	m.restartLoopsLocked()
+	m.mu.Unlock()
+
+	if err := m.SendHeartbeatNow(); err != nil {
+		m.TriggerHeartbeat()
+	}
+	return nil
+}
+
+// LeaveCluster detaches this node from its current cluster, rotates its cluster secret, and returns to standalone entry mode.
+func (m *Manager) LeaveCluster() (NodeStatus, error) {
+	newSecret, err := randomHex(16)
+	if err != nil {
+		return NodeStatus{}, err
+	}
+
+	m.mu.Lock()
+	oldRole := m.cfg.Role
+	oldHint := m.cfg.EntryHint
+	oldDiscEntry := m.discoveredEntryURL
+	oldSecret := m.cfg.ClusterSecret
+	oldPeers := m.peers
+
+	m.cfg.Role = RoleEntry
+	m.cfg.EntryHint = ""
+	m.discoveredEntryURL = ""
+	m.cfg.ClusterSecret = newSecret
+	m.peers = make(map[string]*peerRecord)
+	for id, dn := range m.discovered {
+		dn.AlreadyInPool = false
+		m.discovered[id] = dn
+	}
+	if err := m.saveLocked(); err != nil {
+		m.cfg.Role = oldRole
+		m.cfg.EntryHint = oldHint
+		m.discoveredEntryURL = oldDiscEntry
+		m.cfg.ClusterSecret = oldSecret
+		m.peers = oldPeers
+		m.mu.Unlock()
+		return NodeStatus{}, err
+	}
+	m.restartLoopsLocked()
+	cb := m.onPeerChange
+	nodeName := m.cfg.NodeName
+	m.mu.Unlock()
+
+	if cb != nil {
+		cb(nodeName, true)
+	}
+	return m.SelfStatus(), nil
+}
+
+// SendLeaveToPeer notifies an online worker peer to leave the cluster cleanly.
+func (m *Manager) SendLeaveToPeer(peer NodeStatus) error {
+	targetURL := strings.TrimRight(strings.TrimSpace(peer.HTTPURL), "/")
+	if targetURL == "" {
+		return errors.New("节点缺少有效 HTTP 地址")
+	}
+	body, _ := json.Marshal(map[string]string{"reason": "evicted_by_entry"})
+	req, err := http.NewRequest(http.MethodPost, targetURL+"/internal/cluster/leave", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+	resp, err := newDirectClusterClient(5 * time.Second).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+// EvictPeer removes either an online peer (after instructing it to leave) or an offline peer from the cluster pool.
+func (m *Manager) EvictPeer(nodeID string) (bool, string, error) {
+	cleanID := strings.TrimSpace(nodeID)
+	if cleanID == "" || cleanID == m.NodeID() {
+		return false, "", errors.New("不能移除本机节点")
+	}
+
+	now := time.Now()
+	m.mu.RLock()
+	p, ok := m.peers[cleanID]
+	if !ok {
+		m.mu.RUnlock()
+		return false, "", errors.New("节点不存在")
+	}
+	peer := p.status
+	peerName := peer.NodeName
+	isOnline := now.Sub(peer.LastSeen) <= PeerTimeout
+	m.mu.RUnlock()
+
+	notified := false
+	if isOnline {
+		if err := m.SendLeaveToPeer(peer); err != nil {
+			return false, peerName, fmt.Errorf("通知在线节点 %s 退出集群失败: %w", peerName, err)
+		}
+		notified = true
+	}
+
+	m.mu.Lock()
+	delete(m.peers, cleanID)
+	if dn, exists := m.discovered[cleanID]; exists {
+		dn.AlreadyInPool = false
+		m.discovered[cleanID] = dn
+	}
+	cb := m.onPeerChange
+	m.mu.Unlock()
+
+	if cb != nil {
+		cb(peerName, false)
+	}
+	return notified, peerName, nil
+}
+
+// DissolveCluster detaches all online worker nodes best-effort, clears peers, and rotates the entry cluster secret.
+func (m *Manager) DissolveCluster() (int, error) {
+	if m.Role() != RoleEntry {
+		return 0, errors.New("当前节点不是主入口节点")
+	}
+	now := time.Now()
+	m.mu.RLock()
+	var onlinePeers []NodeStatus
+	for _, p := range m.peers {
+		if now.Sub(p.status.LastSeen) <= PeerTimeout {
+			onlinePeers = append(onlinePeers, p.status)
+		}
+	}
+	m.mu.RUnlock()
+
+	detached := 0
+	for _, peer := range onlinePeers {
+		if err := m.SendLeaveToPeer(peer); err == nil {
+			detached++
+		}
+	}
+
+	if _, err := m.LeaveCluster(); err != nil {
+		return detached, err
+	}
+	return detached, nil
+}
+
+// PromotePeer transfers cluster entry authority and auth state to an online worker node, repoints other workers, and demotes self.
+func (m *Manager) PromotePeer(targetNodeID string, authSnapshot []byte) (string, NodeStatus, error) {
+	if m.Role() != RoleEntry {
+		return "", NodeStatus{}, errors.New("当前节点不是主入口节点")
+	}
+	cleanTarget := strings.TrimSpace(targetNodeID)
+	if cleanTarget == "" || cleanTarget == m.NodeID() {
+		return "", NodeStatus{}, errors.New("请选择其他在线从节点作为新主节点")
+	}
+	if len(authSnapshot) == 0 {
+		return "", NodeStatus{}, errors.New("账号权限快照为空，无法迁移主节点")
+	}
+
+	now := time.Now()
+	m.mu.RLock()
+	targetRec, ok := m.peers[cleanTarget]
+	if !ok {
+		m.mu.RUnlock()
+		return "", NodeStatus{}, errors.New("目标节点不存在")
+	}
+	if now.Sub(targetRec.status.LastSeen) > PeerTimeout {
+		m.mu.RUnlock()
+		return "", NodeStatus{}, errors.New("目标节点当前离线，无法切换为主节点")
+	}
+	targetPeer := targetRec.status
+	secret := m.cfg.ClusterSecret
+	selfID := m.cfg.NodeID
+	var otherPeers []NodeStatus
+	for id, rec := range m.peers {
+		if id == cleanTarget {
+			continue
+		}
+		if now.Sub(rec.status.LastSeen) <= PeerTimeout && strings.TrimSpace(rec.status.HTTPURL) != "" {
+			otherPeers = append(otherPeers, rec.status)
+		}
+	}
+	m.mu.RUnlock()
+
+	newEntryURL, err := NormalizePeerURL(targetPeer.HTTPURL, m.Port())
+	if err != nil {
+		return "", NodeStatus{}, fmt.Errorf("目标节点地址无效: %w", err)
+	}
+
+	promotePayload, err := json.Marshal(struct {
+		ClusterSecret string `json:"cluster_secret"`
+		AuthSnapshot  []byte `json:"auth_snapshot"`
+	}{
+		ClusterSecret: secret,
+		AuthSnapshot:  authSnapshot,
+	})
+	if err != nil {
+		return "", NodeStatus{}, err
+	}
+
+	promoteReq, err := http.NewRequest(http.MethodPost, newEntryURL+"/internal/cluster/promote", bytes.NewReader(promotePayload))
+	if err != nil {
+		return "", NodeStatus{}, err
+	}
+	promoteReq.Header.Set("Content-Type", "application/json")
+	SignRequest(promoteReq, secret, selfID)
+	promoteResp, err := newDirectClusterClient(10 * time.Second).Do(promoteReq)
+	if err != nil {
+		return "", NodeStatus{}, fmt.Errorf("无法连接目标节点完成升主: %w", err)
+	}
+	defer promoteResp.Body.Close()
+	rawPromoteResp, _ := io.ReadAll(io.LimitReader(promoteResp.Body, 1<<20))
+	if promoteResp.StatusCode >= 300 {
+		return "", NodeStatus{}, fmt.Errorf("目标节点升主失败 (HTTP %d): %s", promoteResp.StatusCode, strings.TrimSpace(string(rawPromoteResp)))
+	}
+	var parsedPromote struct {
+		OK   bool       `json:"ok"`
+		Node NodeStatus `json:"node"`
+	}
+	if err := json.Unmarshal(rawPromoteResp, &parsedPromote); err != nil {
+		return "", NodeStatus{}, fmt.Errorf("解析目标节点升主响应失败: %w", err)
+	}
+	if parsedPromote.Node.HTTPURL == "" {
+		parsedPromote.Node.HTTPURL = newEntryURL
+	}
+
+	repointPayload, _ := json.Marshal(map[string]string{"new_entry_url": newEntryURL})
+	for _, peer := range otherPeers {
+		peerURL, err := NormalizePeerURL(peer.HTTPURL, m.Port())
+		if err != nil {
+			continue
+		}
+		repReq, err := http.NewRequest(http.MethodPost, peerURL+"/internal/cluster/repoint", bytes.NewReader(repointPayload))
+		if err != nil {
+			continue
+		}
+		repReq.Header.Set("Content-Type", "application/json")
+		SignRequest(repReq, secret, selfID)
+		repResp, err := newDirectClusterClient(5 * time.Second).Do(repReq)
+		if err == nil {
+			_ = repResp.Body.Close()
+		}
+	}
+
+	if err := m.RepointEntry(newEntryURL); err != nil {
+		return "", NodeStatus{}, fmt.Errorf("新主节点已就绪，但本机切换为从节点失败: %w", err)
+	}
+	return newEntryURL, parsedPromote.Node, nil
+}
+
 func (m *Manager) runPeerLivenessWatcher(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()

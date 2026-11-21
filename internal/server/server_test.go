@@ -1580,3 +1580,229 @@ func TestOfflinePeerFilesHiddenAndWebAdoptJoin(t *testing.T) {
 		t.Fatalf("expected valid join 200 and C->worker, status=%d role=%s", goodJoinRes.StatusCode, entryMgrC.Role())
 	}
 }
+
+func TestPrimarySwitchEvictOnlineNodeAndWorkerLeaveSelf(t *testing.T) {
+	srvA, mgrA, storeA, tsA := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Primary-A",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_, mgrB, storeB, tsB := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Candidate-B",
+		QuotaGB:  20,
+		QuotaSet: true,
+	})
+	_, mgrC, storeC, tsC := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Worker-C",
+		QuotaGB:  15,
+		QuotaSet: true,
+	})
+
+	if err := srvA.auth.SetInviteRequired(false); err != nil {
+		t.Fatalf("SetInviteRequired: %v", err)
+	}
+	if _, err := srvA.auth.Register("alice", "alicepass1", ""); err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	if _, err := srvA.auth.ApproveUser("alice"); err != nil {
+		t.Fatalf("ApproveUser alice: %v", err)
+	}
+
+	if _, err := storeA.SaveUpload("node-a.txt", "alice", storage.DeviceInfo{Name: "PC-A"}, strings.NewReader("payload-a")); err != nil {
+		t.Fatalf("SaveUpload A: %v", err)
+	}
+	if _, err := storeB.SaveUpload("node-b.txt", "alice", storage.DeviceInfo{Name: "PC-B"}, strings.NewReader("payload-b")); err != nil {
+		t.Fatalf("SaveUpload B: %v", err)
+	}
+	if _, err := storeC.SaveUpload("node-c.txt", "alice", storage.DeviceInfo{Name: "PC-C"}, strings.NewReader("payload-c")); err != nil {
+		t.Fatalf("SaveUpload C: %v", err)
+	}
+
+	if err := mgrB.JoinEntryCluster(tsA.URL, mgrA.Secret(), 0); err != nil {
+		t.Fatalf("B JoinEntryCluster: %v", err)
+	}
+	if err := mgrB.SendHeartbeatNow(); err != nil {
+		t.Fatalf("B SendHeartbeatNow: %v", err)
+	}
+	if err := mgrC.JoinEntryCluster(tsA.URL, mgrA.Secret(), 0); err != nil {
+		t.Fatalf("C JoinEntryCluster: %v", err)
+	}
+	if err := mgrC.SendHeartbeatNow(); err != nil {
+		t.Fatalf("C SendHeartbeatNow: %v", err)
+	}
+
+	adminClientA := loginTestAdmin(t, srvA, tsA.URL)
+
+	// 1. Promote B to become new cluster Entry.
+	promoteReq, _ := json.Marshal(map[string]string{"target_node_id": mgrB.NodeID()})
+	promoteRes, err := adminClientA.Post(tsA.URL+"/api/admin/cluster/promote", "application/json", bytes.NewReader(promoteReq))
+	if err != nil {
+		t.Fatalf("POST /api/admin/cluster/promote: %v", err)
+	}
+	var promoteOut struct {
+		OK          bool   `json:"ok"`
+		NewEntryURL string `json:"new_entry_url"`
+	}
+	_ = json.NewDecoder(promoteRes.Body).Decode(&promoteOut)
+	promoteRes.Body.Close()
+	if promoteRes.StatusCode != http.StatusOK || !promoteOut.OK || promoteOut.NewEntryURL != tsB.URL {
+		t.Fatalf("unexpected promote response: status=%d out=%+v", promoteRes.StatusCode, promoteOut)
+	}
+
+	if mgrB.Role() != cluster.RoleEntry || mgrA.Role() != cluster.RoleWorker || mgrC.Role() != cluster.RoleWorker {
+		t.Fatalf("unexpected roles after promote: A=%s B=%s C=%s", mgrA.Role(), mgrB.Role(), mgrC.Role())
+	}
+	if mgrA.EntryURL() != tsB.URL || mgrC.EntryURL() != tsB.URL {
+		t.Fatalf("expected workers repointed to %s, got A=%s C=%s", tsB.URL, mgrA.EntryURL(), mgrC.EntryURL())
+	}
+
+	// 2. Non-admin user alice created on A can now log in on promoted Entry B and see all 3 files.
+	aliceLoginBody, _ := json.Marshal(map[string]string{"username": "alice", "password": "alicepass1"})
+	aliceLoginRes, err := tsB.Client().Post(tsB.URL+"/api/login", "application/json", bytes.NewReader(aliceLoginBody))
+	if err != nil {
+		t.Fatalf("alice login on B: %v", err)
+	}
+	aliceCookies := aliceLoginRes.Cookies()
+	aliceLoginRes.Body.Close()
+	if aliceLoginRes.StatusCode != http.StatusOK || len(aliceCookies) == 0 {
+		t.Fatalf("expected alice login 200 with cookie on promoted B, got status=%d cookies=%d", aliceLoginRes.StatusCode, len(aliceCookies))
+	}
+
+	filesReq, _ := http.NewRequest(http.MethodGet, tsB.URL+"/api/files", nil)
+	for _, c := range aliceCookies {
+		filesReq.AddCookie(c)
+	}
+	filesRes, err := tsB.Client().Do(filesReq)
+	if err != nil {
+		t.Fatalf("GET /api/files on B: %v", err)
+	}
+	var filesOut struct {
+		Files []storage.FileRecord `json:"files"`
+	}
+	_ = json.NewDecoder(filesRes.Body).Decode(&filesOut)
+	filesRes.Body.Close()
+	if filesRes.StatusCode != http.StatusOK || len(filesOut.Files) != 3 {
+		t.Fatalf("expected all 3 cluster files visible on promoted B, status=%d files=%+v", filesRes.StatusCode, filesOut.Files)
+	}
+
+	// 3. Old Entry A redirects "/" -> B, while "/worker" remains accessible directly.
+	noRedirect := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	rootResA, err := noRedirect.Get(tsA.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / on old Entry A: %v", err)
+	}
+	rootResA.Body.Close()
+	if rootResA.StatusCode != http.StatusFound || rootResA.Header.Get("Location") != tsB.URL {
+		t.Fatalf("expected 302 -> %s on A, got %d loc=%s", tsB.URL, rootResA.StatusCode, rootResA.Header.Get("Location"))
+	}
+
+	workerPageRes, err := noRedirect.Get(tsA.URL + "/worker")
+	if err != nil {
+		t.Fatalf("GET /worker on A: %v", err)
+	}
+	workerBody, _ := io.ReadAll(workerPageRes.Body)
+	workerPageRes.Body.Close()
+	if workerPageRes.StatusCode != http.StatusOK || !strings.Contains(string(workerBody), "LFH 本机节点控制台") {
+		t.Fatalf("expected /worker 200 HTML, got status=%d", workerPageRes.StatusCode)
+	}
+
+	// 4. Evict online Worker-C from promoted Entry B (must log in with migrated root admin creds on B).
+	rootAdminUser, rootAdminPass, _ := srvA.auth.InitialAdminCredentials()
+	bAdminLoginBody, _ := json.Marshal(map[string]string{"username": rootAdminUser, "password": rootAdminPass})
+	bAdminLoginRes, err := tsB.Client().Post(tsB.URL+"/api/login", "application/json", bytes.NewReader(bAdminLoginBody))
+	if err != nil {
+		t.Fatalf("root admin login on B: %v", err)
+	}
+	bAdminCookies := bAdminLoginRes.Cookies()
+	bAdminLoginRes.Body.Close()
+	if bAdminLoginRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected migrated root admin login 200 on B, got %d", bAdminLoginRes.StatusCode)
+	}
+
+	evictReq, _ := http.NewRequest(http.MethodDelete, tsB.URL+"/api/admin/cluster/nodes/"+mgrC.NodeID(), nil)
+	for _, c := range bAdminCookies {
+		evictReq.AddCookie(c)
+	}
+	evictRes, err := tsB.Client().Do(evictReq)
+	if err != nil {
+		t.Fatalf("DELETE node C: %v", err)
+	}
+	var evictOut struct {
+		OK       bool                `json:"ok"`
+		Notified bool                `json:"notified"`
+		Pool     cluster.PoolSummary `json:"pool"`
+	}
+	_ = json.NewDecoder(evictRes.Body).Decode(&evictOut)
+	evictRes.Body.Close()
+	if evictRes.StatusCode != http.StatusOK || !evictOut.OK || !evictOut.Notified || len(evictOut.Pool.Nodes) != 2 {
+		t.Fatalf("unexpected evict response: status=%d out=%+v", evictRes.StatusCode, evictOut)
+	}
+	if mgrC.Role() != cluster.RoleEntry || mgrC.Secret() == mgrB.Secret() {
+		t.Fatalf("expected C returned to standalone entry with rotated secret, role=%s", mgrC.Role())
+	}
+	if len(storeC.List("", "", "", "", "")) != 1 {
+		t.Fatalf("expected C local files preserved after eviction")
+	}
+
+	// 5. Worker A self-leaves via /api/cluster/leave-self.
+	badLeave, _ := json.Marshal(map[string]string{"cluster_secret": "wrong-secret"})
+	badLeaveRes, _ := tsA.Client().Post(tsA.URL+"/api/cluster/leave-self", "application/json", bytes.NewReader(badLeave))
+	badLeaveRes.Body.Close()
+	if badLeaveRes.StatusCode != http.StatusUnauthorized || mgrA.Role() != cluster.RoleWorker {
+		t.Fatalf("expected 401 on wrong leave-self secret, got status=%d role=%s", badLeaveRes.StatusCode, mgrA.Role())
+	}
+
+	goodLeave, _ := json.Marshal(map[string]string{"cluster_secret": mgrA.Secret()})
+	goodLeaveRes, err := tsA.Client().Post(tsA.URL+"/api/cluster/leave-self", "application/json", bytes.NewReader(goodLeave))
+	if err != nil {
+		t.Fatalf("POST leave-self on A: %v", err)
+	}
+	goodLeaveRes.Body.Close()
+	if goodLeaveRes.StatusCode != http.StatusOK || mgrA.Role() != cluster.RoleEntry || mgrA.Secret() == mgrB.Secret() {
+		t.Fatalf("expected A detached to standalone entry with rotated secret, status=%d role=%s", goodLeaveRes.StatusCode, mgrA.Role())
+	}
+	rootAfterLeaveA, _ := noRedirect.Get(tsA.URL + "/")
+	rootAfterLeaveA.Body.Close()
+	if rootAfterLeaveA.StatusCode != http.StatusOK {
+		t.Fatalf("expected GET / 200 on detached A, got %d", rootAfterLeaveA.StatusCode)
+	}
+
+	// 6. Rejoin C and dissolve entire cluster from Entry B.
+	oldSecretB := mgrB.Secret()
+	if err := mgrC.JoinEntryCluster(tsB.URL, oldSecretB, 0); err != nil {
+		t.Fatalf("rejoin C -> B: %v", err)
+	}
+	if err := mgrC.SendHeartbeatNow(); err != nil {
+		t.Fatalf("C heartbeat to B: %v", err)
+	}
+	dissolveReq, _ := http.NewRequest(http.MethodPost, tsB.URL+"/api/admin/cluster/leave", nil)
+	for _, c := range bAdminCookies {
+		dissolveReq.AddCookie(c)
+	}
+	dissolveRes, err := tsB.Client().Do(dissolveReq)
+	if err != nil {
+		t.Fatalf("POST /api/admin/cluster/leave: %v", err)
+	}
+	var dissolveOut struct {
+		OK            bool                `json:"ok"`
+		Detached      int                 `json:"detached"`
+		ClusterSecret string              `json:"cluster_secret"`
+		Pool          cluster.PoolSummary `json:"pool"`
+	}
+	_ = json.NewDecoder(dissolveRes.Body).Decode(&dissolveOut)
+	dissolveRes.Body.Close()
+	if dissolveRes.StatusCode != http.StatusOK || !dissolveOut.OK || dissolveOut.Detached != 1 || mgrB.Secret() == oldSecretB || len(dissolveOut.Pool.Nodes) != 1 {
+		t.Fatalf("unexpected dissolve output: status=%d out=%+v", dissolveRes.StatusCode, dissolveOut)
+	}
+	if mgrC.Role() != cluster.RoleEntry || mgrC.Secret() == oldSecretB {
+		t.Fatalf("expected C detached after dissolve, role=%s", mgrC.Role())
+	}
+	_ = tsC
+}

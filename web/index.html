@@ -28,7 +28,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.4</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.5</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -106,7 +106,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.4</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.5</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button">✕</button>
@@ -583,6 +583,7 @@
                 <button id="btn-toggle-secret" class="btn btn-ghost btn-xs" type="button">显示</button>
                 <button id="btn-copy-secret" class="btn btn-ghost btn-xs" type="button">复制密钥</button>
                 <button id="btn-copy-join-cmd" class="btn btn-ghost btn-xs" type="button">复制加入命令</button>
+                <button id="btn-dissolve-cluster" class="btn btn-danger btn-xs hidden" type="button" title="断开全部扩容节点并重置本机集群密钥">解散集群</button>
               </div>
             </div>
             <div class="endpoint-form">
@@ -605,7 +606,7 @@
               </div>
             </div>
             <div class="cluster-hint-bar">
-              <span class="switch-desc">节点在线时实时汇总展示该节点上的文件；节点离线（超过 12 秒无心跳）后，其上的文件会自动从列表隐藏，上线后自动恢复显示。</span>
+              <span class="switch-desc">节点在线时实时汇总展示该节点上的文件；离线超过 12 秒自动隐藏。可将任意在线从节点切换为主节点、移出节点，或在从节点打开 <code>/worker</code> 单独退出集群。</span>
               <button id="btn-refresh-cluster" class="btn btn-ghost btn-xs" type="button">刷新节点状态</button>
             </div>
             <div class="admin-table-wrap">
@@ -681,7 +682,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.4</strong>
+                  <strong id="upd-cur-version">V0.11.21.5</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>
