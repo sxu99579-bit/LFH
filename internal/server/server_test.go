@@ -2033,3 +2033,86 @@ func TestClusterWorkerVersionManagementAndAutoSync(t *testing.T) {
 	}
 	_ = workerTS
 }
+
+func TestMultiNICEndpointTogglesURLEncodedDeviceHeadersAndMobileDetection(t *testing.T) {
+	srv, _, _, ts := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "NIC-Master",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+
+	// 1. Save multi-NIC endpoint settings (enable two NIC IPs, disable one virtual NIC IP)
+	epPayload, _ := json.Marshal(map[string]any{
+		"expose_ip":    "192.168.3.53",
+		"expose_ips":   []string{"192.168.3.53", "100.120.53.119"},
+		"disabled_ips": []string{"192.168.174.1"},
+		"port":         "8080",
+	})
+	epRes, err := adminClient.Post(ts.URL+"/api/admin/cluster/endpoint", "application/json", bytes.NewReader(epPayload))
+	if err != nil {
+		t.Fatalf("POST /api/admin/cluster/endpoint: %v", err)
+	}
+	var epOut struct {
+		EntryURL    string        `json:"entry_url"`
+		ExposeIPs   []string      `json:"expose_ips"`
+		DisabledIPs []string      `json:"disabled_ips"`
+		EntryAddrs  []NetworkAddr `json:"entry_addrs"`
+	}
+	_ = json.NewDecoder(epRes.Body).Decode(&epOut)
+	epRes.Body.Close()
+	if epRes.StatusCode != http.StatusOK || epOut.EntryURL != "http://192.168.3.53:8080" || len(epOut.ExposeIPs) < 2 || len(epOut.EntryAddrs) < 2 {
+		t.Fatalf("unexpected multi-NIC endpoint response: status=%d out=%+v", epRes.StatusCode, epOut)
+	}
+
+	// 2. Verify URL-encoded non-ASCII X-Device-Name / X-Device-Detail headers decode properly
+	var upBuf bytes.Buffer
+	mw := multipart.NewWriter(&upBuf)
+	fw, _ := mw.CreateFormFile("files", "mobile-note.txt")
+	_, _ = fw.Write([]byte("hello from mobile"))
+	_ = mw.Close()
+
+	upReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/upload", &upBuf)
+	upReq.Header.Set("Content-Type", mw.FormDataContentType())
+	upReq.Header.Set("X-Device-FP", "FP-MOBILE999")
+	upReq.Header.Set("X-Device-Name", url.QueryEscape("Windows · Edge (中文终端)"))
+	upReq.Header.Set("X-Device-Detail", url.QueryEscape("1920x1080 · 16核 · Asia/Shanghai"))
+	upRes, err := adminClient.Do(upReq)
+	if err != nil {
+		t.Fatalf("POST /api/upload with encoded headers: %v", err)
+	}
+	var upOut struct {
+		Uploaded []storage.FileRecord `json:"uploaded"`
+	}
+	_ = json.NewDecoder(upRes.Body).Decode(&upOut)
+	upRes.Body.Close()
+	if upRes.StatusCode != http.StatusCreated || len(upOut.Uploaded) != 1 || upOut.Uploaded[0].DeviceName != "Windows · Edge (中文终端)" {
+		t.Fatalf("expected decoded non-ASCII DeviceName, got %+v", upOut.Uploaded)
+	}
+
+	// 3. Verify Mobile vs Desktop HTML automatic detection on GET /
+	mobReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+	mobReq.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148")
+	mobRes, err := ts.Client().Do(mobReq)
+	if err != nil {
+		t.Fatalf("GET / mobile UA: %v", err)
+	}
+	mobBody, _ := io.ReadAll(mobRes.Body)
+	mobRes.Body.Close()
+	if mobRes.StatusCode != http.StatusOK || !strings.Contains(string(mobBody), "mobile.html") {
+		t.Fatalf("expected mobile.html served for iPhone UA, got %q", string(mobBody))
+	}
+
+	pcReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+	pcReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/125.0.0.0")
+	pcRes, err := ts.Client().Do(pcReq)
+	if err != nil {
+		t.Fatalf("GET / desktop UA: %v", err)
+	}
+	pcBody, _ := io.ReadAll(pcRes.Body)
+	pcRes.Body.Close()
+	if pcRes.StatusCode != http.StatusOK || !strings.Contains(string(pcBody), "index.html") {
+		t.Fatalf("expected index.html served for Windows Chrome UA, got %q", string(pcBody))
+	}
+}

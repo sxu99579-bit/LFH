@@ -52,14 +52,16 @@ const (
 )
 
 type Config struct {
-	NodeID        string  `json:"node_id"`
-	NodeName      string  `json:"node_name"`
-	Role          string  `json:"role"`
-	ClusterSecret string  `json:"cluster_secret"`
-	QuotaBytes    int64   `json:"quota_bytes"`
-	QuotaGB       float64 `json:"quota_gb"`
-	ExposeIP      string  `json:"expose_ip,omitempty"`
-	Port          string  `json:"port,omitempty"`
+	NodeID          string            `json:"node_id"`
+	NodeName        string            `json:"node_name"`
+	Role            string            `json:"role"`
+	ClusterSecret   string            `json:"cluster_secret"`
+	QuotaBytes      int64             `json:"quota_bytes"`
+	QuotaGB         float64           `json:"quota_gb"`
+	ExposeIP        string            `json:"expose_ip,omitempty"`
+	ExposeIPs       []string          `json:"expose_ips,omitempty"`
+	DisabledIPs     []string          `json:"disabled_ips,omitempty"`
+	Port            string            `json:"port,omitempty"`
 	EntryHint       string            `json:"entry_hint,omitempty"`
 	StorageDir      string            `json:"storage_dir,omitempty"`
 	PrimaryNodeID   string            `json:"primary_node_id,omitempty"`
@@ -451,6 +453,28 @@ func (m *Manager) ExposeIP() string {
 	return m.cfg.ExposeIP
 }
 
+func (m *Manager) ExposeIPs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.cfg.ExposeIPs) == 0 {
+		return nil
+	}
+	cp := make([]string, len(m.cfg.ExposeIPs))
+	copy(cp, m.cfg.ExposeIPs)
+	return cp
+}
+
+func (m *Manager) DisabledIPs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.cfg.DisabledIPs) == 0 {
+		return nil
+	}
+	cp := make([]string, len(m.cfg.DisabledIPs))
+	copy(cp, m.cfg.DisabledIPs)
+	return cp
+}
+
 func (m *Manager) Port() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -471,9 +495,17 @@ func (m *Manager) SetSelfURL(u string) {
 }
 
 func (m *Manager) SetEndpointConfig(exposeIP, port, newSelfURL string) error {
+	return m.SetEndpointNICsConfig(exposeIP, nil, nil, false, port, newSelfURL)
+}
+
+func (m *Manager) SetEndpointNICsConfig(exposeIP string, exposeIPs, disabledIPs []string, updateNICSelection bool, port, newSelfURL string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg.ExposeIP = strings.TrimSpace(exposeIP)
+	if updateNICSelection {
+		m.cfg.ExposeIPs = normalizeCleanStrings(exposeIPs)
+		m.cfg.DisabledIPs = normalizeCleanStrings(disabledIPs)
+	}
 	if strings.TrimSpace(port) != "" {
 		m.cfg.Port = strings.TrimSpace(port)
 	}
@@ -481,6 +513,23 @@ func (m *Manager) SetEndpointConfig(exposeIP, port, newSelfURL string) error {
 		m.selfURL = strings.TrimRight(strings.TrimSpace(newSelfURL), "/")
 	}
 	return m.saveLocked()
+}
+
+func normalizeCleanStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(items))
+	out := make([]string, 0, len(items))
+	for _, raw := range items {
+		s := strings.TrimSpace(raw)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func (m *Manager) EntryURL() string {

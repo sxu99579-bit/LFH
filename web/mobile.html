@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-layout="mobile">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>LFH 移动版 - 异构局域网分布式文件平台</title>
+  <link rel="icon" type="image/png" href="/logo.png" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("lan_filehub_theme") || "dark";
+        document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+      } catch (e) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* 专为手机端打造的单手触控与底部导航体验 */
+    html[data-layout="mobile"] body {
+      overscroll-behavior-y: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html[data-layout="mobile"] .auth-viewport {
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+      overflow-y: auto;
+      padding: 16px 14px 36px;
+      gap: 16px;
+    }
+    html[data-layout="mobile"] .auth-hero,
+    html[data-layout="mobile"] .auth-pane {
+      padding: 0;
+      width: 100%;
+    }
+    html[data-layout="mobile"] .hero-inner {
+      max-width: 100%;
+    }
+    html[data-layout="mobile"] .hero-brand h1 {
+      font-size: 22px;
+    }
+    html[data-layout="mobile"] .hero-lead {
+      font-size: 13px;
+      margin: 8px 0 12px;
+    }
+    html[data-layout="mobile"] .hero-features {
+      display: none;
+    }
+    html[data-layout="mobile"] .auth-card {
+      padding: 18px 16px;
+      border-radius: 16px;
+    }
+
+    html[data-layout="mobile"] .app-viewport {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      overflow: hidden;
+    }
+
+    html[data-layout="mobile"] .main-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      overflow: hidden;
+    }
+
+    /* 移动端顶部极简应用栏 */
+    html[data-layout="mobile"] .m-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      z-index: 25;
+    }
+    html[data-layout="mobile"] .m-header-brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    html[data-layout="mobile"] .m-header-brand img {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+    }
+    html[data-layout="mobile"] .m-header-title {
+      font-size: 15px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    html[data-layout="mobile"] .m-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    /* 移动端入口与快捷上传条 */
+    html[data-layout="mobile"] .m-quick-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 12px;
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+    html[data-layout="mobile"] .m-entry-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 1;
+    }
+    html[data-layout="mobile"] .m-entry-wrap .top-entry-select {
+      max-width: 195px;
+      font-size: 11.5px;
+      padding: 3px 6px;
+    }
+    html[data-layout="mobile"] .m-entry-wrap .access-url {
+      font-size: 11.5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* 移动端上传大按钮卡片 */
+    html[data-layout="mobile"] .m-upload-card {
+      margin: 10px 12px 6px;
+      padding: 11px 12px;
+      border-radius: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    html[data-layout="mobile"] .m-upload-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    html[data-layout="mobile"] .m-upload-btns {
+      display: flex;
+      gap: 8px;
+      width: 100%;
+    }
+    html[data-layout="mobile"] .m-upload-btns .btn {
+      flex: 1;
+      padding: 9px 10px;
+      font-size: 13px;
+      border-radius: 10px;
+      justify-content: center;
+    }
+
+    /* 移动端横向分类速筛胶囊栏 */
+    html[data-layout="mobile"] .m-cat-pills {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px 8px;
+      overflow-x: auto;
+      flex-shrink: 0;
+      scrollbar-width: none;
+    }
+    html[data-layout="mobile"] .m-cat-pills::-webkit-scrollbar {
+      display: none;
+    }
+    html[data-layout="mobile"] .m-cat-pill {
+      padding: 5px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    html[data-layout="mobile"] .m-cat-pill.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    /* 移动端工作区滚动高度留出底部导航栏 */
+    html[data-layout="mobile"] .workspace-body {
+      flex: 1;
+      overflow: hidden;
+      padding: 0 0 64px 0;
+      display: flex;
+      flex-direction: column;
+    }
+    html[data-layout="mobile"] #page-files {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      gap: 0;
+    }
+    html[data-layout="mobile"] .files-panel {
+      flex: 1;
+      margin: 0 12px;
+      border-radius: 14px 14px 0 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    html[data-layout="mobile"] .files-toolbar {
+      padding: 10px 12px;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    html[data-layout="mobile"] .files-actions {
+      width: 100%;
+      display: flex;
+      gap: 6px;
+    }
+    html[data-layout="mobile"] .files-actions .search-input {
+      flex: 1;
+      min-width: 0;
+    }
+    html[data-layout="mobile"] .table-scroll {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 24px;
+    }
+    html[data-layout="mobile"] .page-panel {
+      margin: 8px 12px;
+      border-radius: 14px;
+      flex: 1;
+      overflow: hidden;
+    }
+    html[data-layout="mobile"] .page-panel-scroll {
+      padding: 12px;
+      padding-bottom: 30px;
+    }
+
+    /* 移动端底部固定 Tab 导航栏 */
+    html[data-layout="mobile"] .m-bottom-nav {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 60px;
+      padding-bottom: env(safe-area-inset-bottom, 0);
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      z-index: 45;
+      box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.22);
+    }
+    html[data-layout="mobile"] .m-nav-item {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      position: relative;
+    }
+    html[data-layout="mobile"] .m-nav-item.active {
+      color: var(--primary);
+    }
+
+    /* 移动端弹窗全屏底部抽屉优化 */
+    html[data-layout="mobile"] .modal-dialog {
+      width: 100vw !important;
+      max-width: 100vw !important;
+      max-height: 92dvh !important;
+      margin: auto 0 0 0 !important;
+      border-radius: 18px 18px 0 0 !important;
+    }
+    html[data-layout="mobile"] .editor-workspace {
+      min-height: 300px;
+      max-height: 52dvh;
+    }
+    html[data-layout="mobile"] .editor-code-pane {
+      min-height: 290px;
+    }
+  </style>
+</head>
+<body>
+  <!-- 登录 / 注册页（移动端专属单列布局） -->
+  <div id="auth-view" class="auth-viewport hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <a class="btn btn-ghost btn-xs" href="/?view=desktop">切换到电脑端视图</a>
+      <button id="btn-auth-theme" class="btn btn-ghost btn-xs" type="button">浅色主题</button>
+    </div>
+
+    <div class="auth-hero">
+      <div class="hero-inner">
+        <div class="hero-brand">
+          <img class="brand-logo" src="/logo.png" alt="LFH" />
+          <div>
+            <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.9</span></h1>
+          </div>
+        </div>
+        <p class="hero-lead">
+          异构局域网分布式文件中心（移动触控版）—— 手机即传即看，支持多网卡入口、在线文本编辑与版本控制。
+        </p>
+
+        <div class="access-card" id="auth-access-card">
+          <div class="access-card-head">
+            <span class="access-dot"></span>
+            <span>主节点可用入口</span>
+            <span class="pool-pill" id="auth-pool-pill">探测中...</span>
+          </div>
+          <div id="auth-access-list" class="access-list">
+            <div class="access-loading">正在获取入口地址...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="auth-pane">
+      <div class="auth-card">
+        <div class="auth-card-title">欢迎使用 LFH 移动版</div>
+        <p class="auth-card-sub" id="auth-card-sub">请登录或注册账号</p>
+
+        <div class="auth-tabs">
+          <button id="tab-login" class="tab-btn active" type="button">账号登录</button>
+          <button id="tab-register" class="tab-btn" type="button">注册账号</button>
+        </div>
+
+        <form id="auth-form" class="auth-form">
+          <div class="field">
+            <label for="auth-username">用户名</label>
+            <input id="auth-username" type="text" placeholder="请输入用户名" required autocomplete="username" />
+          </div>
+          <div class="field">
+            <label for="auth-password">密码</label>
+            <input id="auth-password" type="password" placeholder="请输入密码（至少4位）" required autocomplete="current-password" />
+          </div>
+          <div class="field hidden" id="invite-field-wrap">
+            <label for="auth-invite-code">注册邀请码</label>
+            <input id="auth-invite-code" type="text" placeholder="例如：LFH-ABCD-1234" autocomplete="off" />
+          </div>
+          <div id="register-approval-hint" class="info-box hidden">
+            当前已关闭邀请码：提交注册后需等待管理员审核同意后方可登录。
+          </div>
+          <div id="auth-error" class="error-box hidden"></div>
+          <div id="auth-success" class="success-box hidden"></div>
+          <button id="auth-submit" class="btn btn-primary btn-block" type="submit">登录进入</button>
+        </form>
+
+        <div class="auth-footer-meta">
+          <div class="device-inline-chip" id="auth-device-badge">正在识别当前手机设备指纹...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 移动端主工作台 -->
+  <div id="app-view" class="app-viewport hidden">
+    <div id="sidebar-backdrop" class="sidebar-backdrop hidden"></div>
+
+    <!-- 抽屉式汇总筛选栏（点击底部「筛选」唤出） -->
+    <aside class="sidebar" id="app-sidebar">
+      <div class="sidebar-brand">
+        <img class="brand-logo small" src="/logo.png" alt="LFH" />
+        <div class="sidebar-brand-text">
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.9</span></div>
+          <div class="brand-sub">多维筛选与存储池总览</div>
+        </div>
+        <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="sidebar-stats">
+        <div class="sidebar-stats-head">
+          <span>存储池容量</span>
+          <button id="btn-reset-filters" class="btn btn-ghost btn-xs" type="button">重置筛选</button>
+        </div>
+        <div class="stats-pair">
+          <div class="stat-box">
+            <div class="stat-num" id="stat-total-count">0</div>
+            <div class="stat-lbl">文件数</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-num" id="stat-total-size">0 B</div>
+            <div class="stat-lbl">占用空间</div>
+          </div>
+        </div>
+        <div class="pool-capacity-wrap">
+          <div class="pool-capacity-head">
+            <span>集群预留池</span>
+            <span id="pool-nodes-badge">1 节点在线</span>
+          </div>
+          <div class="pool-progress-bar">
+            <div id="pool-progress-fill" class="pool-progress-fill"></div>
+          </div>
+          <div id="pool-capacity-text" class="pool-capacity-text">已用 0 B / 总预留 10 GB</div>
+        </div>
+      </div>
+
+      <div class="sidebar-scroll">
+        <div class="nav-group">
+          <div class="nav-group-title"><span>按时间汇总</span><span class="nav-group-tip">月份</span></div>
+          <div id="time-summary-list" class="nav-list"></div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title"><span>按类型汇总</span><span class="nav-group-tip">分类</span></div>
+          <div id="category-summary-list" class="nav-list"></div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title"><span>上传设备指纹</span><span class="nav-group-tip">终端</span></div>
+          <div id="device-summary-list" class="nav-list"></div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title"><span>集群存储节点</span><span class="nav-group-tip">节点</span></div>
+          <div id="node-summary-list" class="nav-list"></div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer" id="sidebar-footer">
+        <button id="btn-sidebar-settings" class="btn btn-ghost btn-block btn-sm" type="button">
+          <span>系统设置</span>
+          <span id="sidebar-pending-badge" class="pending-badge hidden">0</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main-area">
+      <!-- 移动端顶部栏 -->
+      <header class="m-header">
+        <div class="m-header-brand">
+          <img src="/logo.png" alt="LFH" />
+          <div class="m-header-title">
+            <span>LFH</span>
+            <span class="ver-badge" style="font-size:10.5px;">移动版</span>
+          </div>
+          <button id="topbar-cluster-pill" class="cluster-status-pill" type="button" style="padding:3px 8px;font-size:11px;">
+            <span class="node-dot online" id="topbar-cluster-dot"></span>
+            <span id="topbar-cluster-text">1/1 在线</span>
+          </button>
+        </div>
+
+        <div class="m-header-actions">
+          <button id="btn-update-notice" class="btn btn-update-pill btn-xs hidden" type="button">新版本</button>
+          <span class="user-badge" id="user-badge" style="font-size:11.5px;padding:3px 7px;">-</span>
+          <a class="btn btn-ghost btn-xs" href="/?view=desktop" title="切换到桌面电脑端完整视图">电脑版</a>
+          <button id="btn-top-theme" class="btn btn-ghost btn-xs" type="button">浅色</button>
+          <button id="btn-logout" class="btn btn-ghost btn-xs" type="button">退出</button>
+        </div>
+      </header>
+
+      <!-- 隐藏的兼容按钮与设备徽章（保持与 app.js 完全兼容） -->
+      <div class="hidden">
+        <div id="current-device-badge"></div>
+      </div>
+
+      <!-- 入口地址快捷切换条 -->
+      <div class="m-quick-bar" id="home-access-bar">
+        <div class="m-entry-wrap">
+          <span class="access-dot"></span>
+          <span style="color:var(--muted);white-space:nowrap;">入口:</span>
+          <select id="top-entry-select" class="top-entry-select hidden"></select>
+          <span id="top-entry-url" class="access-url">正在获取...</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button id="btn-copy-entry-url" class="btn btn-ghost btn-xs" type="button">复制</button>
+          <button id="btn-auto-refresh" class="live-sync-pill connected" type="button" style="padding:2px 7px;font-size:11px;">
+            <span class="live-dot"></span>
+            <span id="live-sync-text">实时</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="workspace-body">
+        <!-- 页面 1：文件中心（移动端卡片流） -->
+        <div id="page-files" class="workspace-page">
+          <section class="m-upload-card" id="dropzone">
+            <input id="file-input" type="file" multiple hidden />
+            <input id="folder-input" type="file" webkitdirectory directory multiple hidden />
+            <div class="m-upload-row">
+              <button id="btn-upload-access" class="access-pill-btn" type="button" style="font-size:11.5px;padding:4px 8px;">可见：全部用户</button>
+              <select id="upload-target-node" class="node-select admin-only-control hidden" style="max-width:165px;font-size:11.5px;padding:4px 6px;">
+                <option value="auto">自动分配空间</option>
+              </select>
+            </div>
+            <div class="m-upload-btns">
+              <button id="btn-pick-files" class="btn btn-primary btn-sm" type="button">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span>上传文件 / 照片视频</span>
+              </button>
+              <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">上传文件夹</button>
+            </div>
+            <div id="upload-progress-wrap" class="progress-wrap hidden" style="width:100%;">
+              <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
+              <div id="upload-progress-text" class="progress-text">0%</div>
+            </div>
+            <div id="upload-device-hint" class="hidden"></div>
+            <div id="upload-policy-hint" class="upload-policy-hint hidden" style="font-size:11px;"></div>
+          </section>
+
+          <!-- 移动端横向速筛胶囊 -->
+          <div class="m-cat-pills" id="m-quick-cats">
+            <button type="button" class="m-cat-pill active" data-m-cat="all">全部</button>
+            <button type="button" class="m-cat-pill" data-m-cat="image">图片</button>
+            <button type="button" class="m-cat-pill" data-m-cat="video">视频</button>
+            <button type="button" class="m-cat-pill" data-m-cat="markdown">文本 / 代码</button>
+            <button type="button" class="m-cat-pill" data-m-cat="document">文档 / PDF</button>
+            <button type="button" class="m-cat-pill" data-m-cat="audio">音频</button>
+            <button type="button" class="m-cat-pill" data-m-cat="archive">压缩包</button>
+          </div>
+
+          <section class="files-panel">
+            <div class="files-toolbar">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <div class="active-filters" id="active-filters" style="font-size:11.5px;">全部时间 · 全部类型</div>
+                <div class="view-switcher" id="view-switcher" role="group">
+                  <button class="view-btn active" type="button" data-view-mode="list">卡片</button>
+                  <button class="view-btn" type="button" data-view-mode="grid">网格</button>
+                  <button class="view-btn" type="button" data-view-mode="chart">图表</button>
+                </div>
+              </div>
+              <div class="files-actions">
+                <input id="search-input" class="search-input" type="search" placeholder="搜索文件名 / 上传者 / 节点..." />
+                <button id="btn-refresh" class="btn btn-ghost btn-sm" type="button">刷新</button>
+              </div>
+            </div>
+
+            <div class="table-scroll" id="files-scroll-container">
+              <table class="files-table files-cards-mobile" id="files-main-table">
+                <thead>
+                  <tr>
+                    <th>文件名 / 版本</th>
+                    <th>分类</th>
+                    <th>大小</th>
+                    <th>更新时间</th>
+                    <th>上传者</th>
+                    <th>存储节点</th>
+                    <th>上传设备 / 指纹</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="files-tbody"></tbody>
+              </table>
+              <div id="files-grid" class="files-grid hidden"></div>
+              <div id="files-charts" class="files-charts hidden"></div>
+              <div id="empty-state" class="empty-state hidden">暂无符合条件的文件，点击上方「上传文件」即可秒传。</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- 页面 2：数据统计中心 -->
+        <section id="page-analytics" class="workspace-page page-panel hidden">
+          <div class="page-panel-header">
+            <div class="page-panel-title-wrap">
+              <div>
+                <h2 class="page-panel-title" style="font-size:15px;">数据统计分析</h2>
+                <div class="page-panel-sub" id="analytics-filter-subtitle" style="font-size:11.5px;">集群文件分布与多版本统计</div>
+              </div>
+            </div>
+            <button id="btn-analytics-refresh" class="btn btn-ghost btn-xs" type="button">刷新</button>
+          </div>
+          <div id="analytics-page-body" class="page-panel-scroll"></div>
+        </section>
+
+        <!-- 页面 3：节点健康状态监控中心 -->
+        <section id="page-health" class="workspace-page page-panel hidden">
+          <div class="page-panel-header">
+            <div class="page-panel-title-wrap">
+              <div>
+                <h2 class="page-panel-title" style="font-size:15px;">节点健康与实时遥测</h2>
+                <div class="page-panel-sub" style="font-size:11.5px;">CPU / 内存 / 磁盘 / 延迟 / 版本同步</div>
+              </div>
+            </div>
+            <div class="row-actions">
+              <button id="btn-health-sync-versions" class="btn btn-ghost btn-xs admin-only-control hidden" type="button">同步版本</button>
+              <button id="btn-health-open-cluster-settings" class="btn btn-ghost btn-xs admin-only-control hidden" type="button">组网</button>
+              <button id="btn-health-refresh" class="btn btn-primary btn-xs" type="button">刷新</button>
+            </div>
+          </div>
+          <div id="health-page-body" class="page-panel-scroll"></div>
+        </section>
+      </div>
+
+      <!-- 移动端底部 5 格导航栏 -->
+      <nav class="m-bottom-nav" id="workspace-nav" aria-label="移动端底部导航">
+        <button class="m-nav-item workspace-nav-btn active" type="button" data-workspace-page="files">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span>文件</span>
+        </button>
+        <button class="m-nav-item" id="btn-toggle-sidebar" type="button">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+          <span>筛选</span>
+        </button>
+        <button class="m-nav-item workspace-nav-btn" type="button" data-workspace-page="analytics">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span>统计</span>
+        </button>
+        <button class="m-nav-item workspace-nav-btn" type="button" data-workspace-page="health">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <span>节点健康</span>
+        </button>
+        <button class="m-nav-item" id="btn-open-settings" type="button">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>设置</span>
+          <span id="pending-badge" class="pending-badge hidden" style="position:absolute;top:4px;right:16px;">0</span>
+        </button>
+      </nav>
+    </div>
+  </div>
+
+  <!-- 在线预览弹窗 -->
+  <div id="preview-modal" class="modal hidden">
+    <div class="modal-backdrop" id="preview-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title" id="preview-title">文件预览</div>
+        <div class="modal-header-actions">
+          <button id="preview-edit-btn" class="btn btn-ghost btn-xs hidden" type="button">在线编辑</button>
+          <a id="preview-download-link" class="btn btn-primary btn-xs" href="#" download>下载</a>
+          <button id="preview-close" class="btn btn-ghost btn-xs" type="button">关闭</button>
+        </div>
+      </div>
+      <div class="modal-body" id="preview-body"></div>
+    </div>
+  </div>
+
+  <!-- 在线文本 / JSON / Markdown / 代码编辑器弹窗 -->
+  <div id="editor-modal" class="modal hidden">
+    <div class="modal-backdrop" id="editor-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title" id="editor-title">在线文本编辑器</div>
+        <div class="modal-header-actions">
+          <span id="editor-lang-badge" class="ver-badge">TXT</span>
+          <button id="editor-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body editor-modal-body">
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <span id="editor-stats-text" class="editor-stats-text">0 行 · 0 字符 · 0 B</span>
+            <span id="editor-status-pill" class="editor-status-pill hidden"></span>
+          </div>
+          <div class="editor-toolbar-right">
+            <button id="editor-btn-json-format" class="btn btn-ghost btn-xs hidden" type="button">格式化</button>
+            <button id="editor-btn-json-minify" class="btn btn-ghost btn-xs hidden" type="button">压缩</button>
+            <button id="editor-btn-json-validate" class="btn btn-ghost btn-xs hidden" type="button">校验</button>
+            <button id="editor-btn-md-preview" class="btn btn-ghost btn-xs hidden" type="button">预览 MD</button>
+          </div>
+        </div>
+
+        <div id="editor-workspace" class="editor-workspace">
+          <div class="editor-code-pane">
+            <div id="editor-line-gutter" class="editor-line-gutter" aria-hidden="true">1</div>
+            <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" placeholder="在此编辑文件内容..."></textarea>
+          </div>
+          <div id="editor-md-preview" class="editor-md-preview md-render hidden"></div>
+        </div>
+
+        <div class="editor-footer">
+          <input id="editor-note-input" class="search-input" type="text" placeholder="版本变更说明（选填）" style="width:100%;" />
+          <button id="editor-save-btn" class="btn btn-primary btn-block" type="button">保存为新版本（在线编辑更新）</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文件详细属性弹窗 -->
+  <div id="props-modal" class="modal hidden">
+    <div class="modal-backdrop" id="props-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title" id="props-title">文件详细属性</div>
+        <div class="modal-header-actions">
+          <button id="props-preview-btn" class="btn btn-primary btn-xs hidden" type="button">在线打开</button>
+          <a id="props-download-link" class="btn btn-ghost btn-xs" href="#" download>下载</a>
+          <button id="props-close" class="btn btn-ghost btn-xs" type="button">关闭</button>
+        </div>
+      </div>
+      <div class="modal-body" id="props-body"></div>
+    </div>
+  </div>
+
+  <!-- 指定用户可见 / 下载权限弹窗 -->
+  <div id="access-modal" class="modal hidden">
+    <div class="modal-backdrop" id="access-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title" id="access-modal-title">设置文件可见与下载权限</div>
+        <div class="modal-header-actions">
+          <button id="access-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body access-modal-body">
+        <div class="access-mode-grid">
+          <button type="button" class="access-mode-card active" id="access-mode-all">
+            <div class="access-mode-title">全部系统用户可见</div>
+            <div class="access-mode-desc">所有已登录用户均可见并下载</div>
+          </button>
+          <button type="button" class="access-mode-card" id="access-mode-custom">
+            <div class="access-mode-title">仅指定用户可下载</div>
+            <div class="access-mode-desc">未勾选用户完全隐藏</div>
+          </button>
+        </div>
+
+        <div id="access-custom-panel" class="access-custom-panel hidden">
+          <div class="access-picker-toolbar">
+            <input id="access-user-search" class="search-input" type="search" placeholder="搜索用户名..." />
+            <div class="row-actions">
+              <button id="access-btn-self-only" class="btn btn-ghost btn-xs" type="button">仅自己</button>
+              <button id="access-btn-clear" class="btn btn-ghost btn-xs" type="button">清空</button>
+            </div>
+          </div>
+          <div id="access-users-list" class="access-users-list"></div>
+        </div>
+
+        <div class="access-modal-footer">
+          <div id="access-summary-hint" class="switch-desc">当前设置：全部系统用户可见</div>
+          <button id="access-save-btn" class="btn btn-primary btn-sm" type="button">确认应用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 统一设置中心弹窗 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-backdrop" id="settings-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title">设置中心</div>
+        <button id="settings-close" class="btn btn-ghost btn-xs" type="button">关闭</button>
+      </div>
+
+      <div class="settings-tabs" id="settings-tabs">
+        <button class="settings-tab active" type="button" data-settings-tab="general">外观与账号</button>
+        <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="security">注册与上传策略</button>
+        <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="users">
+          用户管理
+          <span id="users-pending-pill" class="pending-badge hidden">0</span>
+        </button>
+        <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="cluster">集群与网卡入口</button>
+        <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="update">
+          系统升级
+          <span id="update-tab-dot" class="update-dot hidden"></span>
+        </button>
+      </div>
+
+      <div class="modal-body settings-body">
+        <div class="settings-panel" id="panel-general">
+          <div class="admin-section">
+            <div class="admin-section-title">界面外观主题</div>
+            <div class="theme-picker">
+              <button class="theme-card" type="button" data-set-theme="dark" id="theme-card-dark">
+                <div class="theme-preview dark-prev"></div>
+                <div class="theme-card-info">
+                  <strong>深色主题</strong>
+                  <span>低眩光高对比度</span>
+                </div>
+              </button>
+              <button class="theme-card" type="button" data-set-theme="light" id="theme-card-light">
+                <div class="theme-preview light-prev"></div>
+                <div class="theme-card-info">
+                  <strong>浅色主题</strong>
+                  <span>明亮清爽</span>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">界面模式切换</div>
+            <div class="row-actions">
+              <a class="btn btn-ghost btn-sm" href="/?view=desktop">切换到电脑桌面版界面</a>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">当前手机终端指纹</div>
+            <div class="device-summary-card">
+              <div class="device-summary-row">
+                <span class="device-summary-lbl">识别设备</span>
+                <strong id="settings-device-name">-</strong>
+              </div>
+              <div class="device-summary-row">
+                <span class="device-summary-lbl">设备指纹</span>
+                <code id="settings-device-fp">-</code>
+              </div>
+              <div class="device-summary-row">
+                <span class="device-summary-lbl">终端参数</span>
+                <span id="settings-device-detail">-</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">修改登录密码</div>
+            <form id="pwd-form" class="auth-form" style="max-width:420px;">
+              <div class="field">
+                <label for="old-pwd">当前密码</label>
+                <input id="old-pwd" type="password" required />
+              </div>
+              <div class="field">
+                <label for="new-pwd">新密码（至少4位）</label>
+                <input id="new-pwd" type="password" required />
+              </div>
+              <div id="pwd-msg" class="error-box hidden"></div>
+              <button class="btn btn-primary btn-sm" type="submit">确认修改密码</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="settings-panel hidden" id="panel-security">
+          <div class="admin-section">
+            <div class="admin-section-title">新用户注册方式</div>
+            <div class="switch-row">
+              <div>
+                <div style="font-size:14px;font-weight:600;">强制要求注册邀请码</div>
+                <div class="switch-desc">关闭后新用户将进入待审核列表</div>
+              </div>
+              <label class="toggle-switch">
+                <input id="toggle-invite-required" type="checkbox" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">允许上传的文件类型策略</div>
+            <div class="policy-grid">
+              <div class="field">
+                <label for="setting-allowed-exts">仅允许的扩展名（留空不限）</label>
+                <input id="setting-allowed-exts" type="text" placeholder="如：jpg, png, mp4, pdf, md" />
+              </div>
+              <div class="field">
+                <label for="setting-blocked-exts">禁止上传的扩展名</label>
+                <input id="setting-blocked-exts" type="text" placeholder="如：exe, bat, cmd, msi" />
+              </div>
+            </div>
+            <div class="policy-presets">
+              <button class="preset-chip" type="button" data-policy-preset="clear">不限制</button>
+              <button class="preset-chip" type="button" data-policy-preset="safe-block">禁止可执行程序</button>
+              <button class="preset-chip" type="button" data-policy-preset="office-media">办公+影音+压缩包</button>
+              <button class="preset-chip" type="button" data-policy-preset="docs-only">仅文档与图片</button>
+            </div>
+            <div class="policy-actions">
+              <span id="upload-policy-status" class="switch-desc">当前规则：允许所有文件类型</span>
+              <button id="btn-save-upload-policy" class="btn btn-primary btn-sm" type="button">保存上传规则</button>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">生成注册邀请码</div>
+            <form id="invite-create-form" class="invite-form">
+              <div class="field">
+                <label for="invite-note">备注用途</label>
+                <input id="invite-note" type="text" placeholder="如：手机端" />
+              </div>
+              <div class="field">
+                <label for="invite-custom-code">自定义邀请码（选填）</label>
+                <input id="invite-custom-code" type="text" placeholder="留空自动生成" />
+              </div>
+              <div class="field">
+                <label for="invite-max-uses">可用次数（0不限）</label>
+                <input id="invite-max-uses" type="number" min="0" value="1" />
+              </div>
+              <div class="field">
+                <label for="invite-expire-hours">有效期</label>
+                <select id="invite-expire-hours">
+                  <option value="24">24 小时</option>
+                  <option value="168" selected>7 天</option>
+                  <option value="720">30 天</option>
+                  <option value="0">永不过期</option>
+                </select>
+              </div>
+              <div class="invite-form-submit">
+                <button class="btn btn-primary btn-sm" type="submit">生成邀请码</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">已有邀请码</div>
+            <div class="admin-table-wrap">
+              <table class="files-table">
+                <thead>
+                  <tr><th>邀请码</th><th>备注</th><th>已用</th><th>状态</th><th>过期时间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="invites-tbody"></tbody>
+              </table>
+              <div id="invites-empty" class="empty-state hidden">暂无邀请码</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-panel hidden" id="panel-users">
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">注册账号管理</div>
+              <button id="btn-refresh-users" class="btn btn-ghost btn-xs" type="button">刷新</button>
+            </div>
+            <div class="admin-table-wrap">
+              <table class="files-table">
+                <thead>
+                  <tr><th>用户名</th><th>角色</th><th>状态</th><th>注册时间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="users-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-panel hidden" id="panel-cluster">
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">主节点网卡入口开关与集群管理</div>
+              <div class="cluster-meta-row">
+                <span>主选入口：<code id="admin-entry-url">-</code></span>
+                <span>密钥：<code id="admin-cluster-secret">••••••••</code></span>
+                <button id="btn-toggle-secret" class="btn btn-ghost btn-xs" type="button">显示</button>
+                <button id="btn-copy-secret" class="btn btn-ghost btn-xs" type="button">复制密钥</button>
+                <button id="btn-copy-join-cmd" class="btn btn-ghost btn-xs" type="button">复制命令</button>
+                <button id="btn-dissolve-cluster" class="btn btn-danger btn-xs hidden" type="button">解散集群</button>
+              </div>
+            </div>
+            <div class="nic-manager-box">
+              <div class="nic-manager-head">
+                <div>
+                  <div class="nic-manager-title">主节点多网卡入口开关（物理网卡 / 虚拟网卡独立开启或关闭）</div>
+                </div>
+                <div class="row-actions">
+                  <button id="btn-nic-enable-lan" class="btn btn-ghost btn-xs" type="button">仅开启物理局域网</button>
+                  <button id="btn-nic-enable-all" class="btn btn-ghost btn-xs" type="button">开启全部网卡</button>
+                </div>
+              </div>
+              <div id="admin-nic-cards-list" class="nic-cards-grid"></div>
+              <div class="endpoint-form" style="margin-top:10px;">
+                <div class="field">
+                  <label for="admin-expose-ip-select">主选通信入口网卡</label>
+                  <select id="admin-expose-ip-select">
+                    <option value="">自动选择推荐局域网 IP</option>
+                  </select>
+                </div>
+                <div class="field hidden" id="admin-expose-ip-custom-wrap">
+                  <label for="admin-expose-ip-custom">自定义 IP 或域名</label>
+                  <input id="admin-expose-ip-custom" type="text" placeholder="如：192.168.3.53" />
+                </div>
+                <div class="field">
+                  <label for="admin-expose-port">监听端口</label>
+                  <input id="admin-expose-port" type="number" min="1" max="65535" value="8080" />
+                </div>
+                <div class="endpoint-form-submit">
+                  <button id="btn-save-endpoint" class="btn btn-primary btn-sm" type="button">保存网卡入口设置</button>
+                </div>
+              </div>
+            </div>
+            <div class="cluster-hint-bar">
+              <div class="row-actions">
+                <button id="btn-sync-all-worker-versions" class="btn btn-primary btn-xs" type="button">同步分节点版本</button>
+                <button id="btn-refresh-cluster" class="btn btn-ghost btn-xs" type="button">刷新节点</button>
+              </div>
+            </div>
+            <div class="admin-table-wrap">
+              <table class="files-table">
+                <thead>
+                  <tr><th>节点</th><th>角色/版本</th><th>系统</th><th>状态</th><th>文件/已用</th><th>预留空间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="cluster-nodes-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">局域网节点探测与组网</div>
+            <div id="discover-status-hint" class="switch-desc" style="margin-bottom:8px;">扫描或手动探测同局域网 LFH 节点</div>
+            <div class="discover-toolbar">
+              <input id="lan-scan-ports" class="discover-port-input" type="text" value="8080" placeholder="端口" />
+              <button id="btn-scan-lan" class="btn btn-primary btn-sm" type="button">扫描局域网</button>
+              <input id="manual-probe-addr" class="search-input" type="text" placeholder="IP:端口" />
+              <button id="btn-manual-probe" class="btn btn-ghost btn-sm" type="button">探测</button>
+            </div>
+            <div id="discovered-nodes-list" class="discovered-grid"></div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">将本机加入其他主入口</div>
+            <form id="join-cluster-form" class="join-cluster-grid">
+              <div class="field">
+                <label for="join-entry-url">目标主入口地址</label>
+                <input id="join-entry-url" type="text" placeholder="http://192.168.3.53:8080" required />
+              </div>
+              <div class="field">
+                <label for="join-cluster-secret">目标主节点密钥</label>
+                <input id="join-cluster-secret" type="text" required />
+              </div>
+              <div class="field">
+                <label for="join-quota-text">预留空间（可选）</label>
+                <input id="join-quota-text" type="text" placeholder="如 20GB" />
+              </div>
+              <div class="endpoint-form-submit">
+                <button id="btn-join-cluster" class="btn btn-primary btn-sm" type="submit">验证并加入</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <div class="settings-panel hidden" id="panel-update">
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">在线版本检查与热升级</div>
+              <div class="row-actions">
+                <a id="update-release-link" class="btn btn-ghost btn-xs hidden" href="#" target="_blank" rel="noopener">Release</a>
+                <button id="btn-check-update" class="btn btn-ghost btn-xs" type="button">检查更新</button>
+                <button id="btn-apply-update" class="btn btn-primary btn-xs hidden" type="button">立即更新</button>
+              </div>
+            </div>
+            <div class="update-status-card">
+              <div class="update-meta-grid">
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.9</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>
+              </div>
+              <div id="upd-status-banner" class="info-box">点击「检查更新」检测 GitHub 新版本</div>
+              <div id="upd-progress-wrap" class="update-progress-wrap hidden">
+                <div class="progress-bar"><div id="upd-progress-fill" class="progress-fill"></div></div>
+                <span id="upd-progress-text" class="progress-text">0%</span>
+              </div>
+              <div id="upd-notes-box" class="update-notes-box hidden"></div>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">GitHub 升级源配置</div>
+            <div class="update-config-grid">
+              <div class="field">
+                <label for="update-repo">GitHub 仓库</label>
+                <input id="update-repo" type="text" placeholder="sxu99579-bit/LFH" />
+              </div>
+              <div class="field">
+                <label for="update-proxy">下载加速代理（可选）</label>
+                <input id="update-proxy" type="text" placeholder="https://ghfast.top" />
+              </div>
+            </div>
+            <div class="switch-row" style="margin-top:10px;">
+              <div><div style="font-size:13px;font-weight:600;">自动检测新版本</div></div>
+              <label class="toggle-switch"><input id="toggle-auto-check" type="checkbox" checked /><span class="toggle-slider"></span></label>
+            </div>
+            <div class="switch-row" style="margin-top:10px;">
+              <div><div style="font-size:13px;font-weight:600;">主节点更新时自动同步所有分节点</div></div>
+              <label class="toggle-switch"><input id="toggle-auto-sync-workers" type="checkbox" checked /><span class="toggle-slider"></span></label>
+            </div>
+            <div class="policy-actions" style="margin-top:10px;">
+              <div class="row-actions">
+                <button id="btn-update-sync-workers" class="btn btn-ghost btn-xs" type="button">同步分节点版本</button>
+                <button id="btn-save-update-config" class="btn btn-primary btn-xs" type="button">保存配置</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 纳管远端节点弹窗 -->
+  <div id="adopt-modal" class="modal hidden">
+    <div class="modal-backdrop" id="adopt-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title" id="adopt-modal-title">纳管远端节点</div>
+        <button id="adopt-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+      </div>
+      <div class="modal-body">
+        <div id="adopt-target-info" class="info-box" style="margin-bottom:10px;">-</div>
+        <div class="auth-tabs" style="margin-bottom:10px;">
+          <button id="adopt-auth-tab-admin" class="tab-btn active" type="button">管理员账号</button>
+          <button id="adopt-auth-tab-secret" class="tab-btn" type="button">集群密钥</button>
+        </div>
+        <form id="adopt-form" class="auth-form">
+          <div id="adopt-admin-panel">
+            <div class="field"><label for="adopt-admin-user">管理员用户名</label><input id="adopt-admin-user" type="text" autocomplete="off" /></div>
+            <div class="field" style="margin-top:8px;"><label for="adopt-admin-pass">管理员密码</label><input id="adopt-admin-pass" type="password" autocomplete="off" /></div>
+          </div>
+          <div id="adopt-secret-panel" class="hidden">
+            <div class="field"><label for="adopt-target-secret">目标集群密钥</label><input id="adopt-target-secret" type="text" autocomplete="off" /></div>
+          </div>
+          <div class="field"><label for="adopt-quota-text">分配预留空间（可选）</label><input id="adopt-quota-text" type="text" placeholder="如 20GB" /></div>
+          <div id="adopt-error" class="error-box hidden"></div>
+          <button id="adopt-submit-btn" class="btn btn-primary btn-block" type="submit">验证并纳管</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文件版本信息控制弹窗 -->
+  <div id="versions-modal" class="modal hidden">
+    <div class="modal-backdrop" id="versions-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title" id="versions-title">文件版本控制</div>
+        <div class="modal-header-actions">
+          <button id="versions-close" class="btn btn-ghost btn-xs" type="button">关闭</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="versions-file-summary" class="version-summary-banner"></div>
+        <form id="version-upload-form" class="version-upload-bar">
+          <input id="version-file-input" type="file" required />
+          <input id="version-note-input" class="search-input" type="text" placeholder="版本说明备注（选填）" style="flex:1;min-width:160px;" />
+          <button id="btn-submit-version" class="btn btn-primary btn-sm" type="submit">上传新版本</button>
+        </form>
+        <div id="versions-list-wrap" class="admin-table-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全屏拖拽上传遮罩 -->
+  <div id="global-drop-overlay" class="drop-overlay hidden">
+    <div class="drop-overlay-card">
+      <div class="drop-overlay-title">松开即可上传</div>
+      <div class="drop-overlay-sub">自动分发至集群存储池</div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -41,6 +41,7 @@ type NetworkAddr struct {
 	Iface   string `json:"iface"`
 	Tag     string `json:"tag"`
 	Primary bool   `json:"primary"`
+	Enabled bool   `json:"enabled"`
 }
 
 type Server struct {
@@ -145,6 +146,162 @@ func ResolveEntryURL(exposeIP, port string) string {
 		return "http://" + clean + ":" + port
 	}
 	return PrimaryEntryURL(port)
+}
+
+func (s *Server) allConfiguredAddrs() ([]NetworkAddr, []NetworkAddr, string) {
+	port := s.Port()
+	all := DiscoverNetworkAddrs(port)
+	exposePrimary := strings.TrimSpace(s.cluster.ExposeIP())
+	enabledList := s.cluster.ExposeIPs()
+	disabledList := s.cluster.DisabledIPs()
+
+	enabledSet := make(map[string]bool, len(enabledList))
+	for _, ip := range enabledList {
+		if clean, err := sanitizeExposeHost(ip); err == nil && clean != "" {
+			enabledSet[clean] = true
+		}
+	}
+	disabledSet := make(map[string]bool, len(disabledList))
+	for _, ip := range disabledList {
+		if clean, err := sanitizeExposeHost(ip); err == nil && clean != "" {
+			disabledSet[clean] = true
+		}
+	}
+
+	knownIPs := make(map[string]bool, len(all))
+	for i := range all {
+		ip := all[i].IP
+		knownIPs[ip] = true
+		if disabledSet[ip] {
+			all[i].Enabled = false
+		} else if len(enabledSet) > 0 {
+			all[i].Enabled = enabledSet[ip]
+		} else {
+			// Default when admin hasn't customized NIC toggles yet: enable non-virtual NICs (or primary)
+			all[i].Enabled = all[i].Tag != "虚拟网卡" || all[i].Primary
+		}
+		if exposePrimary != "" && ip == exposePrimary {
+			all[i].Enabled = true
+		}
+	}
+
+	// Include any custom IP/hostname configured by admin that is not a local NIC
+	appendCustom := func(raw string, isPrimary bool) {
+		clean, err := sanitizeExposeHost(raw)
+		if err != nil || clean == "" || knownIPs[clean] {
+			return
+		}
+		knownIPs[clean] = true
+		all = append(all, NetworkAddr{
+			URL:     "http://" + clean + ":" + port,
+			IP:      clean,
+			Iface:   "自定义入口",
+			Tag:     "自定义地址",
+			Primary: isPrimary,
+			Enabled: !disabledSet[clean],
+		})
+	}
+	if exposePrimary != "" {
+		appendCustom(exposePrimary, true)
+	}
+	for _, ip := range enabledList {
+		appendCustom(ip, false)
+	}
+
+	// Ensure at least one address is enabled
+	anyEnabled := false
+	for _, a := range all {
+		if a.Enabled {
+			anyEnabled = true
+			break
+		}
+	}
+	if !anyEnabled && len(all) > 0 {
+		all[0].Enabled = true
+	}
+
+	// Determine primary address among enabled addresses
+	primaryIP := ""
+	if exposePrimary != "" && !disabledSet[exposePrimary] {
+		primaryIP = exposePrimary
+	}
+	if primaryIP == "" {
+		for _, a := range all {
+			if a.Enabled && a.Primary {
+				primaryIP = a.IP
+				break
+			}
+		}
+	}
+	if primaryIP == "" {
+		for _, a := range all {
+			if a.Enabled {
+				primaryIP = a.IP
+				break
+			}
+		}
+	}
+
+	active := make([]NetworkAddr, 0, len(all))
+	primaryURL := ""
+	for i := range all {
+		all[i].Primary = (all[i].IP == primaryIP)
+		if all[i].Enabled {
+			active = append(active, all[i])
+			if all[i].Primary {
+				primaryURL = all[i].URL
+			}
+		}
+	}
+	// Put primary first in active list
+	sort.SliceStable(active, func(i, j int) bool {
+		if active[i].Primary != active[j].Primary {
+			return active[i].Primary
+		}
+		return false
+	})
+	if primaryURL == "" {
+		if len(active) > 0 {
+			primaryURL = active[0].URL
+		} else {
+			primaryURL = ResolveEntryURL(exposePrimary, port)
+		}
+	}
+	return all, active, primaryURL
+}
+
+func isMobileRequest(r *http.Request) bool {
+	view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view")))
+	if view == "desktop" || view == "pc" {
+		return false
+	}
+	if view == "mobile" || view == "m" {
+		return true
+	}
+	if c, err := r.Cookie("lfh_view_mode"); err == nil {
+		cv := strings.ToLower(strings.TrimSpace(c.Value))
+		if cv == "desktop" || cv == "pc" {
+			return false
+		}
+		if cv == "mobile" || cv == "m" {
+			return true
+		}
+	}
+	if strings.TrimSpace(r.Header.Get("Sec-CH-UA-Mobile")) == "?1" {
+		return true
+	}
+	ua := strings.ToLower(r.UserAgent())
+	mobileKeywords := []string{
+		"iphone", "ipod", "android", "mobile", "phone",
+		"harmonyos", "arkweb", "micromessenger", "ucbrowser",
+		"quark", "baiduboxapp", "qqbrowser/mobile", "opera mini", "iemobile",
+	}
+	for _, kw := range mobileKeywords {
+		if strings.Contains(ua, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeExposeHost(raw string) (string, error) {
@@ -260,7 +417,30 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/files/{id}", s.requireAuth(s.handleDelete))
 
 	fileServer := http.FileServer(http.FS(s.webFS))
-	mux.Handle("/", fileServer)
+	mux.HandleFunc("GET /mobile", s.handleServeMobileHTML)
+	mux.HandleFunc("GET /mobile.html", s.handleServeMobileHTML)
+	mux.HandleFunc("GET /desktop", s.handleServeDesktopHTML)
+	mux.HandleFunc("GET /index.html", s.handleServeDesktopHTML)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			if view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view"))); view == "desktop" || view == "pc" {
+				http.SetCookie(w, &http.Cookie{Name: "lfh_view_mode", Value: "desktop", Path: "/", MaxAge: 86400 * 30})
+				s.handleServeDesktopHTML(w, r)
+				return
+			} else if view == "mobile" || view == "m" {
+				http.SetCookie(w, &http.Cookie{Name: "lfh_view_mode", Value: "mobile", Path: "/", MaxAge: 86400 * 30})
+				s.handleServeMobileHTML(w, r)
+				return
+			}
+			if isMobileRequest(r) {
+				s.handleServeMobileHTML(w, r)
+				return
+			}
+			s.handleServeDesktopHTML(w, r)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") ||
@@ -278,6 +458,28 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) serveEmbeddedHTML(w http.ResponseWriter, filename string) {
+	raw, err := fs.ReadFile(s.webFS, filename)
+	if err != nil {
+		raw, err = fs.ReadFile(s.webFS, "index.html")
+	}
+	if err != nil {
+		raw = []byte("<!DOCTYPE html><html><body>LFH (" + filename + ")</body></html>")
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Vary", "User-Agent, Sec-CH-UA-Mobile, Cookie")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *Server) handleServeDesktopHTML(w http.ResponseWriter, r *http.Request) {
+	s.serveEmbeddedHTML(w, "index.html")
+}
+
+func (s *Server) handleServeMobileHTML(w http.ResponseWriter, r *http.Request) {
+	s.serveEmbeddedHTML(w, "mobile.html")
 }
 
 func (s *Server) redirectWorkerToEntry(w http.ResponseWriter, r *http.Request) {
@@ -1062,13 +1264,28 @@ const workerControlHTML = `<!DOCTYPE html>
 // ==================== Public & Entry Handlers ====================
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	_, activeAddrs, primaryURL := s.allConfiguredAddrs()
+	entryURL := s.cluster.EntryURL()
+	if s.cluster.Role() == cluster.RoleEntry && primaryURL != "" {
+		entryURL = primaryURL
+	}
+	entryURLs := make([]string, 0, len(activeAddrs))
+	for _, a := range activeAddrs {
+		entryURLs = append(entryURLs, a.URL)
+	}
+	if len(entryURLs) == 0 && entryURL != "" {
+		entryURLs = []string{entryURL}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"app_name":        version.AppName,
 		"version":         version.Version,
-		"entry_url":       s.cluster.EntryURL(),
+		"entry_url":       entryURL,
+		"entry_urls":      entryURLs,
+		"entry_addrs":     activeAddrs,
 		"local_url":       "http://localhost:" + s.Port(),
 		"role":            s.cluster.Role(),
 		"invite_required": s.auth.Settings().InviteRequired,
+		"is_mobile_ua":    isMobileRequest(r),
 		"pool":            s.cluster.PoolSummaryForRole(false),
 	})
 }
@@ -1139,11 +1356,25 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := s.auth.Settings()
+	_, activeAddrs, primaryURL := s.allConfiguredAddrs()
+	entryURL := s.cluster.EntryURL()
+	if s.cluster.Role() == cluster.RoleEntry && primaryURL != "" {
+		entryURL = primaryURL
+	}
+	entryURLs := make([]string, 0, len(activeAddrs))
+	for _, a := range activeAddrs {
+		entryURLs = append(entryURLs, a.URL)
+	}
+	if len(entryURLs) == 0 && entryURL != "" {
+		entryURLs = []string{entryURL}
+	}
 	resp := map[string]any{
 		"app_name":        version.AppName,
 		"version":         version.Version,
 		"user":            u,
-		"entry_url":       s.cluster.EntryURL(),
+		"entry_url":       entryURL,
+		"entry_urls":      entryURLs,
+		"entry_addrs":     activeAddrs,
 		"local_url":       "http://localhost:" + s.Port(),
 		"invite_required": settings.InviteRequired,
 		"events_version":  s.events.Version(),
@@ -1248,16 +1479,21 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 
 func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	port := s.Port()
+	allAddrs, activeAddrs, primaryURL := s.allConfiguredAddrs()
 	resp := map[string]any{
 		"pool":           s.cluster.PoolSummaryForRole(u.Role == "admin"),
 		"cluster_secret": "",
 		"events_version": s.events.Version(),
+		"entry_addrs":    activeAddrs,
+		"entry_url":      primaryURL,
 	}
 	if u.Role == "admin" {
 		resp["cluster_secret"] = s.cluster.Secret()
 		resp["expose_ip"] = s.cluster.ExposeIP()
+		resp["expose_ips"] = s.cluster.ExposeIPs()
+		resp["disabled_ips"] = s.cluster.DisabledIPs()
 		resp["port"] = port
-		resp["available_addrs"] = DiscoverNetworkAddrs(port)
+		resp["available_addrs"] = allAddrs
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1857,8 +2093,10 @@ func (s *Server) handleAdminClusterQuota(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	var req struct {
-		ExposeIP string `json:"expose_ip"`
-		Port     string `json:"port"`
+		ExposeIP    string    `json:"expose_ip"`
+		ExposeIPs   *[]string `json:"expose_ips"`
+		DisabledIPs *[]string `json:"disabled_ips"`
+		Port        string    `json:"port"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -1869,6 +2107,33 @@ func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+
+	var cleanExposeIPs, cleanDisabledIPs []string
+	updateNICSelection := req.ExposeIPs != nil || req.DisabledIPs != nil
+	if req.ExposeIPs != nil {
+		for _, raw := range *req.ExposeIPs {
+			c, cErr := sanitizeExposeHost(raw)
+			if cErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": cErr.Error()})
+				return
+			}
+			if c != "" {
+				cleanExposeIPs = append(cleanExposeIPs, c)
+			}
+		}
+	}
+	if req.DisabledIPs != nil {
+		for _, raw := range *req.DisabledIPs {
+			c, cErr := sanitizeExposeHost(raw)
+			if cErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": cErr.Error()})
+				return
+			}
+			if c != "" {
+				cleanDisabledIPs = append(cleanDisabledIPs, c)
+			}
+		}
 	}
 
 	newPort := strings.TrimSpace(req.Port)
@@ -1895,22 +2160,35 @@ func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	newEntryURL := ResolveEntryURL(cleanIP, newPort)
-	if err := s.cluster.SetEndpointConfig(cleanIP, newPort, newEntryURL); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存入口设置失败: " + err.Error()})
-		return
-	}
-
 	s.mu.Lock()
 	s.port = newPort
 	s.mu.Unlock()
 
+	if cleanIP == "" && len(cleanExposeIPs) > 0 {
+		cleanIP = cleanExposeIPs[0]
+	}
+	newEntryURL := ResolveEntryURL(cleanIP, newPort)
+	if err := s.cluster.SetEndpointNICsConfig(cleanIP, cleanExposeIPs, cleanDisabledIPs, updateNICSelection, newPort, newEntryURL); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存入口设置失败: " + err.Error()})
+		return
+	}
+
+	allAddrs, activeAddrs, primaryURL := s.allConfiguredAddrs()
+	if primaryURL != "" && primaryURL != newEntryURL {
+		newEntryURL = primaryURL
+		_ = s.cluster.SetEndpointNICsConfig(cleanIP, cleanExposeIPs, cleanDisabledIPs, updateNICSelection, newPort, newEntryURL)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"entry_url":    newEntryURL,
-		"expose_ip":    cleanIP,
-		"port":         newPort,
-		"port_changed": portChanged,
-		"pool":         s.cluster.PoolSummaryForRole(true),
+		"entry_url":       newEntryURL,
+		"entry_addrs":     activeAddrs,
+		"available_addrs": allAddrs,
+		"expose_ip":       cleanIP,
+		"expose_ips":      s.cluster.ExposeIPs(),
+		"disabled_ips":    s.cluster.DisabledIPs(),
+		"port":            newPort,
+		"port_changed":    portChanged,
+		"pool":            s.cluster.PoolSummaryForRole(true),
 	})
 }
 
@@ -3172,19 +3450,32 @@ func (s *Server) serveArchiveEntry(w http.ResponseWriter, r *http.Request, id st
 
 // ==================== Device Fingerprint & Network Helpers ====================
 
+func decodeHeaderValue(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "%") {
+		if dec, err := url.QueryUnescape(s); err == nil && dec != "" {
+			return strings.TrimSpace(dec)
+		}
+	}
+	return s
+}
+
 func extractDeviceInfo(r *http.Request) storage.DeviceInfo {
 	clientIP := resolveClientIP(r)
 	fp := truncateRunes(strings.TrimSpace(r.FormValue("device_fp")), 64)
 	if fp == "" {
-		fp = truncateRunes(strings.TrimSpace(r.Header.Get("X-Device-FP")), 64)
+		fp = truncateRunes(decodeHeaderValue(r.Header.Get("X-Device-FP")), 64)
 	}
 	name := truncateRunes(strings.TrimSpace(r.FormValue("device_name")), 80)
 	if name == "" {
-		name = truncateRunes(strings.TrimSpace(r.Header.Get("X-Device-Name")), 80)
+		name = truncateRunes(decodeHeaderValue(r.Header.Get("X-Device-Name")), 80)
 	}
 	detail := truncateRunes(strings.TrimSpace(r.FormValue("device_detail")), 160)
 	if detail == "" {
-		detail = truncateRunes(strings.TrimSpace(r.Header.Get("X-Device-Detail")), 160)
+		detail = truncateRunes(decodeHeaderValue(r.Header.Get("X-Device-Detail")), 160)
 	}
 
 	if name == "" {

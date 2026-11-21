@@ -8,17 +8,20 @@ const state = {
   searchQuery: "",
   files: [],
   summary: { total_count: 0, total_size: 0, by_time: [], by_category: [], by_device: [], by_node: [] },
-  serverInfo: { entry_url: location.origin, local_url: location.origin, invite_required: true, pool: null },
+  serverInfo: { entry_url: location.origin, entry_addrs: [], local_url: location.origin, invite_required: true, pool: null },
   pool: null,
   clusterSecret: "",
   exposeIP: "",
+  exposeIPs: [],
+  disabledIPs: [],
   port: "8080",
   availableAddrs: [],
+  entryAddrs: [],
   secretVisible: false,
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.8",
+  appVersion: "V0.11.21.9",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -566,12 +569,20 @@ async function copyText(text) {
   showToast("复制失败，请手动选中复制", "error");
 }
 
+function safeHeaderSet(headers, key, rawVal) {
+  const val = String(rawVal || "").trim();
+  if (!val) return;
+  try {
+    headers.set(key, encodeURIComponent(val));
+  } catch {}
+}
+
 async function api(url, options = {}) {
   const headers = new Headers(options.headers || {});
   if (state.device) {
-    if (state.device.fp && !headers.has("X-Device-FP")) headers.set("X-Device-FP", state.device.fp);
-    if (state.device.name && !headers.has("X-Device-Name")) headers.set("X-Device-Name", state.device.name);
-    if (state.device.detail && !headers.has("X-Device-Detail")) headers.set("X-Device-Detail", state.device.detail);
+    if (state.device.fp && !headers.has("X-Device-FP")) safeHeaderSet(headers, "X-Device-FP", state.device.fp);
+    if (state.device.name && !headers.has("X-Device-Name")) safeHeaderSet(headers, "X-Device-Name", state.device.name);
+    if (state.device.detail && !headers.has("X-Device-Detail")) safeHeaderSet(headers, "X-Device-Detail", state.device.detail);
   }
   const res = await fetch(url, { ...options, headers });
   const data = await res.json().catch(() => ({}));
@@ -654,7 +665,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.8";
+  const ver = state.appVersion || "V0.11.21.9";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -681,6 +692,9 @@ async function loadServerInfo() {
   try {
     const info = await api("/api/info");
     state.serverInfo = info;
+    if (Array.isArray(info.entry_addrs)) {
+      state.entryAddrs = info.entry_addrs;
+    }
     if (info.version) {
       state.appVersion = info.version;
       syncVersionBadges();
@@ -723,30 +737,81 @@ function syncRegisterUI() {
   }
 }
 
+function getActiveEntryAddrs() {
+  const fromState = Array.isArray(state.entryAddrs) && state.entryAddrs.length > 0
+    ? state.entryAddrs
+    : Array.isArray(state.serverInfo?.entry_addrs) && state.serverInfo.entry_addrs.length > 0
+    ? state.serverInfo.entry_addrs
+    : [];
+  if (fromState.length > 0) return fromState;
+  const fallbackURL = state.serverInfo?.entry_url || state.serverInfo?.local_url || location.origin;
+  return [{ url: fallbackURL, ip: "", iface: "默认入口", tag: "主选入口", primary: true, enabled: true }];
+}
+
 function renderAccessAddresses() {
   const entryUrl = state.serverInfo.entry_url || state.serverInfo.local_url || location.origin;
   const pool = state.pool || state.serverInfo.pool;
+  const addrs = getActiveEntryAddrs();
 
   if ($("auth-pool-pill") && pool) {
-    $("auth-pool-pill").textContent = `分布式存储池：${pool.online_nodes} 节点在线 · 总预留 ${formatQuotaDisplay(pool.total_quota_bytes)}`;
+    $("auth-pool-pill").textContent = `分布式存储池：${pool.online_nodes} 节点在线 · 总预留 ${formatQuotaDisplay(pool.total_quota_bytes)} · 已启用 ${addrs.length} 个网卡入口`;
   }
 
   const authList = $("auth-access-list");
   if (authList) {
-    authList.innerHTML = `
-      <div class="access-row primary">
-        <div class="access-row-info">
-          <span class="access-tag">唯一入口</span>
-          <span class="access-url-mono">${escapeHtml(entryUrl)}</span>
-        </div>
-        <button class="btn btn-primary btn-xs" type="button" data-copy-url="${escapeHtml(entryUrl)}">复制地址</button>
-      </div>
-    `;
+    authList.innerHTML = addrs
+      .map((a, idx) => {
+        const isPrimary = Boolean(a.primary || idx === 0);
+        const tagLabel = isPrimary
+          ? `主选入口${a.iface && a.iface !== "默认入口" ? " · " + a.iface : ""}`
+          : `${a.iface || "网卡"}${a.tag ? " (" + a.tag + ")" : ""}`;
+        return `
+          <div class="access-row ${isPrimary ? "primary" : ""}">
+            <div class="access-row-info">
+              <span class="access-tag">${escapeHtml(tagLabel)}</span>
+              <span class="access-url-mono">${escapeHtml(a.url)}</span>
+            </div>
+            <button class="btn ${isPrimary ? "btn-primary" : "btn-ghost"} btn-xs" type="button" data-copy-url="${escapeHtml(a.url)}">复制地址</button>
+          </div>
+        `;
+      })
+      .join("");
   }
 
-  if ($("top-entry-url")) {
-    $("top-entry-url").textContent = entryUrl;
-    $("btn-copy-entry-url").onclick = () => copyText(entryUrl);
+  const topSelect = $("top-entry-select");
+  const topUrlEl = $("top-entry-url");
+  const copyBtn = $("btn-copy-entry-url");
+  if (topSelect && topUrlEl && copyBtn) {
+    if (addrs.length > 1) {
+      const prevVal = topSelect.value;
+      topSelect.innerHTML = addrs
+        .map((a, idx) => {
+          const isPrimary = Boolean(a.primary || idx === 0);
+          const lbl = `${a.url} (${a.iface || a.tag || (isPrimary ? "主选" : "网卡")}${isPrimary ? " · 主选" : ""})`;
+          return `<option value="${escapeHtml(a.url)}">${escapeHtml(lbl)}</option>`;
+        })
+        .join("");
+      if (prevVal && addrs.some((a) => a.url === prevVal)) {
+        topSelect.value = prevVal;
+      } else {
+        topSelect.value = addrs[0].url;
+      }
+      topSelect.classList.remove("hidden");
+      topUrlEl.classList.add("hidden");
+      topSelect.onchange = () => {
+        topUrlEl.textContent = topSelect.value;
+      };
+      copyBtn.onclick = () => copyText(topSelect.value || entryUrl);
+    } else {
+      const singleUrl = addrs[0]?.url || entryUrl;
+      topSelect.classList.add("hidden");
+      topUrlEl.classList.remove("hidden");
+      topUrlEl.textContent = singleUrl;
+      copyBtn.onclick = () => copyText(singleUrl);
+    }
+  } else if (topUrlEl && copyBtn) {
+    topUrlEl.textContent = entryUrl;
+    copyBtn.onclick = () => copyText(entryUrl);
   }
 }
 
@@ -999,10 +1064,14 @@ async function init() {
     const data = await api("/api/me");
     state.serverInfo = {
       entry_url: data.entry_url || state.serverInfo.entry_url,
+      entry_addrs: Array.isArray(data.entry_addrs) ? data.entry_addrs : state.serverInfo.entry_addrs,
       local_url: data.local_url || state.serverInfo.local_url,
       invite_required: typeof data.invite_required === "boolean" ? data.invite_required : state.serverInfo.invite_required,
       pool: data.pool || state.serverInfo.pool,
     };
+    if (Array.isArray(data.entry_addrs)) {
+      state.entryAddrs = data.entry_addrs;
+    }
     if (data.version) {
       state.appVersion = data.version;
       syncVersionBadges();
@@ -1081,7 +1150,13 @@ async function loadCluster() {
     state.clusterSecret = data.cluster_secret || "";
     if (data.port) state.port = data.port;
     if (typeof data.expose_ip === "string") state.exposeIP = data.expose_ip;
+    if (Array.isArray(data.expose_ips)) state.exposeIPs = data.expose_ips;
+    if (Array.isArray(data.disabled_ips)) state.disabledIPs = data.disabled_ips;
     if (Array.isArray(data.available_addrs)) state.availableAddrs = data.available_addrs;
+    if (Array.isArray(data.entry_addrs)) {
+      state.entryAddrs = data.entry_addrs;
+      state.serverInfo.entry_addrs = data.entry_addrs;
+    }
     if (data.events_version) {
       const remoteVer = Number(data.events_version);
       if (state.autoRefresh && state.lastEventVersion > 0 && remoteVer > state.lastEventVersion) {
@@ -1286,8 +1361,18 @@ function renderTimeSummary(buckets) {
   }
 }
 
+function syncMobileQuickCats() {
+  const wrap = $("m-quick-cats");
+  if (!wrap) return;
+  wrap.querySelectorAll("[data-m-cat]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mCat === state.selectedCategory);
+  });
+}
+
 function renderCategorySummary(buckets) {
+  syncMobileQuickCats();
   const wrap = $("category-summary-list");
+  if (!wrap) return;
   wrap.innerHTML = "";
 
   const makeItem = (key, label, countText, sizeText) => {
@@ -3890,7 +3975,13 @@ async function refreshAdminData() {
     state.clusterSecret = clusterData.cluster_secret || "";
     if (clusterData.port) state.port = clusterData.port;
     if (typeof clusterData.expose_ip === "string") state.exposeIP = clusterData.expose_ip;
+    if (Array.isArray(clusterData.expose_ips)) state.exposeIPs = clusterData.expose_ips;
+    if (Array.isArray(clusterData.disabled_ips)) state.disabledIPs = clusterData.disabled_ips;
     if (Array.isArray(clusterData.available_addrs)) state.availableAddrs = clusterData.available_addrs;
+    if (Array.isArray(clusterData.entry_addrs)) {
+      state.entryAddrs = clusterData.entry_addrs;
+      state.serverInfo.entry_addrs = clusterData.entry_addrs;
+    }
 
     renderAdminCluster();
     loadPassiveDiscovered();
@@ -4028,15 +4119,17 @@ function renderAdminEndpointControls() {
   const customWrap = $("admin-expose-ip-custom-wrap");
   const customInput = $("admin-expose-ip-custom");
   const portInput = $("admin-expose-port");
+  const nicGrid = $("admin-nic-cards-list");
   if (!sel || !portInput) return;
 
   const addrs = state.availableAddrs || [];
-  const opts = [`<option value="">自动选择推荐局域网 IP</option>`];
+  const opts = [`<option value="">自动选择已启用网卡中的推荐局域网 IP</option>`];
   const seenIPs = new Set();
   for (const a of addrs) {
     seenIPs.add(a.ip);
+    const statusTag = a.enabled !== false ? "已启用" : "已关闭";
     opts.push(
-      `<option value="${escapeHtml(a.ip)}">${escapeHtml(a.ip)} · ${escapeHtml(a.iface)} (${escapeHtml(a.tag)})</option>`
+      `<option value="${escapeHtml(a.ip)}">${escapeHtml(a.ip)} · ${escapeHtml(a.iface)} (${escapeHtml(a.tag)} · ${statusTag})</option>`
     );
   }
   if (!seenIPs.has("127.0.0.1")) {
@@ -4059,6 +4152,110 @@ function renderAdminEndpointControls() {
     customInput.value = curIP;
   }
   portInput.value = state.port || "8080";
+
+  if (nicGrid) {
+    if (addrs.length === 0) {
+      nicGrid.innerHTML = `<div style="color:var(--muted);font-size:12.5px;">未检测到本机活动网卡</div>`;
+      return;
+    }
+    nicGrid.innerHTML = addrs
+      .map((a) => {
+        const enabled = a.enabled !== false;
+        const isPrimary = Boolean(a.primary);
+        const isVirtual = a.tag === "虚拟网卡";
+        return `
+          <div class="nic-card ${enabled ? "enabled" : "disabled"} ${isPrimary ? "primary" : ""}" data-nic-card-ip="${escapeHtml(a.ip)}">
+            <div class="nic-card-top">
+              <div class="nic-card-info">
+                <div class="nic-card-name">
+                  <strong>${escapeHtml(a.iface || "网卡")}</strong>
+                  <span class="${isVirtual ? "cat-tag" : "status-pill status-ok"}">${escapeHtml(a.tag || "网络")}</span>
+                  ${isPrimary ? `<span class="status-pill status-ok">主选入口</span>` : ""}
+                </div>
+                <div class="nic-card-url">${escapeHtml(a.url)}</div>
+              </div>
+              <label class="toggle-switch" title="${enabled ? "点击关闭该网卡入口" : "点击开启该网卡入口"}">
+                <input type="checkbox" data-nic-toggle-ip="${escapeHtml(a.ip)}" ${enabled ? "checked" : ""} />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="nic-card-actions">
+              <span class="nic-card-state">${enabled ? "对外展示并允许访问" : "已关闭（不对外展示）"}</span>
+              <div class="row-actions">
+                ${!isPrimary ? `<button type="button" class="btn btn-ghost btn-xs" data-nic-set-primary="${escapeHtml(a.ip)}">设为主选</button>` : ""}
+                <button type="button" class="btn btn-ghost btn-xs" data-copy-url="${escapeHtml(a.url)}">复制</button>
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+}
+
+async function saveAdminEndpointSettings(customOverride = null) {
+  const selVal = $("admin-expose-ip-select")?.value || "";
+  let expose_ip = selVal === "__custom__" ? ($("admin-expose-ip-custom")?.value || "").trim() : selVal;
+  if (customOverride && typeof customOverride.expose_ip === "string") {
+    expose_ip = customOverride.expose_ip;
+  }
+  const port = String($("admin-expose-port")?.value || state.port || "8080").trim();
+
+  let expose_ips = [];
+  let disabled_ips = [];
+  if (customOverride && Array.isArray(customOverride.expose_ips) && Array.isArray(customOverride.disabled_ips)) {
+    expose_ips = customOverride.expose_ips;
+    disabled_ips = customOverride.disabled_ips;
+  } else {
+    const checkboxes = document.querySelectorAll("[data-nic-toggle-ip]");
+    checkboxes.forEach((cb) => {
+      const ip = cb.dataset.nicToggleIp;
+      if (!ip) return;
+      if (cb.checked) expose_ips.push(ip);
+      else disabled_ips.push(ip);
+    });
+  }
+  if (expose_ip && !expose_ips.includes(expose_ip)) {
+    expose_ips.push(expose_ip);
+    disabled_ips = disabled_ips.filter((x) => x !== expose_ip);
+  }
+  if (expose_ips.length === 0 && (state.availableAddrs || []).length > 0) {
+    showToast("请至少保留开启 1 个网卡入口地址", "error");
+    renderAdminEndpointControls();
+    return;
+  }
+
+  try {
+    const data = await api("/api/admin/cluster/endpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expose_ip, expose_ips, disabled_ips, port }),
+    });
+    state.exposeIP = data.expose_ip || "";
+    if (Array.isArray(data.expose_ips)) state.exposeIPs = data.expose_ips;
+    if (Array.isArray(data.disabled_ips)) state.disabledIPs = data.disabled_ips;
+    if (Array.isArray(data.available_addrs)) state.availableAddrs = data.available_addrs;
+    if (Array.isArray(data.entry_addrs)) {
+      state.entryAddrs = data.entry_addrs;
+      state.serverInfo.entry_addrs = data.entry_addrs;
+    }
+    state.port = data.port || state.port;
+    state.pool = data.pool || state.pool;
+    state.serverInfo.entry_url = data.entry_url;
+    renderAccessAddresses();
+    renderAdminCluster();
+    if (data.port_changed) {
+      showToast(`监听端口已切换至 ${data.port}，正在自动跳转...`, "success");
+      setTimeout(() => {
+        window.location.href = `${location.protocol}//${location.hostname}:${data.port}/`;
+      }, 900);
+    } else {
+      const enabledCount = (state.entryAddrs || []).length || 1;
+      showToast(`网卡入口设置已生效（共开启 ${enabledCount} 个入口，主选：${data.entry_url}）`, "success");
+    }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 function renderAdminCluster() {
@@ -4428,10 +4625,14 @@ function bindEvents() {
       const me = await api("/api/me");
       state.serverInfo = {
         entry_url: me.entry_url || state.serverInfo.entry_url,
+        entry_addrs: Array.isArray(me.entry_addrs) ? me.entry_addrs : state.serverInfo.entry_addrs,
         local_url: me.local_url || state.serverInfo.local_url,
         invite_required: typeof me.invite_required === "boolean" ? me.invite_required : state.serverInfo.invite_required,
         pool: me.pool || state.serverInfo.pool,
       };
+      if (Array.isArray(me.entry_addrs)) {
+        state.entryAddrs = me.entry_addrs;
+      }
       if (me.version) {
         state.appVersion = me.version;
         syncVersionBadges();
@@ -4546,6 +4747,18 @@ function bindEvents() {
       const btn = e.target.closest("[data-view-mode]");
       if (!btn) return;
       applyViewMode(btn.dataset.viewMode);
+    };
+  }
+
+  if ($("m-quick-cats")) {
+    $("m-quick-cats").onclick = (e) => {
+      const pill = e.target.closest("[data-m-cat]");
+      if (!pill) return;
+      const cat = pill.dataset.mCat || "all";
+      state.selectedCategory = cat === "all" ? "all" : state.selectedCategory === cat ? "all" : cat;
+      syncMobileQuickCats();
+      if (state.workspacePage !== "files") switchWorkspacePage("files");
+      refreshAll();
     };
   }
 
@@ -5267,37 +5480,58 @@ function bindEvents() {
     $("admin-expose-ip-custom-wrap").classList.toggle("hidden", !isCustom);
     if (isCustom) {
       $("admin-expose-ip-custom").focus();
+    } else if (e.target.value) {
+      const cb = document.querySelector(`[data-nic-toggle-ip="${CSS.escape(e.target.value)}"]`);
+      if (cb) cb.checked = true;
     }
   };
 
-  $("btn-save-endpoint").onclick = async () => {
-    const selVal = $("admin-expose-ip-select").value;
-    const expose_ip = selVal === "__custom__" ? $("admin-expose-ip-custom").value.trim() : selVal;
-    const port = String($("admin-expose-port").value || "").trim();
-    try {
-      const data = await api("/api/admin/cluster/endpoint", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expose_ip, port }),
-      });
-      state.exposeIP = data.expose_ip || "";
-      state.port = data.port || state.port;
-      state.pool = data.pool || state.pool;
-      state.serverInfo.entry_url = data.entry_url;
-      renderAccessAddresses();
-      renderAdminCluster();
-      if (data.port_changed) {
-        showToast(`监听端口已切换至 ${data.port}，正在自动跳转...`, "success");
-        setTimeout(() => {
-          window.location.href = `${location.protocol}//${location.hostname}:${data.port}/`;
-        }, 900);
-      } else {
-        showToast(`唯一入口已更新为 ${data.entry_url}`, "success");
+  if ($("admin-nic-cards-list")) {
+    $("admin-nic-cards-list").onchange = (e) => {
+      const cb = e.target.closest("[data-nic-toggle-ip]");
+      if (cb) {
+        saveAdminEndpointSettings();
       }
-    } catch (err) {
-      showToast(err.message, "error");
-    }
-  };
+    };
+    $("admin-nic-cards-list").onclick = (e) => {
+      const primBtn = e.target.closest("[data-nic-set-primary]");
+      if (primBtn) {
+        const ip = primBtn.dataset.nicSetPrimary;
+        if (ip && $("admin-expose-ip-select")) {
+          $("admin-expose-ip-select").value = ip;
+          const cb = document.querySelector(`[data-nic-toggle-ip="${CSS.escape(ip)}"]`);
+          if (cb) cb.checked = true;
+          saveAdminEndpointSettings({ expose_ip: ip });
+        }
+      }
+    };
+  }
+
+  if ($("btn-nic-enable-lan")) {
+    $("btn-nic-enable-lan").onclick = () => {
+      const addrs = state.availableAddrs || [];
+      const expose_ips = [];
+      const disabled_ips = [];
+      for (const a of addrs) {
+        if (a.tag !== "虚拟网卡") expose_ips.push(a.ip);
+        else disabled_ips.push(a.ip);
+      }
+      if (expose_ips.length === 0 && addrs.length > 0) {
+        expose_ips.push(addrs[0].ip);
+      }
+      saveAdminEndpointSettings({ expose_ips, disabled_ips });
+    };
+  }
+
+  if ($("btn-nic-enable-all")) {
+    $("btn-nic-enable-all").onclick = () => {
+      const addrs = state.availableAddrs || [];
+      const expose_ips = addrs.map((a) => a.ip);
+      saveAdminEndpointSettings({ expose_ips, disabled_ips: [] });
+    };
+  }
+
+  $("btn-save-endpoint").onclick = () => saveAdminEndpointSettings();
 
   $("cluster-nodes-tbody").onchange = (e) => {
     const driveSel = e.target.closest("[data-drive-select]");
