@@ -115,6 +115,9 @@ func (s *Server) SetUpdater(u *updater.Manager) {
 		s.cluster.SetOnPeerVersionSync(func(peer cluster.NodeStatus) {
 			_, _ = s.syncSinglePeerVersion(peer)
 		})
+		s.cluster.SetOnPeerVersionAhead(func(peer cluster.NodeStatus) {
+			s.syncFromAheadPeerOrGitHub(peer)
+		})
 		s.cluster.SetOnEntryVersionAhead(func(entryURL, entryVersion string) {
 			_ = s.pullAndInstallFromEntry(entryURL, entryVersion)
 		})
@@ -424,6 +427,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/cluster/promote", s.requireAdmin(s.handleAdminClusterPromote))
 	mux.HandleFunc("POST /api/admin/cluster/leave", s.requireAdmin(s.handleAdminClusterLeave))
 	mux.HandleFunc("POST /api/admin/cluster/upgrade-nodes", s.requireAdmin(s.handleAdminClusterUpgradeNodes))
+	mux.HandleFunc("POST /api/admin/cluster/reconcile-versions", s.requireAdmin(s.handleAdminClusterReconcileVersions))
 	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{nodeID}", s.requireAdmin(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
@@ -446,9 +450,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/invites", s.requireAdmin(s.handleCreateInvite))
 	mux.HandleFunc("DELETE /api/admin/invites/{code}", s.requireAdmin(s.handleDeleteInvite))
 	mux.HandleFunc("GET /api/admin/update", s.requireAdmin(s.handleGetUpdateStatus))
+	mux.HandleFunc("GET /api/admin/update/releases", s.requireAdmin(s.handleListUpdateReleases))
 	mux.HandleFunc("POST /api/admin/update/config", s.requireAdmin(s.handleSaveUpdateConfig))
 	mux.HandleFunc("POST /api/admin/update/check", s.requireAdmin(s.handleCheckUpdate))
 	mux.HandleFunc("POST /api/admin/update/apply", s.requireAdmin(s.handleApplyUpdate))
+	mux.HandleFunc("POST /api/admin/update/switch", s.requireAdmin(s.handleSwitchVersion))
 	mux.HandleFunc("GET /api/admin/audit", s.requireAdmin(s.handleAdminAudit))
 	mux.HandleFunc("POST /api/admin/integrity/scrub", s.requireAdmin(s.handleAdminIntegrityScrub))
 	mux.HandleFunc("GET /api/admin/integrity/status", s.requireAdmin(s.handleAdminIntegrityStatus))
@@ -1789,6 +1795,37 @@ func (s *Server) handleApplyUpdate(w http.ResponseWriter, r *http.Request, u aut
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "升级组件未启用"})
 		return
 	}
+	cur := up.Status()
+	if !cur.HasUpdate || strings.TrimSpace(cur.LatestVersion) == "" {
+		st, err := up.StartApplyAsync()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":  err.Error(),
+				"status": st,
+			})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": st})
+		return
+	}
+
+	pool := s.cluster.PoolSummaryForRole(true)
+	onlinePeers := 0
+	for _, n := range pool.Nodes {
+		if !n.IsSelf && n.Online {
+			onlinePeers++
+		}
+	}
+	if onlinePeers > 0 {
+		out, err := s.applyClusterSynchronizedVersion(r.Context(), u.Username, cur.LatestVersion, true)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, out)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, out)
+		return
+	}
+
 	st, err := up.StartApplyAsync()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -1798,6 +1835,84 @@ func (s *Server) handleApplyUpdate(w http.ResponseWriter, r *http.Request, u aut
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": st})
+}
+
+func (s *Server) handleListUpdateReleases(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	up := s.getUpdater()
+	if up == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "升级组件未启用"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	releases, err := up.ListReleases(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":  err.Error(),
+			"status": up.Status(),
+			"pool":   s.cluster.PoolSummaryForRole(true),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"releases": releases,
+		"status":   up.Status(),
+		"pool":     s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleSwitchVersion(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	up := s.getUpdater()
+	if up == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "升级组件未启用"})
+		return
+	}
+	var req struct {
+		TargetVersion string `json:"target_version"`
+		SyncCluster   *bool  `json:"sync_cluster"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	targetVer := strings.TrimSpace(req.TargetVersion)
+	if targetVer == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请指定目标版本号"})
+		return
+	}
+	syncCluster := req.SyncCluster == nil || *req.SyncCluster
+
+	out, err := s.applyClusterSynchronizedVersion(r.Context(), u.Username, targetVer, syncCluster)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, out)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, out)
+}
+
+func (s *Server) handleAdminClusterReconcileVersions(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		Strategy string `json:"strategy"` // auto | highest_node | github_latest
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	strategy := strings.TrimSpace(strings.ToLower(req.Strategy))
+	if strategy == "" {
+		strategy = "auto"
+	}
+	if strategy != "auto" && strategy != "highest_node" && strategy != "github_latest" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的同步策略，仅支持 auto / highest_node / github_latest"})
+		return
+	}
+
+	out, err := s.reconcileClusterVersions(r.Context(), u.Username, strategy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, out)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
@@ -2149,13 +2264,326 @@ func (s *Server) syncSinglePeerVersion(peer cluster.NodeStatus) (peerUpgradeResu
 		proxyURL = st.ProxyURL
 	}
 	res.Method = "github_release"
-	if ghErr := s.cluster.TriggerPeerGitHubUpgrade(peer, repo, proxyURL, targetVer); ghErr != nil {
+	if ghErr := s.cluster.TriggerPeerGitHubUpgrade(peer, repo, proxyURL, targetVer, false); ghErr != nil {
 		res.Error = ghErr.Error()
 		return res, ghErr
 	}
 	res.OK = true
 	res.Message = fmt.Sprintf("已指令异构节点 %s (%s/%s) 在线同步升级至 %s", peer.NodeName, peer.OS, peer.Arch, targetVer)
 	return res, nil
+}
+
+type cachedPlatformBin struct {
+	path    string
+	shaHex  string
+	cleanup func()
+}
+
+// applyClusterSynchronizedVersion enforces cluster-wide atomic rollout/rollback:
+// all online worker nodes switch to targetVersion FIRST; if any online worker fails,
+// Entry aborts before switching to prevent split/mixed-version cluster state.
+func (s *Server) applyClusterSynchronizedVersion(ctx context.Context, actor, targetVersion string, syncCluster bool) (map[string]any, error) {
+	up := s.getUpdater()
+	if up == nil {
+		return map[string]any{"error": "升级组件未启用"}, errors.New("升级组件未启用")
+	}
+	targetVer := strings.TrimSpace(targetVersion)
+	if targetVer == "" {
+		return map[string]any{"error": "请指定目标版本号"}, errors.New("请指定目标版本号")
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+
+	// Pre-validate release exists for self whenever self version will change.
+	selfChanged := updater.CompareVersions(targetVer, version.Version) != 0
+	if selfChanged {
+		rel, err := up.FetchReleaseByTag(opCtx, targetVer)
+		if err != nil {
+			return map[string]any{"error": err.Error(), "status": up.Status()}, err
+		}
+		if !rel.HasAsset || rel.AssetURL == "" {
+			err := fmt.Errorf("版本 %s 未附带主节点平台 (%s/%s) 的发布包，已取消集群切换", rel.TagName, runtime.GOOS, runtime.GOARCH)
+			return map[string]any{"error": err.Error(), "status": up.Status()}, err
+		}
+		targetVer = rel.TagName
+	}
+
+	pool := s.cluster.PoolSummaryForRole(true)
+	results := make([]peerUpgradeResult, 0)
+	binCache := map[string]cachedPlatformBin{}
+	defer func() {
+		for _, item := range binCache {
+			if item.cleanup != nil {
+				item.cleanup()
+			}
+		}
+	}()
+
+	if syncCluster {
+		repo := version.DefaultRepo
+		proxyURL := ""
+		st := up.Status()
+		if st.Repo != "" {
+			repo = st.Repo
+		}
+		proxyURL = st.ProxyURL
+
+		var failedNodes []string
+		for _, peer := range pool.Nodes {
+			if peer.IsSelf || !peer.Online {
+				continue
+			}
+			if peer.Version != "" && updater.CompareVersions(peer.Version, targetVer) == 0 {
+				results = append(results, peerUpgradeResult{
+					NodeID:        peer.NodeID,
+					NodeName:      peer.NodeName,
+					FromVersion:   peer.Version,
+					TargetVersion: targetVer,
+					Method:        "already_synced",
+					OK:            true,
+					Message:       fmt.Sprintf("节点 %s 已处于版本 %s", peer.NodeName, targetVer),
+				})
+				continue
+			}
+
+			res := peerUpgradeResult{
+				NodeID:        peer.NodeID,
+				NodeName:      peer.NodeName,
+				FromVersion:   peer.Version,
+				TargetVersion: targetVer,
+			}
+			goos := strings.ToLower(strings.TrimSpace(peer.OS))
+			goarch := strings.ToLower(strings.TrimSpace(peer.Arch))
+			if goos == "" {
+				goos = runtime.GOOS
+			}
+			if goarch == "" {
+				goarch = runtime.GOARCH
+			}
+			cacheKey := goos + "/" + goarch
+
+			var binPath, shaHex string
+			if !selfChanged {
+				if p, sHex, _, lErr := s.resolveLocalPlatformBinary(goos, goarch); lErr == nil && p != "" {
+					binPath, shaHex = p, sHex
+				}
+			} else if cached, ok := binCache[cacheKey]; ok {
+				binPath, shaHex = cached.path, cached.shaHex
+			} else if p, sHex, cleanup, dlErr := up.DownloadReleaseAsset(opCtx, targetVer, goos, goarch); dlErr == nil && p != "" {
+				binCache[cacheKey] = cachedPlatformBin{path: p, shaHex: sHex, cleanup: cleanup}
+				binPath, shaHex = p, sHex
+			}
+
+			pushed := false
+			if binPath != "" {
+				res.Method = "lan_binary_push"
+				if pushErr := s.cluster.PushBinaryToPeer(peer, binPath, shaHex, targetVer); pushErr == nil {
+					pushed = true
+					res.OK = true
+					res.Message = fmt.Sprintf("已推送目标版本 %s 至节点 %s", targetVer, peer.NodeName)
+				} else {
+					res.Error = pushErr.Error()
+				}
+			}
+			if !pushed {
+				res.Method = "github_release"
+				if ghErr := s.cluster.TriggerPeerGitHubUpgrade(peer, repo, proxyURL, targetVer, true); ghErr == nil {
+					res.OK = true
+					res.Error = ""
+					res.Message = fmt.Sprintf("已指令节点 %s 从 GitHub 切换至 %s", peer.NodeName, targetVer)
+				} else {
+					if res.Error != "" {
+						res.Error = res.Error + "；GitHub 备选失败：" + ghErr.Error()
+					} else {
+						res.Error = ghErr.Error()
+					}
+				}
+			}
+			results = append(results, res)
+			if !res.OK {
+				failedNodes = append(failedNodes, fmt.Sprintf("%s(%s)", peer.NodeName, res.Error))
+			}
+		}
+
+		if len(failedNodes) > 0 {
+			err := fmt.Errorf("强一致约束拦截：分节点未完成版本切换（%s），主节点已中止切换以避免版本混用", strings.Join(failedNodes, "；"))
+			return map[string]any{
+				"error":          err.Error(),
+				"target_version": targetVer,
+				"results":        results,
+				"status":         up.Status(),
+				"pool":           s.cluster.PoolSummaryForRole(true),
+			}, err
+		}
+	}
+
+	curStatus := up.Status()
+	if selfChanged {
+		var err error
+		curStatus, err = up.StartSwitchVersionAsync(targetVer)
+		if err != nil {
+			return map[string]any{
+				"error":          err.Error(),
+				"target_version": targetVer,
+				"results":        results,
+				"status":         curStatus,
+				"pool":           s.cluster.PoolSummaryForRole(true),
+			}, err
+		}
+	}
+
+	if s.audit != nil && actor != "" {
+		s.audit.Log(actor, "cluster_version_switch", targetVer, "", "ok", fmt.Sprintf("集群版本统一切换至 %s（同步节点数：%d）", targetVer, len(results)))
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: s.cluster.NodeName(),
+	})
+
+	return map[string]any{
+		"ok":             true,
+		"target_version": targetVer,
+		"sync_cluster":   syncCluster,
+		"results":        results,
+		"status":         curStatus,
+		"pool":           s.cluster.PoolSummaryForRole(true),
+	}, nil
+}
+
+// reconcileClusterVersions converges mismatched nodes with two-tier priority:
+// Tier 1 (highest_node / auto): sync cluster from the highest-version online node.
+// Tier 2 (github_latest or Tier 1 fallback): sync entire cluster to GitHub latest release.
+func (s *Server) reconcileClusterVersions(ctx context.Context, actor, strategy string) (map[string]any, error) {
+	up := s.getUpdater()
+	if up == nil {
+		return map[string]any{"error": "升级组件未启用"}, errors.New("升级组件未启用")
+	}
+	pool := s.cluster.PoolSummaryForRole(true)
+
+	var highestNode cluster.NodeStatus
+	highestVer := version.Version
+	foundHighest := false
+	for _, n := range pool.Nodes {
+		if !n.Online {
+			continue
+		}
+		v := strings.TrimSpace(n.Version)
+		if v == "" {
+			v = "V0.11.21.4"
+		}
+		if !foundHighest || updater.CompareVersions(v, highestVer) > 0 {
+			highestVer = v
+			highestNode = n
+			foundHighest = true
+		}
+	}
+
+	if strategy == "auto" || strategy == "highest_node" {
+		if foundHighest && !highestNode.IsSelf && updater.CompareVersions(highestVer, version.Version) > 0 && highestNode.HTTPURL != "" {
+			rc, verHeader, shaHeader, pullErr := s.cluster.PullBinaryFromPeer(highestNode.HTTPURL, runtime.GOOS, runtime.GOARCH)
+			if pullErr == nil && rc != nil {
+				func() {
+					defer rc.Close()
+					useVer := strings.TrimSpace(verHeader)
+					if useVer == "" {
+						useVer = highestVer
+					}
+					pCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+					defer cancel()
+					pullErr = up.ApplyBinaryStream(pCtx, rc, useVer, shaHeader, true)
+				}()
+				if pullErr == nil {
+					if s.audit != nil && actor != "" {
+						s.audit.Log(actor, "cluster_version_reconcile", highestNode.NodeName, "", "ok", fmt.Sprintf("Priority 1：按最高节点 %s (%s) 同步主节点", highestNode.NodeName, highestVer))
+					}
+					s.events.Publish(FileChangeEvent{Kind: "cluster_sync", NodeName: s.cluster.NodeName()})
+					return map[string]any{
+						"ok":             true,
+						"strategy_used":  "highest_node_pull",
+						"source_node":    highestNode.NodeName,
+						"target_version": highestVer,
+						"status":         up.Status(),
+						"pool":           s.cluster.PoolSummaryForRole(true),
+					}, nil
+				}
+			}
+			if strategy == "highest_node" {
+				errMsg := "从最高版本节点拉取程序失败"
+				if pullErr != nil {
+					errMsg = pullErr.Error()
+				}
+				return map[string]any{"error": errMsg, "pool": s.cluster.PoolSummaryForRole(true)}, errors.New(errMsg)
+			}
+			// strategy == "auto" falls through to Tier 2 (GitHub latest)
+		} else if !pool.VersionConsistent && updater.CompareVersions(version.Version, highestVer) >= 0 {
+			// Entry is already >= highest online peer; push Entry version to all lagging online workers.
+			var results []peerUpgradeResult
+			var failed []string
+			for _, peer := range pool.Nodes {
+				if peer.IsSelf || !peer.Online {
+					continue
+				}
+				if peer.Version != "" && updater.CompareVersions(peer.Version, version.Version) == 0 {
+					continue
+				}
+				res, err := s.syncSinglePeerVersion(peer)
+				results = append(results, res)
+				if err != nil {
+					failed = append(failed, peer.NodeName+": "+err.Error())
+				}
+			}
+			if len(failed) == 0 {
+				if s.audit != nil && actor != "" {
+					s.audit.Log(actor, "cluster_version_reconcile", version.Version, "", "ok", fmt.Sprintf("Priority 1：按主节点 %s 对齐全集群版本（%d 个落后节点）", version.Version, len(results)))
+				}
+				s.events.Publish(FileChangeEvent{Kind: "cluster_sync", NodeName: s.cluster.NodeName()})
+				return map[string]any{
+					"ok":             true,
+					"strategy_used":  "highest_node_push",
+					"source_node":    s.cluster.NodeName(),
+					"target_version": version.Version,
+					"results":        results,
+					"pool":           s.cluster.PoolSummaryForRole(true),
+				}, nil
+			}
+			if strategy == "highest_node" {
+				err := fmt.Errorf("按最高节点同步分节点失败：%s", strings.Join(failed, "；"))
+				return map[string]any{"error": err.Error(), "results": results, "pool": s.cluster.PoolSummaryForRole(true)}, err
+			}
+		} else if strategy == "highest_node" && pool.VersionConsistent {
+			return map[string]any{
+				"ok":             true,
+				"strategy_used":  "highest_node",
+				"target_version": version.Version,
+				"message":        "当前集群所有在线节点版本已保持一致",
+				"pool":           pool,
+			}, nil
+		}
+	}
+
+	// Priority 2: Sync entire cluster from GitHub repository's latest release.
+	cCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	st, checkErr := up.CheckNow(cCtx)
+	cancel()
+	if checkErr != nil {
+		return map[string]any{"error": checkErr.Error(), "status": st, "pool": s.cluster.PoolSummaryForRole(true)}, checkErr
+	}
+	latestVer := strings.TrimSpace(st.LatestVersion)
+	if latestVer == "" {
+		latestVer = version.Version
+	}
+	out, err := s.applyClusterSynchronizedVersion(ctx, actor, latestVer, true)
+	if err == nil {
+		out["strategy_used"] = "github_latest"
+	}
+	return out, err
+}
+
+func (s *Server) syncFromAheadPeerOrGitHub(peer cluster.NodeStatus) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	_, _ = s.reconcileClusterVersions(ctx, "auto-sync", "auto")
 }
 
 func (s *Server) pullAndInstallFromEntry(entryURL, targetVersion string) error {
@@ -2235,13 +2663,27 @@ func (s *Server) handleClusterUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Repo          string `json:"repo"`
-		ProxyURL      string `json:"proxy_url"`
-		TargetVersion string `json:"target_version"`
+		Repo           string `json:"repo"`
+		ProxyURL       string `json:"proxy_url"`
+		TargetVersion  string `json:"target_version"`
+		AllowDowngrade bool   `json:"allow_downgrade"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Repo != "" || req.ProxyURL != "" {
 		_, _ = u.UpdateConfig(req.Repo, req.ProxyURL, nil)
+	}
+	targetVer := strings.TrimSpace(req.TargetVersion)
+	if targetVer != "" && (req.AllowDowngrade || updater.CompareVersions(targetVer, version.Version) != 0) {
+		st, err := u.StartSwitchVersionAsync(targetVer)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": st,
+		})
+		return
 	}
 	if _, err := u.CheckNow(r.Context()); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

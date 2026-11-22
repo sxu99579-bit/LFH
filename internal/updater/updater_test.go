@@ -42,6 +42,8 @@ func TestCompareVersions(t *testing.T) {
 		{"V0.11.21.12", "V0.11.21.11", 1},
 		{"V0.11.21.13", "V0.11.21.12", 1},
 		{"V0.11.22.0", "V0.11.21.13", 1},
+		{"V0.11.22.1", "V0.11.22.0", 1},
+		{"V0.12.0", "V0.11.22.1", 1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersions(tc.a, tc.b); got != tc.want {
@@ -261,5 +263,101 @@ func TestApplyBinaryStreamAndLocalBinaryForPlatform(t *testing.T) {
 	got, _ := os.ReadFile(fakeExe)
 	if string(got) != string(pushed) {
 		t.Fatalf("expected fakeExe updated to pushed payload, got %q", string(got))
+	}
+}
+
+func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
+	assetName := "lfh-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		assetName += ".exe"
+	}
+	oldBytes := []byte("LFH-ROLLBACK-BINARY-V0.11.21.13")
+	oldSum := sha256.Sum256(oldBytes)
+	oldHex := hex.EncodeToString(oldSum[:])
+
+	curBytes := []byte("LFH-CURRENT-BINARY-V0.11.22.1")
+	curSum := sha256.Sum256(curBytes)
+	curHex := hex.EncodeToString(curSum[:])
+
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/tester/LFH/releases":
+			_ = json.NewEncoder(w).Encode([]githubRelease{
+				{
+					TagName:     "V0.11.22.1",
+					Name:        "V0.11.22.1",
+					PublishedAt: "2026-11-22T10:00:00Z",
+					Assets: []ReleaseAsset{
+						{Name: assetName, Size: int64(len(curBytes)), BrowserDownloadURL: ts.URL + "/dl/cur/" + assetName},
+						{Name: "checksums.txt", Size: 128, BrowserDownloadURL: ts.URL + "/dl/cur/checksums.txt"},
+					},
+				},
+				{
+					TagName:     "V0.11.21.13",
+					Name:        "V0.11.21.13",
+					PublishedAt: "2026-11-21T20:00:00Z",
+					Assets: []ReleaseAsset{
+						{Name: assetName, Size: int64(len(oldBytes)), BrowserDownloadURL: ts.URL + "/dl/old/" + assetName},
+						{Name: "checksums.txt", Size: 128, BrowserDownloadURL: ts.URL + "/dl/old/checksums.txt"},
+					},
+				},
+			})
+		case "/repos/tester/LFH/releases/tags/V0.11.21.13":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "V0.11.21.13",
+				Name:    "V0.11.21.13",
+				Assets: []ReleaseAsset{
+					{Name: assetName, Size: int64(len(oldBytes)), BrowserDownloadURL: ts.URL + "/dl/old/" + assetName},
+					{Name: "checksums.txt", Size: 128, BrowserDownloadURL: ts.URL + "/dl/old/checksums.txt"},
+				},
+			})
+		case "/dl/old/" + assetName:
+			_, _ = w.Write(oldBytes)
+		case "/dl/old/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", oldHex, assetName)
+		case "/dl/cur/" + assetName:
+			_, _ = w.Write(curBytes)
+		case "/dl/cur/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", curHex, assetName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	fakeExe := filepath.Join(dir, "lfh.exe")
+	if err := os.WriteFile(fakeExe, curBytes, 0755); err != nil {
+		t.Fatalf("write fakeExe: %v", err)
+	}
+	mgr, err := NewManager(dir, "tester/LFH")
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	var handedVersion string
+	mgr.SetCallbacks(func(exePath, backupPath, targetVersion string) error {
+		handedVersion = targetVersion
+		return nil
+	}, nil, nil)
+	mgr.SetTestOverrides(ts.URL, func() (string, error) { return fakeExe, nil }, func(ctx context.Context, binPath string) error { return nil })
+
+	releases, err := mgr.ListReleases(context.Background())
+	if err != nil || len(releases) != 2 {
+		t.Fatalf("ListReleases failed: err=%v releases=%+v", err, releases)
+	}
+	if !releases[0].IsCurrent || releases[0].Relation != "current" || releases[1].Relation != "older" {
+		t.Fatalf("unexpected release relations: %+v", releases)
+	}
+
+	if err := mgr.ApplyTargetVersionSync(context.Background(), "V0.11.21.13"); err != nil {
+		t.Fatalf("ApplyTargetVersionSync rollback failed: %v", err)
+	}
+	if handedVersion != "V0.11.21.13" {
+		t.Fatalf("expected rollback handoff V0.11.21.13, got %q", handedVersion)
+	}
+	got, _ := os.ReadFile(fakeExe)
+	if string(got) != string(oldBytes) {
+		t.Fatalf("expected binary rolled back to oldBytes, got %q", string(got))
 	}
 }

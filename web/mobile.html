@@ -317,7 +317,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.22.0</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.22.1</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -384,7 +384,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.22.0</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.22.1</span></div>
           <div class="brand-sub">多维筛选与存储池总览</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
@@ -489,6 +489,14 @@
             <span class="live-dot"></span>
             <span id="live-sync-text">实时</span>
           </button>
+        </div>
+      </div>
+
+      <div id="cluster-version-alert" class="version-alert-bar hidden">
+        <div id="cluster-version-alert-text" class="version-alert-text">检测到集群节点版本不一致，请统一同步。</div>
+        <div class="row-actions">
+          <button id="btn-banner-reconcile-highest" class="btn btn-primary btn-xs" type="button">按最高节点同步</button>
+          <button id="btn-banner-reconcile-github" class="btn btn-ghost btn-xs" type="button">按 GitHub 最新版同步</button>
         </div>
       </div>
 
@@ -1200,7 +1208,7 @@
             </div>
             <div class="update-status-card">
               <div class="update-meta-grid">
-                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.22.0</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.22.1</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>
@@ -1211,6 +1219,25 @@
                 <span id="upd-progress-text" class="progress-text">0%</span>
               </div>
               <div id="upd-notes-box" class="update-notes-box hidden"></div>
+            </div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">全集群版本切换与退回</div>
+              <button id="btn-load-releases" class="btn btn-ghost btn-xs" type="button">刷新版本列表</button>
+            </div>
+            <p class="setting-hint">强一致约束：所有在线节点同时切换或退回，不允许混合版本运行。</p>
+            <div id="upd-cluster-consistency" class="info-box" style="margin-bottom:10px;">正在检测全集群版本一致性...</div>
+            <div class="version-switch-row">
+              <select id="upd-target-version-select" class="field-select">
+                <option value="">点击「刷新版本列表」获取版本...</option>
+              </select>
+              <button id="btn-switch-version" class="btn btn-primary btn-xs" type="button">全集群切换/退回至所选版本</button>
+            </div>
+            <div class="row-actions" style="margin-top:8px;flex-wrap:wrap;">
+              <button id="btn-reconcile-highest" class="btn btn-ghost btn-xs" type="button">按最高节点同步全集群</button>
+              <button id="btn-reconcile-github" class="btn btn-ghost btn-xs" type="button">按 GitHub 最新版同步全集群</button>
             </div>
           </div>
 

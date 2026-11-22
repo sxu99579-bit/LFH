@@ -154,17 +154,21 @@ type NodeStatus struct {
 }
 
 type PoolSummary struct {
-	EntryURL        string       `json:"entry_url"`
-	EntryVersion    string       `json:"entry_version,omitempty"`
-	AutoSyncWorkers bool         `json:"auto_sync_workers"`
-	PrimaryNodeID   string       `json:"primary_node_id,omitempty"`
-	TotalNodes      int          `json:"total_nodes"`
-	OnlineNodes     int          `json:"online_nodes"`
-	TotalQuotaBytes int64        `json:"total_quota_bytes"`
-	TotalUsedBytes  int64        `json:"total_used_bytes"`
-	TotalFreeBytes  int64        `json:"total_free_bytes"`
-	TotalFileCount  int          `json:"total_file_count"`
-	Nodes           []NodeStatus `json:"nodes"`
+	EntryURL           string       `json:"entry_url"`
+	EntryVersion       string       `json:"entry_version,omitempty"`
+	AutoSyncWorkers    bool         `json:"auto_sync_workers"`
+	PrimaryNodeID      string       `json:"primary_node_id,omitempty"`
+	VersionConsistent  bool         `json:"version_consistent"`
+	MismatchedNodes    []string     `json:"mismatched_nodes,omitempty"`
+	HighestNodeVersion string       `json:"highest_node_version,omitempty"`
+	HighestNodeID      string       `json:"highest_node_id,omitempty"`
+	TotalNodes         int          `json:"total_nodes"`
+	OnlineNodes        int          `json:"online_nodes"`
+	TotalQuotaBytes    int64        `json:"total_quota_bytes"`
+	TotalUsedBytes     int64        `json:"total_used_bytes"`
+	TotalFreeBytes     int64        `json:"total_free_bytes"`
+	TotalFileCount     int          `json:"total_file_count"`
+	Nodes              []NodeStatus `json:"nodes"`
 }
 
 type HeartbeatPayload struct {
@@ -231,6 +235,7 @@ type Manager struct {
 	loopCancel          context.CancelFunc
 	onPeerChange        func(nodeName string, online bool)
 	onPeerVersionSync   func(peer NodeStatus)
+	onPeerVersionAhead  func(peer NodeStatus)
 	onEntryVersionAhead func(entryURL, entryVersion string)
 	onClipboardToggle   func(enabled bool)
 	lastSelfSyncAttempt time.Time
@@ -804,16 +809,19 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		lastProbed = now
 	}
 	autoSyncEnabled := m.cfg.AutoSyncWorkers == nil || *m.cfg.AutoSyncWorkers
-	syncCb := m.onPeerVersionSync
-	needVersionSync := m.cfg.Role == RoleEntry &&
-		autoSyncEnabled &&
-		syncCb != nil &&
-		n.HTTPURL != "" &&
-		n.Version != "" &&
-		compareClusterVersions(n.Version, version.Version) < 0 &&
-		now.Sub(lastUpgradeSync) > 25*time.Second
-	if needVersionSync {
-		lastUpgradeSync = now
+	var syncCb func(peer NodeStatus)
+	needVersionSync := false
+	if m.cfg.Role == RoleEntry && autoSyncEnabled && n.HTTPURL != "" && n.Version != "" && now.Sub(lastUpgradeSync) > 25*time.Second {
+		cmp := compareClusterVersions(n.Version, version.Version)
+		if cmp < 0 && m.onPeerVersionSync != nil {
+			needVersionSync = true
+			syncCb = m.onPeerVersionSync
+			lastUpgradeSync = now
+		} else if cmp > 0 && m.onPeerVersionAhead != nil {
+			needVersionSync = true
+			syncCb = m.onPeerVersionAhead
+			lastUpgradeSync = now
+		}
 	}
 	changed := !exists ||
 		!prev.wasOnline ||
@@ -899,13 +907,18 @@ func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
 		autoSyncEnabled := m.cfg.AutoSyncWorkers == nil || *m.cfg.AutoSyncWorkers
 		if m.cfg.Role == RoleEntry &&
 			autoSyncEnabled &&
-			m.onPeerVersionSync != nil &&
 			p.status.Version != "" &&
-			compareClusterVersions(p.status.Version, version.Version) < 0 &&
 			time.Since(p.lastUpgradeSync) > 25*time.Second {
-			p.lastUpgradeSync = time.Now()
-			syncCb = m.onPeerVersionSync
-			peerSnap = p.status
+			cmp := compareClusterVersions(p.status.Version, version.Version)
+			if cmp < 0 && m.onPeerVersionSync != nil {
+				p.lastUpgradeSync = time.Now()
+				syncCb = m.onPeerVersionSync
+				peerSnap = p.status
+			} else if cmp > 0 && m.onPeerVersionAhead != nil {
+				p.lastUpgradeSync = time.Now()
+				syncCb = m.onPeerVersionAhead
+				peerSnap = p.status
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -923,6 +936,12 @@ func (m *Manager) SetOnPeerChange(fn func(nodeName string, online bool)) {
 func (m *Manager) SetOnPeerVersionSync(fn func(peer NodeStatus)) {
 	m.mu.Lock()
 	m.onPeerVersionSync = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetOnPeerVersionAhead(fn func(peer NodeStatus)) {
+	m.mu.Lock()
+	m.onPeerVersionAhead = fn
 	m.mu.Unlock()
 }
 
@@ -1074,16 +1093,17 @@ func (m *Manager) PushBinaryToPeer(peer NodeStatus, binPath, sha256Hex, targetVe
 	return nil
 }
 
-// TriggerPeerGitHubUpgrade instructs an online worker peer (e.g. different OS/Arch) to upgrade from GitHub Release.
-func (m *Manager) TriggerPeerGitHubUpgrade(peer NodeStatus, repo, proxyURL, targetVersion string) error {
+// TriggerPeerGitHubUpgrade instructs an online worker peer (e.g. different OS/Arch) to switch version from GitHub Release.
+func (m *Manager) TriggerPeerGitHubUpgrade(peer NodeStatus, repo, proxyURL, targetVersion string, allowDowngrade bool) error {
 	peerURL := strings.TrimRight(strings.TrimSpace(peer.HTTPURL), "/")
 	if peerURL == "" {
 		return errors.New("目标从节点缺少有效 HTTP 地址")
 	}
-	payload, _ := json.Marshal(map[string]string{
-		"repo":           repo,
-		"proxy_url":      proxyURL,
-		"target_version": targetVersion,
+	payload, _ := json.Marshal(map[string]any{
+		"repo":            repo,
+		"proxy_url":       proxyURL,
+		"target_version":  targetVersion,
+		"allow_downgrade": allowDowngrade,
 	})
 	req, err := http.NewRequest(http.MethodPost, peerURL+"/internal/cluster/upgrade", bytes.NewReader(payload))
 	if err != nil {
@@ -1117,16 +1137,21 @@ func (m *Manager) TriggerPeerGitHubUpgrade(peer NodeStatus, repo, proxyURL, targ
 	return nil
 }
 
-// PullBinaryFromEntry downloads the matching platform binary directly from the Primary node over LAN.
-func (m *Manager) PullBinaryFromEntry(entryURL string) (io.ReadCloser, string, string, error) {
-	cleanEntry := strings.TrimRight(strings.TrimSpace(entryURL), "/")
-	if cleanEntry == "" {
-		cleanEntry = strings.TrimRight(strings.TrimSpace(m.EntryURL()), "/")
+// PullBinaryFromPeer downloads a matching platform binary from any cluster node over LAN.
+func (m *Manager) PullBinaryFromPeer(peerURL, targetOS, targetArch string) (io.ReadCloser, string, string, error) {
+	cleanPeer := strings.TrimRight(strings.TrimSpace(peerURL), "/")
+	if cleanPeer == "" {
+		return nil, "", "", errors.New("未找到目标节点地址")
 	}
-	if cleanEntry == "" {
-		return nil, "", "", errors.New("未找到主节点地址")
+	goos := strings.TrimSpace(targetOS)
+	if goos == "" {
+		goos = runtime.GOOS
 	}
-	target := fmt.Sprintf("%s/internal/cluster/binary?os=%s&arch=%s", cleanEntry, runtime.GOOS, runtime.GOARCH)
+	goarch := strings.TrimSpace(targetArch)
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	target := fmt.Sprintf("%s/internal/cluster/binary?os=%s&arch=%s", cleanPeer, goos, goarch)
 	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {
 		return nil, "", "", err
@@ -1139,9 +1164,21 @@ func (m *Manager) PullBinaryFromEntry(entryURL string) (io.ReadCloser, string, s
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_ = resp.Body.Close()
-		return nil, "", "", fmt.Errorf("从主节点拉取二进制程序失败 (HTTP %d)", resp.StatusCode)
+		return nil, "", "", fmt.Errorf("从节点拉取二进制程序失败 (HTTP %d)", resp.StatusCode)
 	}
 	return resp.Body, resp.Header.Get("X-LFH-Target-Version"), resp.Header.Get("X-LFH-Binary-SHA256"), nil
+}
+
+// PullBinaryFromEntry downloads the matching platform binary directly from the Primary node over LAN.
+func (m *Manager) PullBinaryFromEntry(entryURL string) (io.ReadCloser, string, string, error) {
+	cleanEntry := strings.TrimRight(strings.TrimSpace(entryURL), "/")
+	if cleanEntry == "" {
+		cleanEntry = strings.TrimRight(strings.TrimSpace(m.EntryURL()), "/")
+	}
+	if cleanEntry == "" {
+		return nil, "", "", errors.New("未找到主节点地址")
+	}
+	return m.PullBinaryFromPeer(cleanEntry, runtime.GOOS, runtime.GOARCH)
 }
 
 // SetPeerLastSeenForTest adjusts a peer's recorded heartbeat time for offline/recovery testing.
@@ -1233,6 +1270,8 @@ func (m *Manager) PoolSummary() PoolSummary {
 		TotalNodes:      len(nodes),
 		Nodes:           nodes,
 	}
+	highestVer := version.Version
+	highestNodeID := self.NodeID
 	for _, n := range nodes {
 		if n.Online {
 			summary.OnlineNodes++
@@ -1240,8 +1279,29 @@ func (m *Manager) PoolSummary() PoolSummary {
 			summary.TotalUsedBytes += n.UsedBytes
 			summary.TotalFreeBytes += n.FreeBytes
 			summary.TotalFileCount += n.FileCount
+			if n.Version != "" && compareClusterVersions(n.Version, highestVer) > 0 {
+				highestVer = n.Version
+				highestNodeID = n.NodeID
+			}
 		}
 	}
+	var mismatched []string
+	for _, n := range nodes {
+		if !n.Online {
+			continue
+		}
+		ver := strings.TrimSpace(n.Version)
+		if ver == "" {
+			ver = "V0.11.21.4"
+		}
+		if compareClusterVersions(ver, highestVer) != 0 {
+			mismatched = append(mismatched, n.NodeID)
+		}
+	}
+	summary.VersionConsistent = len(mismatched) == 0
+	summary.MismatchedNodes = mismatched
+	summary.HighestNodeVersion = highestVer
+	summary.HighestNodeID = highestNodeID
 	return summary
 }
 
@@ -3525,7 +3585,12 @@ func (m *Manager) SelectComputeNode(capability, pluginID, preferredNodeID string
 		cap  plugins.CapabilitySummary
 	}
 	var candidates []candidate
+	skippedMismatch := 0
 	for _, n := range m.onlineClusterNodesSnapshot() {
+		if n.Version != "" && compareClusterVersions(n.Version, version.Version) != 0 {
+			skippedMismatch++
+			continue
+		}
 		for _, p := range n.Plugins {
 			if !p.Enabled {
 				continue
@@ -3549,6 +3614,9 @@ func (m *Manager) SelectComputeNode(capability, pluginID, preferredNodeID string
 		}
 	}
 	if len(candidates) == 0 {
+		if skippedMismatch > 0 {
+			return NodeStatus{}, plugins.CapabilitySummary{}, errors.New("算力节点与主节点版本不一致，已禁止跨版本混用，请先执行全集群版本同步")
+		}
 		return NodeStatus{}, plugins.CapabilitySummary{}, errors.New("当前集群中没有在线且已启用的对应算力插件节点")
 	}
 

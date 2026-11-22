@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,24 @@ type ReleaseAsset struct {
 	Name               string `json:"name"`
 	Size               int64  `json:"size"`
 	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+// ReleaseSummary describes a GitHub Release (including older versions for rollback).
+type ReleaseSummary struct {
+	TagName      string         `json:"tag_name"`
+	Name         string         `json:"name"`
+	PublishedAt  string         `json:"published_at,omitempty"`
+	ReleaseURL   string         `json:"release_url,omitempty"`
+	ReleaseNotes string         `json:"release_notes,omitempty"`
+	Prerelease   bool           `json:"prerelease"`
+	IsCurrent    bool           `json:"is_current"`
+	Relation     string         `json:"relation"` // current | newer | older
+	HasAsset     bool           `json:"has_asset"`
+	AssetName    string         `json:"asset_name,omitempty"`
+	AssetSize    int64          `json:"asset_size,omitempty"`
+	AssetURL     string         `json:"asset_url,omitempty"`
+	ChecksumsURL string         `json:"checksums_url,omitempty"`
+	Assets       []ReleaseAsset `json:"-"`
 }
 
 type githubRelease struct {
@@ -135,6 +154,21 @@ func (m *Manager) SetCallbacks(handoff HandoffFunc, onAvailable, onProgress Even
 	m.handoffFn = handoff
 	m.onAvailable = onAvailable
 	m.onProgress = onProgress
+	m.mu.Unlock()
+}
+
+// SetTestOverrides injects mock GitHub API URL, binary path lookup, and verifier for isolated tests.
+func (m *Manager) SetTestOverrides(apiBaseURL string, exePathFn func() (string, error), verifyFn func(context.Context, string) error) {
+	m.mu.Lock()
+	if strings.TrimSpace(apiBaseURL) != "" {
+		m.apiBaseURL = strings.TrimRight(strings.TrimSpace(apiBaseURL), "/")
+	}
+	if exePathFn != nil {
+		m.exePathFn = exePathFn
+	}
+	if verifyFn != nil {
+		m.verifyFn = verifyFn
+	}
 	m.mu.Unlock()
 }
 
@@ -515,6 +549,246 @@ func (m *Manager) checkTagsFallback(ctx context.Context, repo, nowStr string) (S
 	return st, nil
 }
 
+func buildReleaseSummary(rel githubRelease, targetOS, targetArch string) ReleaseSummary {
+	tag := strings.TrimSpace(rel.TagName)
+	if tag == "" {
+		tag = strings.TrimSpace(rel.Name)
+	}
+	name := strings.TrimSpace(rel.Name)
+	if name == "" {
+		name = tag
+	}
+	cmp := CompareVersions(tag, version.Version)
+	relation := "current"
+	if cmp > 0 {
+		relation = "newer"
+	} else if cmp < 0 {
+		relation = "older"
+	}
+	asset, checksumsURL := SelectAsset(rel.Assets, targetOS, targetArch)
+	return ReleaseSummary{
+		TagName:      tag,
+		Name:         name,
+		PublishedAt:  rel.PublishedAt,
+		ReleaseURL:   rel.HTMLURL,
+		ReleaseNotes: rel.Body,
+		Prerelease:   rel.Prerelease,
+		IsCurrent:    cmp == 0,
+		Relation:     relation,
+		HasAsset:     asset.Name != "" && asset.BrowserDownloadURL != "",
+		AssetName:    asset.Name,
+		AssetSize:    asset.Size,
+		AssetURL:     asset.BrowserDownloadURL,
+		ChecksumsURL: checksumsURL,
+		Assets:       rel.Assets,
+	}
+}
+
+// ListReleases returns published GitHub Releases (or tags fallback), newest first.
+func (m *Manager) ListReleases(ctx context.Context) ([]ReleaseSummary, error) {
+	m.mu.RLock()
+	repo := m.cfg.Repo
+	base := strings.TrimRight(m.apiBaseURL, "/")
+	client := m.httpClient
+	m.mu.RUnlock()
+
+	reqURL := fmt.Sprintf("%s/repos/%s/releases?per_page=30", base, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "LFH/"+version.Version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("连接 GitHub 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return m.listTagsFallback(ctx, base, repo, client)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("GitHub API 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var rels []githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+		return nil, fmt.Errorf("解析 Releases 列表失败: %w", err)
+	}
+	out := make([]ReleaseSummary, 0, len(rels))
+	for _, rel := range rels {
+		if rel.Draft {
+			continue
+		}
+		summary := buildReleaseSummary(rel, runtime.GOOS, runtime.GOARCH)
+		if summary.TagName == "" {
+			continue
+		}
+		out = append(out, summary)
+	}
+	return out, nil
+}
+
+func (m *Manager) listTagsFallback(ctx context.Context, base, repo string, client *http.Client) ([]ReleaseSummary, error) {
+	tagURL := fmt.Sprintf("%s/repos/%s/tags?per_page=30", base, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("查询仓库标签失败 (%d)", resp.StatusCode)
+	}
+	var tags []githubTag
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, err
+	}
+	out := make([]ReleaseSummary, 0, len(tags))
+	for _, t := range tags {
+		tag := strings.TrimSpace(t.Name)
+		if tag == "" {
+			continue
+		}
+		cmp := CompareVersions(tag, version.Version)
+		relation := "current"
+		if cmp > 0 {
+			relation = "newer"
+		} else if cmp < 0 {
+			relation = "older"
+		}
+		out = append(out, ReleaseSummary{
+			TagName:    tag,
+			Name:       tag,
+			ReleaseURL: fmt.Sprintf("https://github.com/%s/releases/tag/%s", repo, url.PathEscape(tag)),
+			IsCurrent:  cmp == 0,
+			Relation:   relation,
+		})
+	}
+	return out, nil
+}
+
+// FetchReleaseByTag retrieves a specific Release by tag (or latest when targetVersion is empty/"latest").
+func (m *Manager) FetchReleaseByTag(ctx context.Context, targetVersion string) (*ReleaseSummary, error) {
+	m.mu.RLock()
+	repo := m.cfg.Repo
+	base := strings.TrimRight(m.apiBaseURL, "/")
+	client := m.httpClient
+	m.mu.RUnlock()
+
+	clean := strings.TrimSpace(targetVersion)
+	var endpoints []string
+	if clean == "" || strings.EqualFold(clean, "latest") {
+		endpoints = []string{fmt.Sprintf("%s/repos/%s/releases/latest", base, repo)}
+	} else {
+		seen := map[string]bool{}
+		addTag := func(tag string) {
+			if tag == "" || seen[tag] {
+				return
+			}
+			seen[tag] = true
+			endpoints = append(endpoints, fmt.Sprintf("%s/repos/%s/releases/tags/%s", base, repo, url.PathEscape(tag)))
+		}
+		addTag(clean)
+		bare := strings.TrimLeft(clean, "vV")
+		if bare != "" {
+			addTag("V" + bare)
+			addTag("v" + bare)
+		}
+	}
+
+	var lastErr error
+	for _, ep := range endpoints {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("User-Agent", "LFH/"+version.Version)
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("连接 GitHub 失败: %w", err)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			var rel githubRelease
+			decErr := json.NewDecoder(resp.Body).Decode(&rel)
+			_ = resp.Body.Close()
+			if decErr != nil {
+				return nil, fmt.Errorf("解析 Release 失败: %w", decErr)
+			}
+			summary := buildReleaseSummary(rel, runtime.GOOS, runtime.GOARCH)
+			return &summary, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		_ = resp.Body.Close()
+		lastErr = fmt.Errorf("未找到版本 %s (%d: %s)", clean, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Fallback: search recent releases list using normalized semantic comparison.
+	if clean != "" && !strings.EqualFold(clean, "latest") {
+		if list, lErr := m.ListReleases(ctx); lErr == nil {
+			for i := range list {
+				if CompareVersions(list[i].TagName, clean) == 0 && len(list[i].Assets) > 0 {
+					copyRel := list[i]
+					return &copyRel, nil
+				}
+			}
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("未找到目标版本 %s", clean)
+	}
+	return nil, lastErr
+}
+
+// DownloadReleaseAsset downloads and verifies the release asset matching targetOS/targetArch into a temp directory.
+func (m *Manager) DownloadReleaseAsset(ctx context.Context, targetVersion, targetOS, targetArch string) (string, string, func(), error) {
+	rel, err := m.FetchReleaseByTag(ctx, targetVersion)
+	if err != nil {
+		return "", "", nil, err
+	}
+	goos := strings.ToLower(strings.TrimSpace(targetOS))
+	goarch := strings.ToLower(strings.TrimSpace(targetArch))
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	asset, checksumsURL := SelectAsset(rel.Assets, goos, goarch)
+	if asset.Name == "" || asset.BrowserDownloadURL == "" {
+		return "", "", nil, fmt.Errorf("版本 %s 缺少适用于 %s/%s 的发布包", rel.TagName, goos, goarch)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "lfh-rel-*")
+	if err != nil {
+		return "", "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
+
+	binTemp, err := m.downloadAndExtractAsset(ctx, asset, checksumsURL, goos, tmpDir)
+	if err != nil {
+		cleanup()
+		return "", "", nil, err
+	}
+	shaHex, err := hashFileSHA256(binTemp)
+	if err != nil {
+		cleanup()
+		return "", "", nil, err
+	}
+	return binTemp, shaHex, cleanup, nil
+}
+
 func (m *Manager) failCheck(msg string) (Status, error) {
 	m.mu.Lock()
 	m.status.State = "error"
@@ -561,6 +835,46 @@ func (m *Manager) ApplyUpdateSync(ctx context.Context) error {
 	}
 	defer m.opMu.Unlock()
 	return m.applyUpdateLocked(ctx)
+}
+
+// StartSwitchVersionAsync validates a specific Release (newer or older rollback) and switches to it asynchronously.
+func (m *Manager) StartSwitchVersionAsync(targetVersion string) (Status, error) {
+	if !m.opMu.TryLock() {
+		return m.Status(), errors.New("正在执行检查或升级操作，请稍候")
+	}
+	checkCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	rel, err := m.FetchReleaseByTag(checkCtx, targetVersion)
+	cancel()
+	if err != nil {
+		m.opMu.Unlock()
+		return m.failCheck(err.Error())
+	}
+	if !rel.HasAsset || rel.AssetURL == "" {
+		m.opMu.Unlock()
+		return m.Status(), fmt.Errorf("版本 %s 未附带当前系统架构 (%s/%s) 的可执行程序", rel.TagName, runtime.GOOS, runtime.GOARCH)
+	}
+
+	m.setProgress("downloading", 2, "正在准备切换至版本 "+rel.TagName+"...")
+	go func() {
+		defer m.opMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		_ = m.applyReleaseLocked(ctx, rel)
+	}()
+	return m.Status(), nil
+}
+
+// ApplyTargetVersionSync synchronously downloads and switches the binary to a specific Release (allowing rollback).
+func (m *Manager) ApplyTargetVersionSync(ctx context.Context, targetVersion string) error {
+	if !m.opMu.TryLock() {
+		return errors.New("正在执行检查或升级操作，请稍候")
+	}
+	defer m.opMu.Unlock()
+	rel, err := m.FetchReleaseByTag(ctx, targetVersion)
+	if err != nil {
+		return m.failApply(err)
+	}
+	return m.applyReleaseLocked(ctx, rel)
 }
 
 // LocalBinaryForPlatform locates a local binary matching targetOS/targetArch (self executable or dist/ build) and returns its path, SHA-256, and size.
@@ -634,20 +948,6 @@ func (m *Manager) ApplyBinaryStream(ctx context.Context, r io.Reader, targetVers
 		}
 	}()
 
-	m.mu.RLock()
-	exeFn := m.exePathFn
-	verifyFn := m.verifyFn
-	handoffFn := m.handoffFn
-	m.mu.RUnlock()
-
-	exePath, err := exeFn()
-	if err != nil {
-		return m.failApply(fmt.Errorf("获取当前程序路径失败: %w", err))
-	}
-	if resolved, err := filepath.EvalSymlinks(exePath); err == nil && resolved != "" {
-		exePath = resolved
-	}
-
 	tmpDir, err := os.MkdirTemp("", "lfh-cluster-sync-*")
 	if err != nil {
 		return m.failApply(err)
@@ -679,18 +979,110 @@ func (m *Manager) ApplyBinaryStream(ctx context.Context, r io.Reader, targetVers
 		return m.failApply(fmt.Errorf("同步程序 SHA-256 校验不一致 (期望 %s，实际 %s)", cleanExpected, actualSHA))
 	}
 
+	return m.installBinaryFile(ctx, tmpBin, targetVersion, asyncHandoff, func() {
+		m.opMu.Unlock()
+	}, &unlocked)
+}
+
+func (m *Manager) applyUpdateLocked(ctx context.Context) error {
+	m.mu.RLock()
+	st := m.status
+	m.mu.RUnlock()
+
+	if !st.HasUpdate || st.AssetURL == "" {
+		return m.failApply(errors.New("没有可下载的升级安装包"))
+	}
+	rel := &ReleaseSummary{
+		TagName:      st.LatestVersion,
+		AssetName:    st.AssetName,
+		AssetSize:    st.AssetSize,
+		AssetURL:     st.AssetURL,
+		ChecksumsURL: st.ChecksumsURL,
+	}
+	return m.applyReleaseLocked(ctx, rel)
+}
+
+func (m *Manager) applyReleaseLocked(ctx context.Context, rel *ReleaseSummary) error {
+	if rel == nil || rel.AssetURL == "" {
+		return m.failApply(errors.New("目标版本缺少可执行升级安装包"))
+	}
+	tmpDir, err := os.MkdirTemp("", "lfh-update-*")
+	if err != nil {
+		return m.failApply(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	asset := ReleaseAsset{
+		Name:               rel.AssetName,
+		Size:               rel.AssetSize,
+		BrowserDownloadURL: rel.AssetURL,
+	}
+	binTemp, err := m.downloadAndExtractAsset(ctx, asset, rel.ChecksumsURL, runtime.GOOS, tmpDir)
+	if err != nil {
+		return m.failApply(err)
+	}
+	return m.installBinaryFile(ctx, binTemp, rel.TagName, false, nil, nil)
+}
+
+func (m *Manager) downloadAndExtractAsset(ctx context.Context, asset ReleaseAsset, checksumsURL, targetOS, tmpDir string) (string, error) {
+	dlPath := filepath.Join(tmpDir, filepath.Base(asset.Name))
+	dlClient := &http.Client{Timeout: 4 * time.Minute}
+	m.setProgress("downloading", 5, "正在下载 "+asset.Name+"...")
+	actualSHA, err := m.downloadFile(ctx, dlClient, m.applyProxy(asset.BrowserDownloadURL), dlPath, asset.Size)
+	if err != nil {
+		return "", fmt.Errorf("下载升级包失败: %w", err)
+	}
+
+	m.setProgress("verifying", 86, "正在校验文件完整性...")
+	if checksumsURL != "" {
+		if err := m.verifyChecksum(ctx, dlClient, m.applyProxy(checksumsURL), asset.Name, actualSHA); err != nil {
+			return "", err
+		}
+	}
+
+	binTemp := dlPath
+	lowName := strings.ToLower(asset.Name)
+	if strings.HasSuffix(lowName, ".zip") {
+		binTemp, err = extractFromZipForOS(dlPath, tmpDir, targetOS)
+		if err != nil {
+			return "", fmt.Errorf("解压 ZIP 升级包失败: %w", err)
+		}
+	} else if strings.HasSuffix(lowName, ".tar.gz") || strings.HasSuffix(lowName, ".tgz") {
+		binTemp, err = extractFromTarGzForOS(dlPath, tmpDir, targetOS)
+		if err != nil {
+			return "", fmt.Errorf("解压 TAR.GZ 升级包失败: %w", err)
+		}
+	}
+	return binTemp, nil
+}
+
+func (m *Manager) installBinaryFile(ctx context.Context, srcBin, targetVersion string, asyncHandoff bool, asyncUnlock func(), unlockedFlag *bool) error {
+	m.mu.RLock()
+	exeFn := m.exePathFn
+	verifyFn := m.verifyFn
+	handoffFn := m.handoffFn
+	m.mu.RUnlock()
+
+	exePath, err := exeFn()
+	if err != nil {
+		return m.failApply(fmt.Errorf("获取当前程序路径失败: %w", err))
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil && resolved != "" {
+		exePath = resolved
+	}
+
 	newPath := exePath + ".new"
 	backupPath := exePath + ".old"
 	_ = os.Remove(newPath)
-	if err := copyFile(tmpBin, newPath, 0755); err != nil {
-		return m.failApply(fmt.Errorf("写入新版本文件失败: %w", err))
+	if err := copyFile(srcBin, newPath, 0755); err != nil {
+		return m.failApply(fmt.Errorf("写入新版本文件失败（请检查目录写入权限）: %w", err))
 	}
 
-	m.setProgress("verifying", 90, "正在校验同步版本可启动性...")
+	m.setProgress("verifying", 92, "正在校验版本 "+targetVersion+" 可启动性...")
 	if verifyFn != nil {
 		if err := verifyFn(ctx, newPath); err != nil {
 			_ = os.Remove(newPath)
-			return m.failApply(fmt.Errorf("新版本自检失败: %w", err))
+			return m.failApply(fmt.Errorf("版本自检失败: %w", err))
 		}
 	}
 
@@ -703,129 +1095,37 @@ func (m *Manager) ApplyBinaryStream(ctx context.Context, r io.Reader, targetVers
 	if err := os.Rename(newPath, exePath); err != nil {
 		_ = os.Rename(backupPath, exePath)
 		_ = os.Remove(newPath)
-		return m.failApply(fmt.Errorf("替换新版本程序失败: %w", err))
+		return m.failApply(fmt.Errorf("替换可执行程序失败: %w", err))
 	}
 
-	m.setProgress("restarting", 99, "正在平滑切换至主节点版本 "+targetVersion+"...")
+	m.setProgress("restarting", 99, "正在不停机平滑切换至版本 "+targetVersion+"...")
 	if handoffFn != nil {
 		if asyncHandoff {
-			unlocked = true
+			if unlockedFlag != nil {
+				*unlockedFlag = true
+			}
 			go func() {
-				defer m.opMu.Unlock()
+				if asyncUnlock != nil {
+					defer asyncUnlock()
+				}
 				time.Sleep(150 * time.Millisecond)
 				if err := handoffFn(exePath, backupPath, targetVersion); err != nil {
 					_ = os.Remove(exePath)
 					_ = os.Rename(backupPath, exePath)
-					_ = m.failApply(fmt.Errorf("热切换新版本失败，已回滚: %w", err))
+					_ = m.failApply(fmt.Errorf("热切换版本失败，已自动回滚: %w", err))
 					return
 				}
-				m.setProgress("done", 100, "已同步至版本 "+targetVersion)
+				m.setProgress("done", 100, "已切换至版本 "+targetVersion)
 			}()
 			return nil
 		}
 		if err := handoffFn(exePath, backupPath, targetVersion); err != nil {
 			_ = os.Remove(exePath)
 			_ = os.Rename(backupPath, exePath)
-			return m.failApply(fmt.Errorf("热切换新版本失败，已回滚: %w", err))
+			return m.failApply(fmt.Errorf("热切换版本失败，已自动回滚: %w", err))
 		}
 	}
-	m.setProgress("done", 100, "已同步至版本 "+targetVersion)
-	return nil
-}
-
-func (m *Manager) applyUpdateLocked(ctx context.Context) error {
-	m.mu.RLock()
-	st := m.status
-	exeFn := m.exePathFn
-	verifyFn := m.verifyFn
-	handoffFn := m.handoffFn
-	m.mu.RUnlock()
-
-	if !st.HasUpdate || st.AssetURL == "" {
-		return m.failApply(errors.New("没有可下载的升级安装包"))
-	}
-
-	exePath, err := exeFn()
-	if err != nil {
-		return m.failApply(fmt.Errorf("获取当前程序路径失败: %w", err))
-	}
-	if resolved, err := filepath.EvalSymlinks(exePath); err == nil && resolved != "" {
-		exePath = resolved
-	}
-
-	tmpDir, err := os.MkdirTemp("", "lfh-update-*")
-	if err != nil {
-		return m.failApply(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	dlPath := filepath.Join(tmpDir, filepath.Base(st.AssetName))
-	dlClient := &http.Client{Timeout: 4 * time.Minute}
-	m.setProgress("downloading", 5, "正在下载 "+st.AssetName+"...")
-	actualSHA, err := m.downloadFile(ctx, dlClient, m.applyProxy(st.AssetURL), dlPath, st.AssetSize)
-	if err != nil {
-		return m.failApply(fmt.Errorf("下载升级包失败: %w", err))
-	}
-
-	m.setProgress("verifying", 86, "正在校验文件完整性...")
-	if st.ChecksumsURL != "" {
-		if err := m.verifyChecksum(ctx, dlClient, m.applyProxy(st.ChecksumsURL), st.AssetName, actualSHA); err != nil {
-			return m.failApply(err)
-		}
-	}
-
-	binTemp := dlPath
-	lowName := strings.ToLower(st.AssetName)
-	if strings.HasSuffix(lowName, ".zip") {
-		binTemp, err = extractFromZip(dlPath, tmpDir)
-		if err != nil {
-			return m.failApply(fmt.Errorf("解压 ZIP 升级包失败: %w", err))
-		}
-	} else if strings.HasSuffix(lowName, ".tar.gz") || strings.HasSuffix(lowName, ".tgz") {
-		binTemp, err = extractFromTarGz(dlPath, tmpDir)
-		if err != nil {
-			return m.failApply(fmt.Errorf("解压 TAR.GZ 升级包失败: %w", err))
-		}
-	}
-
-	newPath := exePath + ".new"
-	backupPath := exePath + ".old"
-	_ = os.Remove(newPath)
-
-	if err := copyFile(binTemp, newPath, 0755); err != nil {
-		return m.failApply(fmt.Errorf("写入新版本文件失败（请检查目录写入权限）: %w", err))
-	}
-
-	m.setProgress("verifying", 92, "正在校验新版本可启动性...")
-	if verifyFn != nil {
-		if err := verifyFn(ctx, newPath); err != nil {
-			_ = os.Remove(newPath)
-			return m.failApply(fmt.Errorf("新版本自检失败: %w", err))
-		}
-	}
-
-	m.setProgress("swapping", 96, "正在原子替换可执行文件...")
-	_ = os.Remove(backupPath)
-	if err := os.Rename(exePath, backupPath); err != nil {
-		_ = os.Remove(newPath)
-		return m.failApply(fmt.Errorf("备份当前程序失败: %w", err))
-	}
-	if err := os.Rename(newPath, exePath); err != nil {
-		_ = os.Rename(backupPath, exePath)
-		_ = os.Remove(newPath)
-		return m.failApply(fmt.Errorf("替换为新版本失败: %w", err))
-	}
-
-	m.setProgress("restarting", 99, "正在不停机平滑切换至新版本 "+st.LatestVersion+"...")
-	if handoffFn != nil {
-		if err := handoffFn(exePath, backupPath, st.LatestVersion); err != nil {
-			_ = os.Remove(exePath)
-			_ = os.Rename(backupPath, exePath)
-			return m.failApply(fmt.Errorf("热切换新版本失败，已自动回滚: %w", err))
-		}
-	}
-
-	m.setProgress("done", 100, "已切换至新版本 "+st.LatestVersion)
+	m.setProgress("done", 100, "已切换至版本 "+targetVersion)
 	return nil
 }
 
@@ -989,15 +1289,15 @@ func CleanupOldBinary(exePath string) {
 	}()
 }
 
-func isMatchingBinaryEntry(name string) bool {
+func isMatchingBinaryEntryForOS(name, targetOS string) bool {
 	base := strings.ToLower(filepath.Base(name))
-	if runtime.GOOS == "windows" {
+	if strings.EqualFold(targetOS, "windows") {
 		return base == "lfh.exe" || (strings.HasPrefix(base, "lfh") && strings.HasSuffix(base, ".exe"))
 	}
 	return base == "lfh" || (strings.HasPrefix(base, "lfh-") && !strings.HasSuffix(base, ".exe") && !strings.HasSuffix(base, ".txt"))
 }
 
-func extractFromZip(zipPath, dstDir string) (string, error) {
+func extractFromZipForOS(zipPath, dstDir, targetOS string) (string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return "", err
@@ -1008,7 +1308,7 @@ func extractFromZip(zipPath, dstDir string) (string, error) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		if isMatchingBinaryEntry(f.Name) {
+		if isMatchingBinaryEntryForOS(f.Name, targetOS) {
 			rc, err := f.Open()
 			if err != nil {
 				return "", err
@@ -1034,7 +1334,7 @@ func extractFromZip(zipPath, dstDir string) (string, error) {
 	return "", errors.New("ZIP 包内未找到可执行文件")
 }
 
-func extractFromTarGz(tgzPath, dstDir string) (string, error) {
+func extractFromTarGzForOS(tgzPath, dstDir, targetOS string) (string, error) {
 	f, err := os.Open(tgzPath)
 	if err != nil {
 		return "", err
@@ -1059,7 +1359,7 @@ func extractFromTarGz(tgzPath, dstDir string) (string, error) {
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		if isMatchingBinaryEntry(hdr.Name) {
+		if isMatchingBinaryEntryForOS(hdr.Name, targetOS) {
 			outPath := filepath.Join(dstDir, "extracted-bin")
 			out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 			if err != nil {
@@ -1077,6 +1377,19 @@ func extractFromTarGz(tgzPath, dstDir string) (string, error) {
 		}
 	}
 	return "", errors.New("TAR.GZ 包内未找到可执行文件")
+}
+
+func hashFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {

@@ -21,13 +21,14 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.22.0",
+  appVersion: "V0.11.22.1",
   localImportMode: "import",
   mounts: [],
   clusterCapabilities: [],
   marketplacePlugins: [],
   pluginJobs: [],
   activePluginRunFileId: "",
+  availableReleases: [],
   transfers: [],
   transferTab: "upload",
   transferOpen: false,
@@ -674,7 +675,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.22.0";
+  const ver = state.appVersion || "V0.11.22.1";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -1234,6 +1235,34 @@ function renderPoolStatus() {
     text.textContent = hasOffline
       ? `${pool.online_nodes}/${pool.total_nodes} 在线（${pool.total_nodes - pool.online_nodes} 离线）`
       : `${pool.online_nodes}/${pool.total_nodes} 节点在线`;
+  }
+  renderClusterVersionAlert();
+}
+
+function renderClusterVersionAlert() {
+  const pool = state.pool;
+  const isAdmin = Boolean(state.user && state.user.role === "admin");
+  const mismatched = Array.isArray(pool?.mismatched_nodes) ? pool.mismatched_nodes : [];
+  const hasMismatch = Boolean(pool && Number(pool.online_nodes || 0) > 1 && pool.version_consistent === false);
+
+  const alertBar = $("cluster-version-alert");
+  const alertText = $("cluster-version-alert-text");
+  if (alertBar) {
+    alertBar.classList.toggle("hidden", !(isAdmin && hasMismatch));
+    if (alertText && hasMismatch) {
+      alertText.textContent = `检测到集群版本不一致：${mismatched.length} 个在线节点与最高版本 ${pool.highest_node_version || pool.entry_version || "-"} 不同步，已严格禁用跨版本节点调度。请立即按最高节点或 GitHub 最新版统一同步。`;
+    }
+  }
+
+  const box = $("upd-cluster-consistency");
+  if (box && pool) {
+    if (hasMismatch) {
+      box.className = "error-box";
+      box.textContent = `警告：集群版本未同步（在线最高版本 ${pool.highest_node_version || "-"}，主节点 ${pool.entry_version || "-"}，不一致节点数 ${mismatched.length}）。强一致约束要求所有节点必须统一升级或退回。`;
+    } else {
+      box.className = "success-box";
+      box.textContent = `全集群版本强一致校验通过：${Number(pool.online_nodes || 1)} 个在线节点均运行 ${pool.entry_version || state.appVersion}`;
+    }
   }
 }
 
@@ -3706,7 +3735,7 @@ function compareVersionsClient(a, b) {
 
 async function syncClusterNodeVersions(nodeID, nodeName) {
   const isSingle = Boolean(nodeID && nodeID !== "all");
-  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.22.0";
+  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.22.1";
   const label = isSingle ? `分节点「${nodeName || nodeID}」` : "所有在线分节点";
   try {
     const data = await api("/api/admin/cluster/upgrade-nodes", {
@@ -4139,7 +4168,7 @@ function renderNodeHealthPage() {
       const wErr = Number(n.io_write_errors || 0);
       const totErr = Number(n.io_total_errors || rErr + wErr);
       const syncTime = n.last_sync_at || n.last_seen;
-      const entryVer = pool?.entry_version || state.appVersion || "V0.11.22.0";
+      const entryVer = pool?.entry_version || state.appVersion || "V0.11.22.1";
       const nodeVer = n.version || (n.is_self ? entryVer : "V0.11.21.4");
       const isBehind = !n.is_self && compareVersionsClient(nodeVer, entryVer) < 0;
       const isAdmin = Boolean(state.user && state.user.role === "admin");
@@ -4681,6 +4710,8 @@ function switchSettingsTab(tab) {
   } else if (tab === "plugins" && state.user && state.user.role === "admin") {
     loadAdminPlugins();
     loadPluginJobs();
+  } else if (tab === "update" && state.user && state.user.role === "admin") {
+    loadUpdateReleases();
   }
 }
 
@@ -5382,7 +5413,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.22.0";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.22.1";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -5442,6 +5473,122 @@ function renderUpdateUI() {
   if ($("toggle-auto-check") && document.activeElement !== $("toggle-auto-check")) {
     $("toggle-auto-check").checked = Boolean(st.auto_check);
   }
+  renderClusterVersionAlert();
+  renderUpdateReleases();
+}
+
+function renderUpdateReleases() {
+  const sel = $("upd-target-version-select");
+  if (!sel) return;
+  const list = Array.isArray(state.availableReleases) ? state.availableReleases : [];
+  if (list.length === 0) {
+    sel.innerHTML = `<option value="">点击「刷新版本列表」获取 GitHub Release 版本...</option>`;
+    return;
+  }
+  const prevVal = sel.value;
+  sel.innerHTML = list.map((rel) => {
+    const relTag = escapeHtml(rel.tag_name || "");
+    const statusLabel = rel.is_current
+      ? "当前运行"
+      : rel.relation === "newer"
+      ? "可升级"
+      : "历史可退回";
+    const assetHint = rel.has_asset ? "" : " (未见当前架构包)";
+    const dateStr = rel.published_at ? ` · ${String(rel.published_at).slice(0, 10)}` : "";
+    return `<option value="${relTag}" ${relTag === prevVal ? "selected" : ""}>${relTag} [${statusLabel}]${dateStr}${assetHint}</option>`;
+  }).join("");
+  if (!prevVal) {
+    const nonCur = list.find((r) => !r.is_current);
+    if (nonCur) sel.value = nonCur.tag_name;
+  }
+}
+
+async function loadUpdateReleases() {
+  if (!state.user || state.user.role !== "admin") return;
+  const btn = $("btn-load-releases");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "加载中...";
+  }
+  try {
+    const data = await api("/api/admin/update/releases");
+    state.availableReleases = Array.isArray(data.releases) ? data.releases : [];
+    if (data.status) applyUpdateStatus(data.status);
+    if (data.pool) {
+      state.pool = data.pool;
+      renderPoolStatus();
+    }
+    renderUpdateReleases();
+  } catch (err) {
+    showToast(`获取 Release 版本列表失败：${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "刷新版本列表";
+    }
+  }
+}
+
+async function switchClusterVersion(targetVer) {
+  const ver = String(targetVer || "").trim();
+  if (!ver) {
+    showToast("请先选择要切换或退回的目标版本", "error");
+    return;
+  }
+  const curVer = state.updateStatus?.current_version || state.appVersion;
+  if (!confirm(`确定要将全集群所有在线节点统一切换/退回至版本 ${ver}（当前 ${curVer}）吗？\n\n强一致约束：分节点将先行同步至 ${ver}；如有任意在线节点切换失败，主节点将中止变更以禁止多版本混用。`)) {
+    return;
+  }
+  const btn = $("btn-switch-version");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "正在同步切换全集群...";
+  }
+  try {
+    const data = await api("/api/admin/update/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_version: ver, sync_cluster: true }),
+    });
+    if (data.status) applyUpdateStatus(data.status);
+    if (data.pool) {
+      state.pool = data.pool;
+      renderPoolStatus();
+    }
+    showToast(`已触发全集群统一切换至 ${data.target_version || ver}`, "success");
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "全集群切换/退回至所选版本";
+    }
+  }
+}
+
+async function reconcileClusterVersions(strategy = "auto") {
+  const label = strategy === "github_latest" ? "GitHub 仓库最新版本" : "集群中最高版本节点";
+  if (!confirm(`确定按照「${label}」对全集群所有在线节点执行强制版本对齐吗？`)) {
+    return;
+  }
+  try {
+    const data = await api("/api/admin/cluster/reconcile-versions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy }),
+    });
+    if (data.status) applyUpdateStatus(data.status);
+    if (data.pool) {
+      state.pool = data.pool;
+      renderPoolStatus();
+      renderNodeSummary();
+      if (state.workspacePage === "health") renderNodeHealthPage();
+    }
+    showToast(data.message || `已触发按${label}全集群同步（目标：${data.target_version || "最新"}）`, "success");
+    await loadCluster();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 async function checkForUpdate() {
@@ -5473,7 +5620,11 @@ async function applyUpdate() {
   try {
     const data = await api("/api/admin/update/apply", { method: "POST" });
     if (data.status) applyUpdateStatus(data.status);
-    showToast("已启动后台下载与不停机升级", "info");
+    if (data.pool) {
+      state.pool = data.pool;
+      renderPoolStatus();
+    }
+    showToast("已启动全集群强制同步升级", "info");
   } catch (err) {
     showToast(err.message, "error");
   }
@@ -5658,7 +5809,7 @@ function renderAdminCluster() {
     $("toggle-auto-sync-workers").checked = state.pool.auto_sync_workers !== false;
   }
 
-  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.22.0";
+  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.22.1";
   const tbody = $("cluster-nodes-tbody");
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
@@ -7185,6 +7336,24 @@ function bindEvents() {
   }
   if ($("btn-save-update-config")) {
     $("btn-save-update-config").onclick = saveUpdateConfig;
+  }
+  if ($("btn-load-releases")) {
+    $("btn-load-releases").onclick = loadUpdateReleases;
+  }
+  if ($("btn-switch-version")) {
+    $("btn-switch-version").onclick = () => switchClusterVersion($("upd-target-version-select")?.value || "");
+  }
+  if ($("btn-reconcile-highest")) {
+    $("btn-reconcile-highest").onclick = () => reconcileClusterVersions("highest_node");
+  }
+  if ($("btn-reconcile-github")) {
+    $("btn-reconcile-github").onclick = () => reconcileClusterVersions("github_latest");
+  }
+  if ($("btn-banner-reconcile-highest")) {
+    $("btn-banner-reconcile-highest").onclick = () => reconcileClusterVersions("highest_node");
+  }
+  if ($("btn-banner-reconcile-github")) {
+    $("btn-banner-reconcile-github").onclick = () => reconcileClusterVersions("github_latest");
   }
 
   if ($("btn-add-mount")) {

@@ -4782,3 +4782,44 @@ code {
     align-items: stretch;
   }
 }
+
+/* ===== 全集群强一致版本切换、退回与告警条 ===== */
+.version-alert-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 16px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.version-alert-text {
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.version-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.version-switch-row .field-select {
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+@media (max-width: 640px) {
+  .version-alert-bar {
+    margin: 8px 10px 0;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+}

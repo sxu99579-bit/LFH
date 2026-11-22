@@ -21,7 +21,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2774,5 +2776,330 @@ func TestStage4DistributedPluginClusterScheduling(t *testing.T) {
 	capRes2.Body.Close()
 	if len(capOut2.Capabilities) != 2 {
 		t.Fatalf("expected 2 enabled capabilities after disabling C, got %+v", capOut2.Capabilities)
+	}
+}
+
+func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
+	assetName := "lfh-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		assetName += ".exe"
+	}
+	oldBytes := []byte("BIN-V0.11.21.13")
+	oldSum := sha256.Sum256(oldBytes)
+	oldHex := hex.EncodeToString(oldSum[:])
+
+	curBytes := []byte("BIN-" + version.Version)
+	curSum := sha256.Sum256(curBytes)
+	curHex := hex.EncodeToString(curSum[:])
+
+	newBytes := []byte("BIN-V0.11.23.0")
+	newSum := sha256.Sum256(newBytes)
+	newHex := hex.EncodeToString(newSum[:])
+
+	var ghTS *httptest.Server
+	ghTS = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/tester/LFH/releases":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"tag_name":     "V0.11.23.0",
+					"name":         "V0.11.23.0",
+					"published_at": "2026-11-23T09:00:00Z",
+					"assets": []map[string]any{
+						{"name": assetName, "size": len(newBytes), "browser_download_url": ghTS.URL + "/dl/new/" + assetName},
+						{"name": "checksums.txt", "size": 128, "browser_download_url": ghTS.URL + "/dl/new/checksums.txt"},
+					},
+				},
+				{
+					"tag_name":     version.Version,
+					"name":         version.Version,
+					"published_at": "2026-11-22T09:00:00Z",
+					"assets": []map[string]any{
+						{"name": assetName, "size": len(curBytes), "browser_download_url": ghTS.URL + "/dl/cur/" + assetName},
+						{"name": "checksums.txt", "size": 128, "browser_download_url": ghTS.URL + "/dl/cur/checksums.txt"},
+					},
+				},
+				{
+					"tag_name":     "V0.11.21.13",
+					"name":         "V0.11.21.13",
+					"published_at": "2026-11-21T09:00:00Z",
+					"assets": []map[string]any{
+						{"name": assetName, "size": len(oldBytes), "browser_download_url": ghTS.URL + "/dl/old/" + assetName},
+						{"name": "checksums.txt", "size": 128, "browser_download_url": ghTS.URL + "/dl/old/checksums.txt"},
+					},
+				},
+			})
+		case "/repos/tester/LFH/releases/latest", "/repos/tester/LFH/releases/tags/V0.11.23.0":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "V0.11.23.0",
+				"name":     "V0.11.23.0",
+				"assets": []map[string]any{
+					{"name": assetName, "size": len(newBytes), "browser_download_url": ghTS.URL + "/dl/new/" + assetName},
+					{"name": "checksums.txt", "size": 128, "browser_download_url": ghTS.URL + "/dl/new/checksums.txt"},
+				},
+			})
+		case "/repos/tester/LFH/releases/tags/V0.11.21.13":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "V0.11.21.13",
+				"name":     "V0.11.21.13",
+				"assets": []map[string]any{
+					{"name": assetName, "size": len(oldBytes), "browser_download_url": ghTS.URL + "/dl/old/" + assetName},
+					{"name": "checksums.txt", "size": 128, "browser_download_url": ghTS.URL + "/dl/old/checksums.txt"},
+				},
+			})
+		case "/dl/old/" + assetName:
+			_, _ = w.Write(oldBytes)
+		case "/dl/old/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", oldHex, assetName)
+		case "/dl/cur/" + assetName:
+			_, _ = w.Write(curBytes)
+		case "/dl/cur/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", curHex, assetName)
+		case "/dl/new/" + assetName:
+			_, _ = w.Write(newBytes)
+		case "/dl/new/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  %s\n", newHex, assetName)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ghTS.Close()
+
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Entry-Master",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	workerSrv, workerMgr, _, workerTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Worker-Sync",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+
+	_ = entryMgr.SetAutoSyncWorkers(false)
+	_ = workerMgr.SetAutoSyncWorkers(false)
+
+	var hMu sync.Mutex
+	var entryHandoffVer, workerHandoffVer string
+	entryExe := filepath.Join(t.TempDir(), "entry.exe")
+	workerExe := filepath.Join(t.TempDir(), "worker.exe")
+	_ = os.WriteFile(entryExe, curBytes, 0755)
+	_ = os.WriteFile(workerExe, curBytes, 0755)
+
+	entryUpd, err := updater.NewManager(t.TempDir(), "tester/LFH")
+	if err != nil {
+		t.Fatalf("entry NewManager: %v", err)
+	}
+	entryUpd.SetCallbacks(func(exePath, backupPath, targetVersion string) error {
+		hMu.Lock()
+		entryHandoffVer = targetVersion
+		hMu.Unlock()
+		return nil
+	}, nil, nil)
+	entryUpd.SetTestOverrides(ghTS.URL, func() (string, error) { return entryExe, nil }, func(ctx context.Context, binPath string) error { return nil })
+	entrySrv.SetUpdater(entryUpd)
+
+	workerUpd, err := updater.NewManager(t.TempDir(), "tester/LFH")
+	if err != nil {
+		t.Fatalf("worker NewManager: %v", err)
+	}
+	workerUpd.SetCallbacks(func(exePath, backupPath, targetVersion string) error {
+		hMu.Lock()
+		workerHandoffVer = targetVersion
+		hMu.Unlock()
+		return nil
+	}, nil, nil)
+	workerUpd.SetTestOverrides(ghTS.URL, func() (string, error) { return workerExe, nil }, func(ctx context.Context, binPath string) error { return nil })
+	workerSrv.SetUpdater(workerUpd)
+
+	if err := workerMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker join: %v", err)
+	}
+	if err := workerMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker heartbeat: %v", err)
+	}
+
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+
+	// 1. Releases endpoint lists current + rollback + newer versions.
+	relRes, err := adminClient.Get(entryTS.URL + "/api/admin/update/releases")
+	if err != nil {
+		t.Fatalf("GET releases: %v", err)
+	}
+	var relOut struct {
+		Releases []updater.ReleaseSummary `json:"releases"`
+	}
+	_ = json.NewDecoder(relRes.Body).Decode(&relOut)
+	relRes.Body.Close()
+	if relRes.StatusCode != http.StatusOK || len(relOut.Releases) != 3 {
+		t.Fatalf("expected 3 releases, got status=%d releases=%+v", relRes.StatusCode, relOut.Releases)
+	}
+
+	// 2. Synchronized cluster rollback to V0.11.21.13 switches Worker first, then Entry.
+	swBody, _ := json.Marshal(map[string]any{"target_version": "V0.11.21.13", "sync_cluster": true})
+	swRes, err := adminClient.Post(entryTS.URL+"/api/admin/update/switch", "application/json", bytes.NewReader(swBody))
+	if err != nil {
+		t.Fatalf("POST switch rollback: %v", err)
+	}
+	swRes.Body.Close()
+	if swRes.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202 on synchronized rollback, got %d", swRes.StatusCode)
+	}
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		hMu.Lock()
+		eVer, wVer := entryHandoffVer, workerHandoffVer
+		hMu.Unlock()
+		if eVer == "V0.11.21.13" && wVer == "V0.11.21.13" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	hMu.Lock()
+	eVer, wVer := entryHandoffVer, workerHandoffVer
+	entryHandoffVer, workerHandoffVer = "", ""
+	hMu.Unlock()
+	if eVer != "V0.11.21.13" || wVer != "V0.11.21.13" {
+		t.Fatalf("expected both Entry and Worker rolled back to V0.11.21.13, got entry=%q worker=%q", eVer, wVer)
+	}
+
+	// 3. Strong constraint: if Worker is unreachable while marked online, Entry must ABORT and not switch alone.
+	workerTS.Close()
+	upBody, _ := json.Marshal(map[string]any{"target_version": "V0.11.23.0", "sync_cluster": true})
+	failRes, err := adminClient.Post(entryTS.URL+"/api/admin/update/switch", "application/json", bytes.NewReader(upBody))
+	if err != nil {
+		t.Fatalf("POST switch fail test: %v", err)
+	}
+	var failOut map[string]any
+	_ = json.NewDecoder(failRes.Body).Decode(&failOut)
+	failRes.Body.Close()
+	if failRes.StatusCode != http.StatusBadRequest || !strings.Contains(fmt.Sprint(failOut["error"]), "强一致约束拦截") {
+		t.Fatalf("expected 400 strict constraint abort, got status=%d body=%+v", failRes.StatusCode, failOut)
+	}
+	time.Sleep(100 * time.Millisecond)
+	hMu.Lock()
+	abortedEntryVer := entryHandoffVer
+	hMu.Unlock()
+	if abortedEntryVer != "" {
+		t.Fatalf("expected Entry handoff aborted when Worker failed, got %q", abortedEntryVer)
+	}
+
+	// 4. Add Worker B reporting a higher version V0.11.22.9 + pdf-to-word plugin:
+	// Verify pool reports version_consistent=false, SelectComputeNode refuses mixed node,
+	// Tier 1 reconcile ("highest_node") pulls Worker B's binary, and Tier 2 ("github_latest") pushes V0.11.23.0.
+	workerBSrv, workerBMgr, _, workerBTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Worker-B-Ahead",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_ = workerBMgr.SetAutoSyncWorkers(false)
+	workerBExe := filepath.Join(t.TempDir(), "workerB.exe")
+	aheadBytes := []byte("WORKER-B-BINARY-V0.11.22.9")
+	_ = os.WriteFile(workerBExe, aheadBytes, 0755)
+	workerBUpd, err := updater.NewManager(t.TempDir(), "tester/LFH")
+	if err != nil {
+		t.Fatalf("workerB NewManager: %v", err)
+	}
+	workerBUpd.SetCallbacks(func(exePath, backupPath, targetVersion string) error {
+		hMu.Lock()
+		workerHandoffVer = targetVersion
+		hMu.Unlock()
+		return nil
+	}, nil, nil)
+	workerBUpd.SetTestOverrides(ghTS.URL, func() (string, error) { return workerBExe, nil }, func(ctx context.Context, binPath string) error { return nil })
+	workerBSrv.SetUpdater(workerBUpd)
+	if _, err := workerBSrv.plugins.InstallFromMarketplace(plugins.PluginPDFToWord); err != nil {
+		t.Fatalf("install pdf plugin on workerB: %v", err)
+	}
+	if err := workerBMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("workerB join: %v", err)
+	}
+
+	// Send signed heartbeat directly to Entry with ahead version V0.11.22.9.
+	hbStatus := workerBMgr.SelfStatus()
+	hbStatus.HTTPURL = workerBTS.URL
+	hbStatus.Version = "V0.11.22.9"
+	hbPayload, _ := json.Marshal(cluster.HeartbeatPayload{Node: hbStatus})
+	hbReq, _ := http.NewRequest(http.MethodPost, entryTS.URL+"/internal/cluster/heartbeat", bytes.NewReader(hbPayload))
+	hbReq.Header.Set("Content-Type", "application/json")
+	cluster.SignRequest(hbReq, entryMgr.Secret(), hbStatus.NodeID)
+	hbRes, err := http.DefaultClient.Do(hbReq)
+	if err != nil {
+		t.Fatalf("send ahead heartbeat: %v", err)
+	}
+	hbRes.Body.Close()
+
+	pool := entryMgr.PoolSummaryForRole(true)
+	if pool.VersionConsistent || pool.HighestNodeVersion != "V0.11.22.9" {
+		t.Fatalf("expected version_consistent=false and highest=V0.11.22.9, got %+v", pool)
+	}
+	if _, _, selErr := entryMgr.SelectComputeNode(plugins.CapPDFToDocx, plugins.PluginPDFToWord, ""); selErr == nil || !strings.Contains(selErr.Error(), "版本不一致") {
+		t.Fatalf("expected SelectComputeNode to reject mismatched node version, got %v", selErr)
+	}
+
+	// Tier 1: highest_node pulls binary directly from Worker B onto Entry.
+	rec1Body, _ := json.Marshal(map[string]string{"strategy": "highest_node"})
+	rec1Res, err := adminClient.Post(entryTS.URL+"/api/admin/cluster/reconcile-versions", "application/json", bytes.NewReader(rec1Body))
+	if err != nil {
+		t.Fatalf("POST reconcile highest_node: %v", err)
+	}
+	var rec1Out map[string]any
+	_ = json.NewDecoder(rec1Res.Body).Decode(&rec1Out)
+	rec1Res.Body.Close()
+	if rec1Res.StatusCode != http.StatusOK || rec1Out["strategy_used"] != "highest_node_pull" || rec1Out["target_version"] != "V0.11.22.9" {
+		t.Fatalf("expected Tier 1 highest_node_pull V0.11.22.9, got status=%d out=%+v", rec1Res.StatusCode, rec1Out)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(entryExe)
+		if string(b) == string(aheadBytes) && entryUpd.Status().State == "done" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if b, _ := os.ReadFile(entryExe); string(b) != string(aheadBytes) || entryUpd.Status().State != "done" {
+		t.Fatalf("expected entryExe updated from Worker B Tier 1 pull and done, got bytes=%q state=%q", string(b), entryUpd.Status().State)
+	}
+	time.Sleep(15 * time.Millisecond)
+	hMu.Lock()
+	entryHandoffVer, workerHandoffVer = "", ""
+	hMu.Unlock()
+
+	// Mark original Worker offline before Tier 2 test so only live Worker B participates cleanly.
+	entryMgr.SetPeerLastSeenForTest(workerMgr.NodeID(), time.Now().Add(-5*time.Minute))
+
+	// Tier 2: github_latest reconciles all online nodes (Worker B + Entry) to V0.11.23.0.
+	rec2Body, _ := json.Marshal(map[string]string{"strategy": "github_latest"})
+	rec2Res, err := adminClient.Post(entryTS.URL+"/api/admin/cluster/reconcile-versions", "application/json", bytes.NewReader(rec2Body))
+	if err != nil {
+		t.Fatalf("POST reconcile github_latest: %v", err)
+	}
+	var rec2Out map[string]any
+	_ = json.NewDecoder(rec2Res.Body).Decode(&rec2Out)
+	rec2Res.Body.Close()
+	if rec2Res.StatusCode != http.StatusOK || rec2Out["strategy_used"] != "github_latest" || rec2Out["target_version"] != "V0.11.23.0" {
+		t.Fatalf("expected Tier 2 github_latest V0.11.23.0, got status=%d out=%+v", rec2Res.StatusCode, rec2Out)
+	}
+
+	deadline = time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		hMu.Lock()
+		eVer, wVer = entryHandoffVer, workerHandoffVer
+		hMu.Unlock()
+		if eVer == "V0.11.23.0" && wVer == "V0.11.23.0" {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if b, _ := os.ReadFile(entryExe); string(b) != string(newBytes) {
+		t.Fatalf("expected entryExe updated to V0.11.23.0, got %q", string(b))
+	}
+	if b, _ := os.ReadFile(workerBExe); string(b) != string(newBytes) {
+		t.Fatalf("expected workerBExe updated to V0.11.23.0, got %q", string(b))
 	}
 }
