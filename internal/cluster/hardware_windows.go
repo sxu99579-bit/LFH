@@ -72,29 +72,60 @@ func refreshHostHardwareAsync() {
 		gpuCancel()
 	}
 
-	// Step 3 (background ~12s cold PowerShell): Query active physical NIC link speed and WMI GPU fallback.
+	// Step 3 (background PowerShell): Query .NET NetworkInterface (works even without WMI MSFT_NetAdapter) and WMI GPU fallback.
 	psCtx, psCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer psCancel()
 	psScript := `$ErrorActionPreference='SilentlyContinue'; ` +
 		`$gpus=Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name; ` +
-		`$nic=(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch 'Loopback|Virtual|Hyper-V|VMware|TAP|Tailscale|ZeroTier' } | Sort-Object ReceiveLinkSpeed -Descending | Select-Object -First 1 -ExpandProperty ReceiveLinkSpeed); ` +
-		`"GPUS=" + (($gpus | Where-Object { $_ }) -join ';'); "NIC=$nic"`
+		`"GPUS=" + (($gpus | Where-Object { $_ }) -join ';'); ` +
+		`$nics=[System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' }; ` +
+		`foreach ($n in $nics) { ` +
+		`$nm=($n.Name -replace '[|\r\n]',' '); $desc=($n.Description -replace '[|\r\n]',' '); ` +
+		`$ips=($n.GetIPProperties().UnicastAddresses | Where-Object { $_.Address.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.Address.IPAddressToString }) -join ','; ` +
+		`"NICITEM=$nm|$desc|$($n.NetworkInterfaceType)|$($n.Speed)|$ips" ` +
+		`}`
 
 	if out, err := exec.CommandContext(psCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript).Output(); err == nil {
-		hwMu.Lock()
+		var nics []nicCandidate
+		var gpuNames []string
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.TrimSpace(line)
 			switch {
 			case strings.HasPrefix(line, "GPUS="):
-				if !hwCached.HasGPU {
-					rawGPUs := strings.TrimSpace(strings.TrimPrefix(line, "GPUS="))
-					pickBestGPU(&hwCached, strings.Split(rawGPUs, ";"))
+				rawGPUs := strings.TrimSpace(strings.TrimPrefix(line, "GPUS="))
+				gpuNames = strings.Split(rawGPUs, ";")
+			case strings.HasPrefix(line, "NICITEM="):
+				parts := strings.SplitN(strings.TrimPrefix(line, "NICITEM="), "|", 5)
+				if len(parts) != 5 {
+					continue
 				}
-			case strings.HasPrefix(line, "NIC="):
-				if bps, pErr := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "NIC=")), 10, 64); pErr == nil && bps > 0 {
-					hwCached.LANLinkMbps = bps / 1_000_000
+				bps, pErr := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
+				if pErr != nil || bps <= 0 {
+					continue
 				}
+				var ips []string
+				for _, rawIP := range strings.Split(parts[4], ",") {
+					if cleanIP := strings.TrimSpace(rawIP); cleanIP != "" {
+						ips = append(ips, cleanIP)
+					}
+				}
+				nics = append(nics, nicCandidate{
+					Name:          strings.TrimSpace(parts[0]),
+					Description:   strings.TrimSpace(parts[1]),
+					InterfaceType: strings.TrimSpace(parts[2]),
+					SpeedBps:      bps,
+					IPv4s:         ips,
+				})
 			}
+		}
+
+		linkMbps := selectBestLANLinkMbps(nics)
+		hwMu.Lock()
+		if !hwCached.HasGPU && len(gpuNames) > 0 {
+			pickBestGPU(&hwCached, gpuNames)
+		}
+		if linkMbps > 0 {
+			hwCached.LANLinkMbps = linkMbps
 		}
 		hwMu.Unlock()
 	}

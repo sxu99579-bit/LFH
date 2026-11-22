@@ -734,3 +734,60 @@ func TestPluginHardwareRecommendations(t *testing.T) {
 		t.Fatalf("expected strong node marked recommended with LAN speed, got %+v", strongFit)
 	}
 }
+
+func TestSelectBestLANLinkMbpsFiltersVirtualTunnels(t *testing.T) {
+	candidates := []nicCandidate{
+		{
+			Name:          "Mihomo",
+			Description:   "Meta Tunnel",
+			InterfaceType: "53",
+			SpeedBps:      100_000_000_000, // 100 Gbps synthetic tunnel speed
+			IPv4s:         []string{"198.18.0.1"},
+		},
+		{
+			Name:          "Tailscale",
+			Description:   "Tailscale Tunnel",
+			InterfaceType: "53",
+			SpeedBps:      100_000_000_000,
+			IPv4s:         []string{"100.120.53.119"},
+		},
+		{
+			Name:          "vEthernet (Default Switch)",
+			Description:   "Hyper-V Virtual Ethernet Adapter",
+			InterfaceType: "Ethernet",
+			SpeedBps:      10_000_000_000,
+			IPv4s:         []string{"172.25.80.1"},
+		},
+		{
+			Name:          "以太网 3",
+			Description:   "VMware Virtual Ethernet Adapter for VMnet1",
+			InterfaceType: "Ethernet",
+			SpeedBps:      100_000_000,
+			IPv4s:         []string{"192.168.126.1"},
+		},
+		{
+			Name:          "WLAN",
+			Description:   "Realtek 8852CE WiFi 6E PCI-E NIC",
+			InterfaceType: "Wireless80211",
+			SpeedBps:      866_700_000,
+			IPv4s:         []string{"192.168.3.53"},
+		},
+	}
+
+	got := selectBestLANLinkMbps(candidates)
+	if got != 867 {
+		t.Fatalf("expected physical WLAN link 867 Mbps after filtering tunnels/virtual adapters, got %d", got)
+	}
+
+	// Ensure a real 2.5GbE LAN adapter takes priority over a disconnected/non-LAN physical port or lower Wi-Fi.
+	candidates = append(candidates, nicCandidate{
+		Name:          "以太网",
+		Description:   "Realtek Gaming 2.5GbE Family Controller",
+		InterfaceType: "Ethernet",
+		SpeedBps:      2_500_000_000,
+		IPv4s:         []string{"192.168.3.63"},
+	})
+	if got := selectBestLANLinkMbps(candidates); got != 2500 {
+		t.Fatalf("expected 2500 Mbps for 2.5GbE Ethernet adapter, got %d", got)
+	}
+}

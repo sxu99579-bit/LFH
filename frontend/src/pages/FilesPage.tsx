@@ -18,6 +18,7 @@ import {
   LayoutGrid,
   List,
   Lock,
+  Play,
   RefreshCw,
   Search,
   SlidersHorizontal,
@@ -38,6 +39,7 @@ import {
   formatSize,
   formatStorageModeLabel,
   formatTime,
+  getFileExt,
   getMatchingCapabilitiesForFile,
   isEditableTextFile,
 } from '@/lib/utils'
@@ -80,23 +82,129 @@ interface FilesPageProps {
   folderInputRef: React.RefObject<HTMLInputElement | null>
 }
 
-function CategoryIcon({ category }: { category: string }) {
+function CategoryIcon({ category, className = 'h-4 w-4' }: { category: string; className?: string }) {
   switch (category) {
     case 'video':
-      return <FileVideo className="h-4 w-4 text-purple-500" />
+      return <FileVideo className={cn(className, 'text-purple-500')} />
     case 'image':
-      return <FileImage className="h-4 w-4 text-sky-500" />
+      return <FileImage className={cn(className, 'text-sky-500')} />
     case 'audio':
-      return <FileAudio className="h-4 w-4 text-pink-500" />
+      return <FileAudio className={cn(className, 'text-pink-500')} />
     case 'doc':
-      return <FileText className="h-4 w-4 text-amber-500" />
+      return <FileText className={cn(className, 'text-amber-500')} />
     case 'archive':
-      return <Archive className="h-4 w-4 text-orange-500" />
+      return <Archive className={cn(className, 'text-orange-500')} />
     case 'code':
-      return <Code2 className="h-4 w-4 text-emerald-500" />
+      return <Code2 className={cn(className, 'text-emerald-500')} />
     default:
-      return <File className="h-4 w-4 text-muted-foreground" />
+      return <File className={cn(className, 'text-muted-foreground')} />
   }
+}
+
+const IMAGE_THUMB_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'])
+const VIDEO_THUMB_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v'])
+
+function cardToneClasses(category: string, ext: string): string {
+  if (ext === 'pdf') return 'from-rose-500/15 via-rose-500/5 to-muted/40'
+  switch (category) {
+    case 'image':
+      return 'from-sky-500/15 via-sky-500/5 to-muted/40'
+    case 'video':
+      return 'from-purple-500/15 via-purple-500/5 to-muted/40'
+    case 'audio':
+      return 'from-pink-500/15 via-pink-500/5 to-muted/40'
+    case 'doc':
+      return 'from-amber-500/15 via-amber-500/5 to-muted/40'
+    case 'archive':
+      return 'from-orange-500/15 via-orange-500/5 to-muted/40'
+    case 'code':
+      return 'from-emerald-500/15 via-emerald-500/5 to-muted/40'
+    default:
+      return 'from-muted/60 via-muted/30 to-muted/10'
+  }
+}
+
+function FileCardThumbnail({
+  rec,
+  onClick,
+}: {
+  rec: FileRecord
+  onClick: (e: React.MouseEvent) => void
+}) {
+  const [failed, setFailed] = useState(false)
+  const ext = getFileExt(rec)
+  const extLabel = (ext || rec.category || 'FILE').toUpperCase()
+  const rawUrl = `/api/files/${encodeURIComponent(rec.id)}/download`
+  const canStream = !rec.source_missing && rec.node_online !== false && !failed
+  const isImage = IMAGE_THUMB_EXTS.has(ext)
+  const isVideo = VIDEO_THUMB_EXTS.has(ext)
+  const restricted = rec.allowed_users && rec.allowed_users.length > 0
+
+  return (
+    <div
+      onClick={onClick}
+      className={cn(
+        'group relative h-36 w-full overflow-hidden border-b border-border bg-gradient-to-br select-none',
+        cardToneClasses(rec.category, ext)
+      )}
+    >
+      {canStream && isImage ? (
+        <img
+          src={rawUrl}
+          alt={rec.name}
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+        />
+      ) : canStream && isVideo ? (
+        <>
+          <video
+            src={`${rawUrl}#t=0.5`}
+            preload="metadata"
+            muted
+            playsInline
+            onError={() => setFailed(true)}
+            className="h-full w-full object-cover"
+          />
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/25 transition-colors group-hover:bg-black/35">
+            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-background/85 text-foreground shadow-md backdrop-blur-xs">
+              <Play className="h-4.5 w-4.5 ml-0.5 fill-current" />
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/70 bg-background/80 shadow-xs transition-transform duration-200 group-hover:scale-105">
+            <CategoryIcon category={rec.category} className="h-6 w-6" />
+          </div>
+          <span className="rounded-md border border-border/70 bg-background/75 px-2 py-0.5 text-[10px] font-semibold tracking-wider text-muted-foreground">
+            {extLabel}
+          </span>
+        </div>
+      )}
+
+      {/* Subtle corner badges over thumbnail */}
+      <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1">
+        {restricted && (
+          <span className="inline-flex h-5 items-center rounded-md bg-background/85 px-1.5 text-[10px] font-medium text-amber-500 shadow-xs backdrop-blur-xs">
+            <Lock className="h-2.5 w-2.5" />
+          </span>
+        )}
+        {rec.source_missing && (
+          <Badge variant="destructive" className="shadow-xs">
+            源文件丢失
+          </Badge>
+        )}
+      </div>
+
+      {(isImage || isVideo) && canStream && (
+        <span className="pointer-events-none absolute right-2 bottom-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] font-semibold tracking-wider text-white backdrop-blur-xs">
+          {extLabel}
+        </span>
+      )}
+    </div>
+  )
 }
 
 async function readAllEntriesFromDrop(dt: DataTransfer): Promise<Array<{ file: File; relativePath: string }>> {
@@ -561,10 +669,20 @@ export function FilesPage({
                       className="hover:bg-muted/35 transition-colors cursor-pointer"
                     >
                       <td className="px-4 py-2.5 max-w-[340px]">
-                        <div className="flex items-start gap-2.5 min-w-0">
-                          <div className="mt-0.5 shrink-0">
-                            <CategoryIcon category={rec.category} />
-                          </div>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {IMAGE_THUMB_EXTS.has(getFileExt(rec)) && !rec.source_missing && rec.node_online !== false ? (
+                            <img
+                              src={`/api/files/${encodeURIComponent(rec.id)}/download`}
+                              alt={rec.name}
+                              loading="lazy"
+                              decoding="async"
+                              className="h-8 w-8 rounded-md border border-border object-cover shrink-0 bg-muted"
+                            />
+                          ) : (
+                            <div className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-muted/40 shrink-0">
+                              <CategoryIcon category={rec.category} />
+                            </div>
+                          )}
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5 min-w-0">
                               <span className="truncate font-medium text-foreground">{rec.name}</span>
@@ -676,8 +794,8 @@ export function FilesPage({
           </div>
         </Card>
       ) : (
-        /* Grid / Mobile Card Feed */
-        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        /* Grid / Mobile Card Feed with visual thumbnails */
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {files.map((rec) => {
             const previewable = canPreviewFile(rec)
             const editable = isEditableTextFile(rec)
@@ -687,55 +805,61 @@ export function FilesPage({
               <Card
                 key={rec.id}
                 onClick={() => onInspectFile(rec)}
-                className="p-3.5 flex flex-col justify-between gap-3 hover:border-primary/40 transition-colors cursor-pointer"
+                className="overflow-hidden flex flex-col justify-between hover:border-primary/40 transition-colors cursor-pointer"
               >
-                <div className="space-y-2 min-w-0">
-                  <div className="flex items-start gap-2.5">
-                    <div className="rounded-lg border border-border bg-muted/40 p-2 shrink-0">
-                      <CategoryIcon category={rec.category} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{rec.name}</div>
+                <FileCardThumbnail
+                  rec={rec}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (previewable) onPreviewFile(rec)
+                    else onInspectFile(rec)
+                  }}
+                />
+
+                <div className="p-3.5 flex flex-1 flex-col justify-between gap-2.5">
+                  <div className="space-y-2 min-w-0">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium" title={rec.name}>{rec.name}</div>
                       <div className="truncate text-[11px] text-muted-foreground mt-0.5">
                         {rec.folder_path ? `/${rec.folder_path}` : categoryNames[rec.category] || '根目录'}
                       </div>
                     </div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      <Badge variant="outline" className="tabular-nums">
+                        {formatSize(rec.size)}
+                      </Badge>
+                      <Badge variant={rec.node_online === false ? 'warning' : 'secondary'}>
+                        {rec.node_name || '本机'}
+                      </Badge>
+                      <Badge variant="outline" className="tabular-nums">
+                        v{rec.version || 1}
+                      </Badge>
+                      {storageLabel && <Badge variant="default">{storageLabel}</Badge>}
+                      {matchingCaps.length > 0 && <Badge variant="default">可调插件</Badge>}
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                    <Badge variant="outline" className="tabular-nums">
-                      {formatSize(rec.size)}
-                    </Badge>
-                    <Badge variant={rec.node_online === false ? 'warning' : 'secondary'}>
-                      {rec.node_name || '本机'}
-                    </Badge>
-                    <Badge variant="outline" className="tabular-nums">
-                      v{rec.version || 1}
-                    </Badge>
-                    {storageLabel && <Badge variant="default">{storageLabel}</Badge>}
-                    {matchingCaps.length > 0 && <Badge variant="default">可调插件</Badge>}
-                  </div>
-                </div>
 
-                <div
-                  className="flex items-center justify-between border-t border-border pt-2.5 text-[11px] text-muted-foreground"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <span className="truncate">{rec.uploader}</span>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {previewable && (
-                      <Button size="xs" variant="ghost" onClick={() => onPreviewFile(rec)}>
-                        <Eye className="h-3.5 w-3.5" />
-                        <span>预览</span>
+                  <div
+                    className="flex items-center justify-between border-t border-border pt-2.5 text-[11px] text-muted-foreground"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <span className="truncate">{rec.uploader}</span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {previewable && (
+                        <Button size="xs" variant="ghost" onClick={() => onPreviewFile(rec)}>
+                          <Eye className="h-3.5 w-3.5" />
+                          <span>预览</span>
+                        </Button>
+                      )}
+                      {editable && (
+                        <Button size="xs" variant="ghost" onClick={() => onEditFile(rec)}>
+                          <Edit3 className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
+                      <Button size="xs" variant="outline" onClick={() => onDownloadFile(rec)}>
+                        <Download className="h-3.5 w-3.5" />
                       </Button>
-                    )}
-                    {editable && (
-                      <Button size="xs" variant="ghost" onClick={() => onEditFile(rec)}>
-                        <Edit3 className="h-3.5 w-3.5" />
-                      </Button>
-                    )}
-                    <Button size="xs" variant="outline" onClick={() => onDownloadFile(rec)}>
-                      <Download className="h-3.5 w-3.5" />
-                    </Button>
+                    </div>
                   </div>
                 </div>
               </Card>

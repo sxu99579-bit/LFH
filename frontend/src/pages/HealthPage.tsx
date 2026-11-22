@@ -37,11 +37,12 @@ function MeterBar({ label, percent, detail, tone = 'primary' }: { label: string;
       : tone === 'auto' && pct >= 75
       ? 'bg-amber-500'
       : 'bg-primary'
+  const valueText = detail.trim() === `${pct}%` ? `${pct}%` : `${detail} (${pct}%)`
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">{label}</span>
-        <span className="tabular-nums font-medium">{detail} ({pct}%)</span>
+        <span className="tabular-nums font-medium">{valueText}</span>
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div className={cn('h-full rounded-full transition-all', barColor)} style={{ width: `${pct}%` }} />

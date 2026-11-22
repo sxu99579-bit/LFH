@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,11 +70,11 @@ func refreshHostHardwareAsync() {
 	}
 
 	if matches, err := filepath.Glob("/sys/class/net/*"); err == nil {
-		var maxSpeed int64
+		var candidates []nicCandidate
 		for _, devDir := range matches {
 			name := filepath.Base(devDir)
-			if name == "lo" || strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "veth") ||
-				strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") || strings.HasPrefix(name, "tailscale") {
+			// Require /sys/class/net/<name>/device to confirm a backed physical PCI/USB NIC rather than virtual netdevs.
+			if _, statErr := os.Stat(filepath.Join(devDir, "device")); statErr != nil {
 				continue
 			}
 			stateBytes, err := os.ReadFile(filepath.Join(devDir, "operstate"))
@@ -84,11 +85,28 @@ func refreshHostHardwareAsync() {
 			if err != nil {
 				continue
 			}
-			if mbps, pErr := strconv.ParseInt(strings.TrimSpace(string(speedBytes)), 10, 64); pErr == nil && mbps > maxSpeed {
-				maxSpeed = mbps
+			mbps, pErr := strconv.ParseInt(strings.TrimSpace(string(speedBytes)), 10, 64)
+			if pErr != nil || mbps <= 0 {
+				continue
 			}
+			var ips []string
+			if iface, iErr := net.InterfaceByName(name); iErr == nil {
+				if addrs, aErr := iface.Addrs(); aErr == nil {
+					for _, addr := range addrs {
+						if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+							ips = append(ips, ipNet.IP.To4().String())
+						}
+					}
+				}
+			}
+			candidates = append(candidates, nicCandidate{
+				Name:          name,
+				InterfaceType: "Ethernet",
+				SpeedBps:      mbps * 1_000_000,
+				IPv4s:         ips,
+			})
 		}
-		info.LANLinkMbps = maxSpeed
+		info.LANLinkMbps = selectBestLANLinkMbps(candidates)
 	}
 
 	hwMu.Lock()
