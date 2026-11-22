@@ -901,7 +901,7 @@ func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
 		if p.status.HeartbeatLatencyMs <= 0 {
 			p.status.HeartbeatLatencyMs = rttMs
 		}
-		if info.Version != "" {
+		if p.status.Version == "" && info.Version != "" {
 			p.status.Version = info.Version
 		}
 		autoSyncEnabled := m.cfg.AutoSyncWorkers == nil || *m.cfg.AutoSyncWorkers
