@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.10</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.11</code>
 </p>
 
 ---
@@ -25,6 +25,9 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - Join or adopt standalone LFH hosts directly from the Web UI using the peer's admin credentials or cluster secret—zero CLI restart needed, with customizable storage quotas (`500MB`, `10GB`, `1.5TB`) behind one unified entry URL;
   - **Live Node Status & Online-Only File Visibility**: Real-time node health indicators appear in the top bar, sidebar, and cluster table. Files on **online nodes appear normally**, while files stored on **offline nodes are automatically hidden** and seamlessly restored when the node comes back online.
   - **Lossless Primary Node Switching & Node Exit Control**: Promote any online worker node into the cluster's new **Primary/Entry** node in one click (migrating accounts/permissions while preserving files across all hosts), evict online nodes or delete offline entries cleanly, dissolve an entire cluster, or visit `/worker` on any worker node to leave the cluster independently.
+- **Super Clipboard & Instant Create `.txt`**:
+  - Opt-in **Super Clipboard** per node (`-clipboard`, local `/worker` toggle, or centralized Primary-to-Worker remote toggle in Cluster Settings): automatically watches copied text/images on enabled machines, auto-names them with timestamps, and uploads into `超级剪贴板/YYYY-MM` for cross-device access;
+  - Create `.txt` files directly from the Web toolbar with an inline editor and immediate versioning.
 - **Instant Drag-and-Drop & Folder Structure**: Drop individual files, entire directory trees, or archives directly into the workspace with real-time progress and configurable extension allow/deny policies.
 - **Three Views & Live Auto-Refresh**: Switch cleanly between **List**, Windows Explorer-style **Grid**, and **Chart** views. Powered by Server-Sent Events (SSE), new uploads appear across connected clients automatically without page reloads.
 - **Online Preview, In-Browser Text Editor & Full Version Provenance**:

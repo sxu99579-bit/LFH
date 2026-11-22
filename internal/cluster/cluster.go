@@ -52,22 +52,23 @@ const (
 )
 
 type Config struct {
-	NodeID          string            `json:"node_id"`
-	NodeName        string            `json:"node_name"`
-	Role            string            `json:"role"`
-	ClusterSecret   string            `json:"cluster_secret"`
-	QuotaBytes      int64             `json:"quota_bytes"`
-	QuotaGB         float64           `json:"quota_gb"`
-	ExposeIP        string            `json:"expose_ip,omitempty"`
-	ExposeIPs       []string          `json:"expose_ips,omitempty"`
-	DisabledIPs     []string          `json:"disabled_ips,omitempty"`
-	Port            string            `json:"port,omitempty"`
-	EntryHint       string            `json:"entry_hint,omitempty"`
-	StorageDir      string            `json:"storage_dir,omitempty"`
-	PrimaryNodeID   string            `json:"primary_node_id,omitempty"`
-	EvictedPeers    map[string]string `json:"evicted_peers,omitempty"`
-	AutoSyncWorkers *bool             `json:"auto_sync_workers,omitempty"`
-	DiscoveryPort   int               `json:"discovery_port"`
+	NodeID           string            `json:"node_id"`
+	NodeName         string            `json:"node_name"`
+	Role             string            `json:"role"`
+	ClusterSecret    string            `json:"cluster_secret"`
+	QuotaBytes       int64             `json:"quota_bytes"`
+	QuotaGB          float64           `json:"quota_gb"`
+	ExposeIP         string            `json:"expose_ip,omitempty"`
+	ExposeIPs        []string          `json:"expose_ips,omitempty"`
+	DisabledIPs      []string          `json:"disabled_ips,omitempty"`
+	Port             string            `json:"port,omitempty"`
+	EntryHint        string            `json:"entry_hint,omitempty"`
+	StorageDir       string            `json:"storage_dir,omitempty"`
+	PrimaryNodeID    string            `json:"primary_node_id,omitempty"`
+	EvictedPeers     map[string]string `json:"evicted_peers,omitempty"`
+	AutoSyncWorkers  *bool             `json:"auto_sync_workers,omitempty"`
+	ClipboardEnabled bool              `json:"clipboard_enabled,omitempty"`
+	DiscoveryPort    int               `json:"discovery_port"`
 }
 
 type Options struct {
@@ -85,6 +86,8 @@ type Options struct {
 	EntryHint        string
 	StorageDir       string
 	StorageDirSet    bool
+	ClipboardEnabled bool
+	ClipboardSet     bool
 	DiscoveryPort    int
 	DiscoveryPortSet bool
 	SelfURL          string
@@ -136,6 +139,7 @@ type NodeStatus struct {
 	IOReadErrors       int64       `json:"io_read_errors"`
 	IOWriteErrors      int64       `json:"io_write_errors"`
 	IOTotalErrors      int64       `json:"io_total_errors"`
+	ClipboardEnabled   bool        `json:"clipboard_enabled"`
 	Online             bool        `json:"online"`
 	IsSelf             bool        `json:"is_self"`
 	LastSeen           time.Time   `json:"last_seen"`
@@ -219,6 +223,7 @@ type Manager struct {
 	onPeerChange        func(nodeName string, online bool)
 	onPeerVersionSync   func(peer NodeStatus)
 	onEntryVersionAhead func(entryURL, entryVersion string)
+	onClipboardToggle   func(enabled bool)
 	lastSelfSyncAttempt time.Time
 	lastHBLatencyMs     float64
 	lastSyncAt          time.Time
@@ -370,6 +375,9 @@ func NewManager(dataDir string, store *storage.Store, opts Options) (*Manager, e
 	}
 	if opts.StorageDirSet {
 		cfg.StorageDir = strings.TrimSpace(opts.StorageDir)
+	}
+	if opts.ClipboardSet {
+		cfg.ClipboardEnabled = opts.ClipboardEnabled
 	}
 	if cfg.StorageDir != "" {
 		if _, err := store.SetUploadDir(cfg.StorageDir, false); err != nil {
@@ -620,6 +628,7 @@ func (m *Manager) SelfStatus() NodeStatus {
 		IOReadErrors:       rErr,
 		IOWriteErrors:      wErr,
 		IOTotalErrors:      rErr + wErr,
+		ClipboardEnabled:   cfg.ClipboardEnabled,
 		Online:             true,
 		IsSelf:             true,
 		LastSeen:           now,
@@ -787,6 +796,7 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		prev.status.UsedBytes != n.UsedBytes ||
 		prev.status.FileCount != n.FileCount ||
 		prev.status.StorageDir != n.StorageDir ||
+		prev.status.ClipboardEnabled != n.ClipboardEnabled ||
 		len(prev.files) != len(files)
 	if !changed {
 		for i := range files {
@@ -886,6 +896,33 @@ func (m *Manager) SetOnEntryVersionAhead(fn func(entryURL, entryVersion string))
 	m.mu.Lock()
 	m.onEntryVersionAhead = fn
 	m.mu.Unlock()
+}
+
+func (m *Manager) SetOnClipboardToggle(fn func(enabled bool)) {
+	m.mu.Lock()
+	m.onClipboardToggle = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) ClipboardEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.ClipboardEnabled
+}
+
+func (m *Manager) SetLocalClipboardEnabled(enabled bool) (NodeStatus, error) {
+	m.mu.Lock()
+	m.cfg.ClipboardEnabled = enabled
+	cb := m.onClipboardToggle
+	err := m.saveLocked()
+	m.mu.Unlock()
+	if err != nil {
+		return NodeStatus{}, err
+	}
+	if cb != nil {
+		cb(enabled)
+	}
+	return m.SelfStatus(), nil
 }
 
 func (m *Manager) AutoSyncWorkers() bool {
@@ -1795,6 +1832,67 @@ func (m *Manager) UpdateNodeQuotaBytes(nodeID string, quotaBytes int64) (NodeSta
 
 func (m *Manager) UpdateNodeQuota(nodeID string, quotaGB float64) (NodeStatus, error) {
 	return m.UpdateNodeQuotaBytes(nodeID, int64(quotaGB*float64(GB)))
+}
+
+func (m *Manager) UpdateNodeClipboardEnabled(nodeID string, enabled bool) (NodeStatus, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		return m.SetLocalClipboardEnabled(enabled)
+	}
+	m.mu.RLock()
+	p, ok := m.peers[nodeID]
+	var peer NodeStatus
+	if ok {
+		peer = p.status
+		peer.Online = time.Since(peer.LastSeen) <= PeerTimeout
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return NodeStatus{}, errors.New("节点不存在")
+	}
+	if !peer.Online {
+		return NodeStatus{}, fmt.Errorf("节点 %s 当前离线，无法远程控制超级剪贴板", peer.NodeName)
+	}
+
+	payload, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/clipboard"
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return NodeStatus{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return NodeStatus{}, fmt.Errorf("通知节点 %s 切换超级剪贴板失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return NodeStatus{}, errors.New(errBody.Error)
+		}
+		return NodeStatus{}, fmt.Errorf("更新超级剪贴板状态失败 (%d)", resp.StatusCode)
+	}
+
+	var updated NodeStatus
+	if err := json.Unmarshal(body, &updated); err != nil {
+		return NodeStatus{}, err
+	}
+	updated.IsSelf = false
+	updated.Online = true
+	updated.LastSeen = time.Now()
+
+	m.mu.Lock()
+	if cur, exists := m.peers[nodeID]; exists {
+		cur.status = updated
+	}
+	m.mu.Unlock()
+	return updated, nil
 }
 
 func (m *Manager) SetLocalStorageDir(newDir string, migrateExisting bool) (NodeStatus, int, error) {

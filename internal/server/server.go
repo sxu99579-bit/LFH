@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"lfh/internal/auth"
+	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
 	"lfh/internal/preview"
 	"lfh/internal/storage"
@@ -349,6 +350,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}/versions/{ver}", s.requireClusterAuth(s.handleClusterDeleteVersion))
 	mux.HandleFunc("POST /internal/cluster/quota", s.requireClusterAuth(s.handleClusterSetQuota))
 	mux.HandleFunc("POST /internal/cluster/storage-dir", s.requireClusterAuth(s.handleClusterSetStorageDir))
+	mux.HandleFunc("POST /internal/cluster/clipboard", s.requireClusterAuth(s.handleClusterSetClipboard))
 	mux.HandleFunc("POST /internal/cluster/promote", s.requireClusterAuth(s.handleClusterPromote))
 	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
 	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
@@ -361,6 +363,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/cluster/adopt", s.handleClusterAdopt)
 	mux.HandleFunc("GET /worker", s.handleWorkerPage)
 	mux.HandleFunc("POST /api/cluster/leave-self", s.handleClusterLeaveSelf)
+	mux.HandleFunc("POST /api/cluster/clipboard-self", s.handleClusterClipboardSelf)
 	mux.HandleFunc("GET /api/cluster/download-binary", s.handleDownloadClusterBinary)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
@@ -380,6 +383,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{nodeID}", s.requireAdmin(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
+	mux.HandleFunc("POST /api/admin/cluster/clipboard", s.requireAdmin(s.handleAdminClusterClipboard))
 	mux.HandleFunc("POST /api/admin/cluster/endpoint", s.requireAdmin(s.handleAdminClusterEndpoint))
 	mux.HandleFunc("GET /api/admin/settings", s.requireAdmin(s.handleGetAdminSettings))
 	mux.HandleFunc("POST /api/admin/settings", s.requireAdmin(s.handleUpdateAdminSettings))
@@ -401,6 +405,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/summary", s.requireAuth(s.handleSummary))
 	mux.HandleFunc("GET /api/events", s.requireAuth(s.handleEvents))
 	mux.HandleFunc("POST /api/upload", s.requireAuth(s.handleUpload))
+	mux.HandleFunc("POST /api/files/create-txt", s.requireAuth(s.handleCreateTxtFile))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.handleDownload))
 	mux.HandleFunc("GET /api/files/{id}/raw", s.requireAuth(s.handleRaw))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.handlePreview))
@@ -448,6 +453,7 @@ func (s *Server) Handler() http.Handler {
 			r.URL.Path == "/api/cluster/adopt" ||
 			r.URL.Path == "/worker" ||
 			r.URL.Path == "/api/cluster/leave-self" ||
+			r.URL.Path == "/api/cluster/clipboard-self" ||
 			r.URL.Path == "/api/cluster/download-binary" {
 			mux.ServeHTTP(w, r)
 			return
@@ -601,7 +607,8 @@ func (s *Server) handleClusterUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowedUsers := parseAllowedUsersForm(r.MultipartForm.Value["allowed_users"])
-	rec, saveErr := s.store.SaveUploadWithOptions(fh.Filename, folderPath, uploader, allowedUsers, dev, f)
+	versionNote := strings.TrimSpace(r.FormValue("version_note"))
+	rec, saveErr := s.store.SaveUploadWithVersionNote(fh.Filename, folderPath, versionNote, uploader, allowedUsers, dev, f)
 	_ = f.Close()
 	if saveErr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存文件失败: " + saveErr.Error()})
@@ -882,6 +889,23 @@ func (s *Server) handleClusterSetStorageDir(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (s *Server) handleClusterSetClipboard(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	st, err := s.cluster.SetLocalClipboardEnabled(req.Enabled)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, st)
+}
+
 func (s *Server) handleClusterUpdateAccess(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AllowedUsers []string `json:"allowed_users"`
@@ -1023,6 +1047,55 @@ func (s *Server) handleClusterLeaveSelf(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (s *Server) handleClusterClipboardSelf(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled       bool   `json:"enabled"`
+		AdminUser     string `json:"admin_user"`
+		AdminPass     string `json:"admin_pass"`
+		ClusterSecret string `json:"cluster_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+
+	authorized := false
+	if u, ok := s.auth.CurrentUser(r); ok && u.Role == "admin" {
+		authorized = true
+	}
+	if !authorized && strings.TrimSpace(req.AdminUser) != "" && req.AdminPass != "" {
+		if u, ok := s.auth.Authenticate(strings.TrimSpace(req.AdminUser), req.AdminPass); ok && u.Role == "admin" {
+			authorized = true
+		}
+	}
+	if !authorized {
+		providedSecret := strings.TrimSpace(req.ClusterSecret)
+		expectedSecret := strings.TrimSpace(s.cluster.Secret())
+		if providedSecret != "" && expectedSecret != "" && hmac.Equal([]byte(providedSecret), []byte(expectedSecret)) {
+			authorized = true
+		}
+	}
+	if !authorized {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "验证失败：请先输入本机管理员账号密码或当前集群密钥"})
+		return
+	}
+
+	node, err := s.cluster.SetLocalClipboardEnabled(req.Enabled)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "切换本机超级剪贴板失败: " + err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: node.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"node": node,
+	})
+}
+
 func (s *Server) handleWorkerPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -1144,6 +1217,17 @@ const workerControlHTML = `<!DOCTYPE html>
       <div class="meta-row"><span class="meta-k">当前主入口</span><span id="m-entry" class="meta-v">-</span></div>
       <div id="m-dir-row" class="meta-row"><span class="meta-k">本机存储目录</span><span id="m-dir" class="meta-v">-</span></div>
       <div class="meta-row"><span class="meta-k">本机文件数 / 容量</span><span id="m-cap" class="meta-v">-</span></div>
+      <div class="meta-row"><span class="meta-k">本机超级剪贴板</span><span id="m-clip" class="meta-v">已关闭</span></div>
+    </div>
+
+    <div class="meta" style="margin-bottom:14px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px;">本机超级剪贴板开关</div>
+      <div style="font-size:12px;color:#94a3b8;line-height:1.5;margin-bottom:10px;">
+        开启后将自动监听本机复制的文字与截图，按时间戳自动命名并上传至集群「超级剪贴板」目录（可在下方填写本机管理员凭据或集群密钥切换，主节点管理员也可在 Web 集群面板集中开关）。
+      </div>
+      <div class="actions" style="margin-top:0;">
+        <button id="btn-toggle-clip" class="btn btn-primary" type="button">开启本机超级剪贴板</button>
+      </div>
     </div>
 
     <div id="entry-box" class="hidden">
@@ -1203,6 +1287,14 @@ const workerControlHTML = `<!DOCTYPE html>
           dirRow.classList.add("hidden");
         }
         document.getElementById("m-cap").textContent = String(selfNode.file_count || 0) + " 个文件 · " + fmtBytes(selfNode.used_bytes || 0) + " / " + fmtBytes(selfNode.quota_bytes || 0);
+        const clipEnabled = Boolean(selfNode.clipboard_enabled);
+        const clipEl = document.getElementById("m-clip");
+        const clipBtn = document.getElementById("btn-toggle-clip");
+        clipEl.textContent = clipEnabled ? "已开启（自动监听上传中）" : "已关闭";
+        clipEl.style.color = clipEnabled ? "#4ade80" : "#94a3b8";
+        clipBtn.dataset.enabled = clipEnabled ? "1" : "0";
+        clipBtn.textContent = clipEnabled ? "关闭本机超级剪贴板" : "开启本机超级剪贴板";
+        clipBtn.className = clipEnabled ? "btn btn-danger" : "btn btn-primary";
 
         const badge = document.getElementById("role-badge");
         if (data.role === "worker") {
@@ -1226,6 +1318,36 @@ const workerControlHTML = `<!DOCTYPE html>
         msg.textContent = "读取节点状态失败: " + err.message;
       }
     }
+    document.getElementById("btn-toggle-clip").addEventListener("click", async () => {
+      const msg = document.getElementById("status-msg");
+      const btn = document.getElementById("btn-toggle-clip");
+      const nextEnabled = btn.dataset.enabled !== "1";
+      msg.className = "msg";
+      msg.textContent = "";
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/cluster/clipboard-self", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: nextEnabled,
+            admin_user: document.getElementById("admin-user").value.trim(),
+            admin_pass: document.getElementById("admin-pass").value,
+            cluster_secret: document.getElementById("cluster-secret").value.trim()
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "切换失败");
+        msg.className = "msg ok";
+        msg.textContent = nextEnabled ? "已开启本机超级剪贴板自动上传" : "已关闭本机超级剪贴板";
+        await loadNodeInfo();
+      } catch (err) {
+        msg.className = "msg err";
+        msg.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
     document.getElementById("leave-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const msg = document.getElementById("status-msg");
@@ -2091,6 +2213,31 @@ func (s *Server) handleAdminClusterQuota(w http.ResponseWriter, r *http.Request,
 	})
 }
 
+func (s *Server) handleAdminClusterClipboard(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID  string `json:"node_id"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	updated, err := s.cluster.UpdateNodeClipboardEnabled(req.NodeID, req.Enabled)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: updated.NodeName,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"node": updated,
+		"pool": s.cluster.PoolSummaryForRole(true),
+	})
+}
+
 func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	var req struct {
 		ExposeIP    string    `json:"expose_ip"`
@@ -2546,6 +2693,141 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 	}
 	s.publishRecordChange("upload", u.Username, uploaded, allowedUsers)
 	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": s.sanitizeRecordsForUser(uploaded, u)})
+}
+
+func (s *Server) handleCreateTxtFile(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		Name         string   `json:"name"`
+		FolderPath   string   `json:"folder_path"`
+		Content      string   `json:"content"`
+		AllowedUsers []string `json:"allowed_users"`
+		TargetNode   string   `json:"target_node"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	rawName := filepath.Base(strings.TrimSpace(req.Name))
+	if rawName == "" || rawName == "." || rawName == ".." {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请输入有效的 TXT 文件名"})
+		return
+	}
+	ext := filepath.Ext(rawName)
+	if ext != "" && strings.ToLower(ext) != ".txt" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "新建文件功能仅支持创建 .txt 文本文件"})
+		return
+	}
+	if ext == "" {
+		rawName += ".txt"
+	} else {
+		rawName = strings.TrimSuffix(rawName, ext) + ".txt"
+	}
+
+	if err := s.auth.CheckUploadAllowed(rawName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	cleanAllowed, userErr := s.auth.ValidateExistingUsers(storage.NormalizeAllowedUsers(req.AllowedUsers))
+	if userErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
+		return
+	}
+	folderPath := storage.SanitizeFolderPath(req.FolderPath)
+	dev := extractDeviceInfo(r)
+	contentBytes := []byte(req.Content)
+	sz := int64(len(contentBytes))
+
+	targetPref := strings.TrimSpace(req.TargetNode)
+	if targetPref == "" || u.Role != "admin" {
+		targetPref = "auto"
+	}
+	if targetPref == "auto" {
+		for _, existing := range s.cluster.AllClusterFiles() {
+			if existing.NodeOnline && existing.NodeID != "" &&
+				strings.EqualFold(existing.Name, rawName) &&
+				existing.FolderPath == folderPath {
+				if _, err := s.cluster.SelectUploadTarget(existing.NodeID, sz); err == nil {
+					targetPref = existing.NodeID
+				}
+				break
+			}
+		}
+	}
+
+	target, err := s.cluster.SelectUploadTarget(targetPref, sz)
+	if err != nil {
+		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+		return
+	}
+
+	var saved storage.FileRecord
+	if target.IsSelf {
+		if capErr := s.cluster.CanAcceptLocal(sz); capErr != nil {
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": capErr.Error()})
+			return
+		}
+		saved, err = s.store.SaveUploadWithVersionNote(rawName, folderPath, "新建 TXT 文件", u.Username, cleanAllowed, dev, bytes.NewReader(contentBytes))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建文件失败: " + err.Error()})
+			return
+		}
+		saved.NodeID = s.cluster.NodeID()
+		saved.NodeName = s.cluster.NodeName()
+		saved.NodeOS = runtime.GOOS
+		saved.NodeOnline = true
+	} else {
+		saved, err = s.cluster.ProxyUpload(target, rawName, folderPath, bytes.NewReader(contentBytes), u.Username, cleanAllowed, dev)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	s.publishRecordChange("upload", u.Username, []storage.FileRecord{saved}, cleanAllowed)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ok":   true,
+		"file": s.sanitizeRecordForUser(saved, u),
+	})
+}
+
+// HandleCapturedClipboard saves a local OS clipboard capture into this node's store and notifies cluster peers.
+func (s *Server) HandleCapturedClipboard(item clipboard.Item) {
+	if len(item.Data) == 0 {
+		return
+	}
+	if err := s.cluster.CanAcceptLocal(int64(len(item.Data))); err != nil {
+		return
+	}
+	name := clipboard.AutoFileName(item)
+	if err := s.auth.CheckUploadAllowed(name); err != nil {
+		return
+	}
+	folder := clipboard.FolderPath(item.CreatedAt)
+	primaryIP := ""
+	for _, a := range DiscoverNetworkAddrs(s.Port()) {
+		if a.Primary {
+			primaryIP = a.IP
+			break
+		}
+	}
+	nodeName := s.cluster.NodeName()
+	dev := storage.DeviceInfo{
+		FP:     "CLIP-" + strings.ToUpper(s.cluster.NodeID()),
+		Name:   nodeName + " · 超级剪贴板",
+		IP:     primaryIP,
+		Detail: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	uploader := "超级剪贴板(" + nodeName + ")"
+	rec, err := s.store.SaveUploadWithVersionNote(name, folder, "超级剪贴板自动上传", uploader, nil, dev, bytes.NewReader(item.Data))
+	if err != nil {
+		return
+	}
+	rec.NodeID = s.cluster.NodeID()
+	rec.NodeName = nodeName
+	rec.NodeOS = runtime.GOOS
+	rec.NodeOnline = true
+	s.cluster.TriggerHeartbeat()
+	s.publishRecordChange("upload", uploader, []storage.FileRecord{rec}, nil)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {

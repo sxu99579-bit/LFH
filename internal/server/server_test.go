@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"lfh/internal/auth"
+	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
 	"lfh/internal/storage"
 	"lfh/internal/updater"
@@ -2114,5 +2115,124 @@ func TestMultiNICEndpointTogglesURLEncodedDeviceHeadersAndMobileDetection(t *tes
 	pcRes.Body.Close()
 	if pcRes.StatusCode != http.StatusOK || !strings.Contains(string(pcBody), "index.html") {
 		t.Fatalf("expected index.html served for Windows Chrome UA, got %q", string(pcBody))
+	}
+}
+
+func TestCreateTxtFileAndSuperClipboardControls(t *testing.T) {
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Clip-Entry",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_, workerMgr, _, workerTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Clip-Worker",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_ = workerTS
+
+	if err := workerMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker JoinEntryCluster: %v", err)
+	}
+	if err := workerMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker SendHeartbeatNow: %v", err)
+	}
+
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+
+	// 1. POST /api/files/create-txt rejects non-.txt extensions
+	badBody, _ := json.Marshal(map[string]any{
+		"name":    "script.sh",
+		"content": "#!/bin/sh",
+	})
+	badRes, err := adminClient.Post(entryTS.URL+"/api/files/create-txt", "application/json", bytes.NewReader(badBody))
+	if err != nil {
+		t.Fatalf("POST bad create-txt: %v", err)
+	}
+	badRes.Body.Close()
+	if badRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-.txt file, got %d", badRes.StatusCode)
+	}
+
+	// 2. POST /api/files/create-txt auto-appends .txt and saves content to cluster
+	goodBody, _ := json.Marshal(map[string]any{
+		"name":        "meeting-notes",
+		"folder_path": "notes/2026",
+		"content":     "第一条纪要\n第二条待办",
+		"target_node": entryMgr.NodeID(),
+	})
+	goodRes, err := adminClient.Post(entryTS.URL+"/api/files/create-txt", "application/json", bytes.NewReader(goodBody))
+	if err != nil {
+		t.Fatalf("POST good create-txt: %v", err)
+	}
+	var goodOut struct {
+		OK   bool               `json:"ok"`
+		File storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(goodRes.Body).Decode(&goodOut)
+	goodRes.Body.Close()
+	if goodRes.StatusCode != http.StatusCreated || !goodOut.OK || goodOut.File.Name != "meeting-notes.txt" || goodOut.File.FolderPath != "notes/2026" {
+		t.Fatalf("unexpected create-txt response: status=%d out=%+v", goodRes.StatusCode, goodOut)
+	}
+	dlRes, _ := adminClient.Get(entryTS.URL + "/api/files/" + goodOut.File.ID + "/download")
+	dlRaw, _ := io.ReadAll(dlRes.Body)
+	dlRes.Body.Close()
+	if string(dlRaw) != "第一条纪要\n第二条待办" {
+		t.Fatalf("unexpected downloaded txt content: %q", string(dlRaw))
+	}
+
+	// 3. Entry admin toggles Super Clipboard on remote Worker node via /api/admin/cluster/clipboard
+	if entryMgr.ClipboardEnabled() || workerMgr.ClipboardEnabled() {
+		t.Fatalf("expected Super Clipboard disabled by default on both nodes")
+	}
+	toggleWorkerOn, _ := json.Marshal(map[string]any{
+		"node_id": workerMgr.NodeID(),
+		"enabled": true,
+	})
+	twRes, err := adminClient.Post(entryTS.URL+"/api/admin/cluster/clipboard", "application/json", bytes.NewReader(toggleWorkerOn))
+	if err != nil {
+		t.Fatalf("POST toggle worker clipboard on: %v", err)
+	}
+	var twOut struct {
+		OK   bool               `json:"ok"`
+		Node cluster.NodeStatus `json:"node"`
+	}
+	_ = json.NewDecoder(twRes.Body).Decode(&twOut)
+	twRes.Body.Close()
+	if twRes.StatusCode != http.StatusOK || !twOut.OK || !twOut.Node.ClipboardEnabled || !workerMgr.ClipboardEnabled() {
+		t.Fatalf("expected worker Super Clipboard enabled remotely, status=%d out=%+v worker=%v", twRes.StatusCode, twOut, workerMgr.ClipboardEnabled())
+	}
+
+	// Turn Entry Super Clipboard on as well, then Worker off
+	toggleEntryOn, _ := json.Marshal(map[string]any{
+		"node_id": entryMgr.NodeID(),
+		"enabled": true,
+	})
+	teRes, _ := adminClient.Post(entryTS.URL+"/api/admin/cluster/clipboard", "application/json", bytes.NewReader(toggleEntryOn))
+	teRes.Body.Close()
+	if teRes.StatusCode != http.StatusOK || !entryMgr.ClipboardEnabled() {
+		t.Fatalf("expected entry Super Clipboard enabled, status=%d", teRes.StatusCode)
+	}
+
+	// 4. Local HandleCapturedClipboard ingests auto-named file under 超级剪贴板/YYYY-MM
+	tsCapture := time.Date(2026, 11, 22, 9, 50, 1, 0, time.Local)
+	entrySrv.HandleCapturedClipboard(clipboard.Item{
+		Kind:      "text",
+		Ext:       ".txt",
+		Data:      []byte("copied from system clipboard"),
+		CreatedAt: tsCapture,
+	})
+	files := entryMgr.AllClusterFiles()
+	foundClip := false
+	for _, f := range files {
+		if f.Name == "clip_20261122_095001.txt" && f.FolderPath == "超级剪贴板/2026-11" {
+			foundClip = true
+			break
+		}
+	}
+	if !foundClip {
+		t.Fatalf("expected auto-uploaded clipboard file in cluster, got %+v", files)
 	}
 }

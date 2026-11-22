@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"lfh/internal/auth"
+	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
 	"lfh/internal/server"
 	"lfh/internal/storage"
@@ -142,6 +143,7 @@ func main() {
 	repoFlag := flag.String("repo", "", "GitHub repository (owner/repo) for auto-update checks")
 	initUserFlag := flag.String("init-user", "", "Optional initial admin username when initializing fresh data dir")
 	initPassFlag := flag.String("init-pass", "", "Optional initial admin password when initializing fresh data dir")
+	clipboardFlag := flag.Bool("clipboard", false, "Enable local Super Clipboard auto-upload watcher on this node")
 	flag.Parse()
 
 	if *showVersion {
@@ -153,7 +155,7 @@ func main() {
 		updater.CleanupOldBinary(exe)
 	}
 
-	var portSet, quotaSet, exposeIPSet, discoverySet, storageDirSet bool
+	var portSet, quotaSet, exposeIPSet, discoverySet, storageDirSet, clipboardSet bool
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "port":
@@ -166,6 +168,8 @@ func main() {
 			discoverySet = true
 		case "storage-dir":
 			storageDirSet = true
+		case "clipboard":
+			clipboardSet = true
 		}
 	})
 
@@ -213,6 +217,8 @@ func main() {
 		EntryHint:        *entryHint,
 		StorageDir:       *storageDir,
 		StorageDirSet:    storageDirSet,
+		ClipboardEnabled: *clipboardFlag,
+		ClipboardSet:     clipboardSet,
 		DiscoveryPort:    *discoveryPort,
 		DiscoveryPortSet: discoverySet,
 	}
@@ -246,6 +252,11 @@ func main() {
 			NodeName: nodeName,
 		})
 	})
+
+	clipWatcher := clipboard.NewWatcher(srv.HandleCapturedClipboard)
+	clipWatcher.SetEnabled(clusterMgr.ClipboardEnabled())
+	clusterMgr.SetOnClipboardToggle(clipWatcher.SetEnabled)
+	clipWatcher.Start(ctx)
 
 	isHandoff := os.Getenv(envUpgradeHandoff) == "1"
 	readyEnvPath := os.Getenv(envReadyFile)
@@ -387,6 +398,7 @@ func main() {
 		fmt.Printf("  主入口地址: %s\n", clusterMgr.EntryURL())
 	}
 	fmt.Printf("  数据目录: %s\n", absData)
+	fmt.Printf("  超级剪贴板: %s\n", map[bool]string{true: "已开启", false: "已关闭"}[clusterMgr.ClipboardEnabled()])
 
 	<-ctx.Done()
 	lm.Close()

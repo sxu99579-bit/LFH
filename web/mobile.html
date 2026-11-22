@@ -317,7 +317,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.10</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.11</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -384,7 +384,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.10</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.11</span></div>
           <div class="brand-sub">多维筛选与存储池总览</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
@@ -510,6 +510,7 @@
                 <span>上传文件 / 照片视频</span>
               </button>
               <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">上传文件夹</button>
+              <button id="btn-create-txt" class="btn btn-ghost btn-sm" type="button">新建 TXT</button>
             </div>
             <div id="upload-progress-wrap" class="progress-wrap hidden" style="width:100%;">
               <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
@@ -681,6 +682,47 @@
         <div class="editor-footer">
           <input id="editor-note-input" class="search-input" type="text" placeholder="版本变更说明（选填）" style="width:100%;" />
           <button id="editor-save-btn" class="btn btn-primary btn-block" type="button">保存为新版本（在线编辑更新）</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新建纯文本 (.txt) 文件弹窗 -->
+  <div id="create-txt-modal" class="modal hidden">
+    <div class="modal-backdrop" id="create-txt-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title">新建纯文本文件 (.txt)</div>
+        <div class="modal-header-actions">
+          <span class="ver-badge">仅支持 TXT</span>
+          <button id="create-txt-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body editor-modal-body">
+        <div class="create-txt-meta-grid">
+          <label class="create-txt-field">
+            <span class="create-txt-label">文件名</span>
+            <div class="txt-name-row">
+              <input id="create-txt-name" class="search-input" type="text" placeholder="输入文件名，例如：会议纪要" autocomplete="off" />
+              <span class="txt-ext-tag">.txt</span>
+            </div>
+          </label>
+          <label class="create-txt-field">
+            <span class="create-txt-label">所属目录（选填）</span>
+            <input id="create-txt-folder" class="search-input" type="text" placeholder="留空保存在根目录，例如：笔记/2026" autocomplete="off" />
+          </label>
+        </div>
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <span id="create-txt-stats" class="editor-stats-text">0 行 · 0 字符</span>
+          </div>
+          <div class="editor-toolbar-right">
+            <span class="editor-stats-text">按当前权限保存</span>
+          </div>
+        </div>
+        <textarea id="create-txt-content" class="editor-textarea create-txt-textarea" spellcheck="false" placeholder="在此直接输入 .txt 文本内容..."></textarea>
+        <div class="editor-footer">
+          <button id="create-txt-save-btn" class="btn btn-primary btn-block" type="button">创建并上传 .txt</button>
         </div>
       </div>
     </div>
@@ -1036,7 +1078,7 @@
             </div>
             <div class="update-status-card">
               <div class="update-meta-grid">
-                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.10</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.11</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>

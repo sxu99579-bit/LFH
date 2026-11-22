@@ -4159,3 +4159,125 @@ code {
   font-size: 11.5px;
   color: var(--muted);
 }
+
+/* 新建 TXT 弹窗与超级剪贴板状态样式 */
+.create-txt-meta-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 10px;
+}
+
+.create-txt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.create-txt-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.txt-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.txt-name-row .search-input {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.txt-ext-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 11px;
+  height: 36px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-left: none;
+  border-top-right-radius: 8px;
+  border-bottom-right-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--muted);
+  user-select: none;
+}
+
+.create-txt-textarea {
+  width: 100%;
+  min-height: 240px;
+  resize: vertical;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.create-txt-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.cluster-clipboard-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.cluster-clipboard-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cluster-clipboard-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.clip-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.clip-status-badge.on {
+  background: var(--success-bg);
+  color: var(--success-text);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.clip-status-badge.off {
+  background: var(--surface-3);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 640px) {
+  .create-txt-meta-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -37,7 +37,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.10</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.11</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -115,7 +115,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.10</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.11</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
@@ -233,7 +233,6 @@
             正在识别设备...
           </div>
           <span class="user-badge" id="user-badge">-</span>
-          <a class="btn btn-ghost btn-xs" href="/?view=mobile" title="切换到专为手机打造的移动端界面">手机版</a>
           <button id="btn-top-theme" class="btn btn-ghost btn-xs" type="button">浅色</button>
           <button id="btn-open-settings" class="btn btn-primary btn-xs" type="button">
             <svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -275,6 +274,7 @@
               <div class="upload-btn-group">
                 <button id="btn-pick-files" class="btn btn-primary btn-sm" type="button">选择文件</button>
                 <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">选择文件夹</button>
+                <button id="btn-create-txt" class="btn btn-ghost btn-sm" type="button">新建 TXT</button>
               </div>
             </div>
           </section>
@@ -432,6 +432,47 @@
             <span class="switch-desc">保存后将自动生成新版本（更新方式：在线编辑更新）并保留历史版本</span>
             <button id="editor-save-btn" class="btn btn-primary btn-sm" type="button">保存为新版本 (Ctrl+S)</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新建纯文本 (.txt) 文件弹窗 -->
+  <div id="create-txt-modal" class="modal hidden">
+    <div class="modal-backdrop" id="create-txt-backdrop"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div class="modal-title">新建纯文本文件 (.txt)</div>
+        <div class="modal-header-actions">
+          <span class="ver-badge">仅支持 TXT</span>
+          <button id="create-txt-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body editor-modal-body">
+        <div class="create-txt-meta-grid">
+          <label class="create-txt-field">
+            <span class="create-txt-label">文件名</span>
+            <div class="txt-name-row">
+              <input id="create-txt-name" class="search-input" type="text" placeholder="输入文件名，例如：会议纪要" autocomplete="off" />
+              <span class="txt-ext-tag">.txt</span>
+            </div>
+          </label>
+          <label class="create-txt-field">
+            <span class="create-txt-label">所属目录（选填）</span>
+            <input id="create-txt-folder" class="search-input" type="text" placeholder="留空保存在根目录，例如：笔记/2026" autocomplete="off" />
+          </label>
+        </div>
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <span id="create-txt-stats" class="editor-stats-text">0 行 · 0 字符</span>
+          </div>
+          <div class="editor-toolbar-right">
+            <span class="editor-stats-text">将按当前可见权限与目标节点策略保存</span>
+          </div>
+        </div>
+        <textarea id="create-txt-content" class="editor-textarea create-txt-textarea" spellcheck="false" placeholder="在此直接输入 .txt 文本内容..."></textarea>
+        <div class="editor-footer">
+          <button id="create-txt-save-btn" class="btn btn-primary btn-sm" type="button">创建并上传 .txt (Ctrl+S)</button>
         </div>
       </div>
     </div>
@@ -830,7 +871,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.10</strong>
+                  <strong id="upd-cur-version">V0.11.21.11</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>

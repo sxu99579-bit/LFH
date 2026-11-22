@@ -21,7 +21,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.10",
+  appVersion: "V0.11.21.11",
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -665,7 +665,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.10";
+  const ver = state.appVersion || "V0.11.21.11";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -2816,6 +2816,85 @@ async function saveTextEditor() {
   }
 }
 
+function updateCreateTxtStats() {
+  const ta = $("create-txt-content");
+  const stats = $("create-txt-stats");
+  if (!ta || !stats) return;
+  const val = ta.value || "";
+  const lines = val === "" ? 0 : val.split("\n").length;
+  stats.textContent = `${lines} 行 · ${val.length} 字符`;
+}
+
+function openCreateTxtModal() {
+  const modal = $("create-txt-modal");
+  if (!modal) return;
+  if ($("create-txt-name")) $("create-txt-name").value = "";
+  if ($("create-txt-folder")) $("create-txt-folder").value = "";
+  if ($("create-txt-content")) $("create-txt-content").value = "";
+  updateCreateTxtStats();
+  modal.classList.remove("hidden");
+  setTimeout(() => {
+    $("create-txt-name")?.focus();
+  }, 20);
+}
+
+function closeCreateTxtModal() {
+  if ($("create-txt-modal")) $("create-txt-modal").classList.add("hidden");
+}
+
+async function saveCreateTxtFile() {
+  const nameEl = $("create-txt-name");
+  const folderEl = $("create-txt-folder");
+  const contentEl = $("create-txt-content");
+  const btn = $("create-txt-save-btn");
+  const rawName = (nameEl?.value || "").trim();
+  if (!rawName) {
+    showToast("请输入 .txt 文件名", "error");
+    nameEl?.focus();
+    return;
+  }
+
+  const folderPath = (folderEl?.value || "").trim();
+  const content = contentEl?.value || "";
+  const targetNode = (state.user && state.user.role === "admin" && $("upload-target-node"))
+    ? $("upload-target-node").value
+    : "auto";
+  const origText = btn ? (btn.dataset.origText || btn.textContent) : "";
+  if (btn) {
+    btn.dataset.origText = origText;
+    btn.disabled = true;
+    btn.textContent = "正在创建并上传...";
+  }
+  state.isUploadingSelf = true;
+  try {
+    const res = await api("/api/files/create-txt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: rawName,
+        folder_path: folderPath,
+        content,
+        allowed_users: Array.isArray(state.uploadAllowedUsers) ? state.uploadAllowedUsers : [],
+        target_node: targetNode,
+      }),
+    });
+    const createdName = res.file?.name || (rawName.toLowerCase().endsWith(".txt") ? rawName : `${rawName}.txt`);
+    showToast(`已创建并保存文本文件：${createdName}`, "success");
+    closeCreateTxtModal();
+    await refreshAll();
+  } catch (err) {
+    showToast(err.message || "创建文本文件失败", "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = origText || "创建并上传 .txt (Ctrl+S)";
+    }
+    setTimeout(() => {
+      state.isUploadingSelf = false;
+    }, 600);
+  }
+}
+
 function updateUploadAccessButton() {
   const btn = $("btn-upload-access");
   if (!btn) return;
@@ -3473,6 +3552,7 @@ function renderNodeHealthPage() {
                 ${n.is_self ? `<span class="cat-tag">本机</span>` : ""}
                 ${roleBadge}
                 ${onlineBadge}
+                <span class="clip-status-badge ${n.clipboard_enabled ? "on" : "off"}">超级剪贴板：${n.clipboard_enabled ? "已开启" : "已关闭"}</span>
               </div>
               <div class="health-node-url">${escapeHtml(n.http_url || "本机直连")} · ${escapeHtml(n.os || "-")}/${escapeHtml(n.arch || "-")} · 文件数 ${Number(n.file_count || 0)} 个</div>
             </div>
@@ -4359,6 +4439,14 @@ function renderAdminCluster() {
           </label>
           <button class="btn btn-ghost btn-xs" type="button" data-save-storage="${nid}" ${n.online ? "" : "disabled"}>切换存储位置</button>
         </div>
+        <div class="cluster-clipboard-bar">
+          <label class="cluster-clipboard-toggle">
+            <input type="checkbox" data-clipboard-toggle="${nid}" ${n.clipboard_enabled ? "checked" : ""} ${n.online ? "" : "disabled"} />
+            <span>开启超级剪贴板</span>
+            <span class="clip-status-badge ${n.clipboard_enabled ? "on" : "off"}">${n.clipboard_enabled ? "已开启" : "已关闭"}</span>
+          </label>
+          <span class="cluster-clipboard-hint">${n.online ? "开启后自动命名并上传该节点本机复制的文本/图片至「超级剪贴板/YYYY-MM」" : "节点离线，无法远程切换超级剪贴板"}</span>
+        </div>
       </td>
     `;
     tbody.appendChild(storageTr);
@@ -4667,6 +4755,7 @@ function bindEvents() {
       e.target.value = "";
     };
   }
+  if ($("btn-create-txt")) $("btn-create-txt").onclick = openCreateTxtModal;
 
   // Highlight dropzone bar visually (actual drop handled once at window level to support full-screen auto-upload)
   const dz = $("dropzone");
@@ -4903,6 +4992,19 @@ function bindEvents() {
   if ($("editor-close")) $("editor-close").onclick = closeTextEditor;
   if ($("editor-backdrop")) $("editor-backdrop").onclick = closeTextEditor;
   if ($("editor-save-btn")) $("editor-save-btn").onclick = saveTextEditor;
+  if ($("create-txt-close")) $("create-txt-close").onclick = closeCreateTxtModal;
+  if ($("create-txt-backdrop")) $("create-txt-backdrop").onclick = closeCreateTxtModal;
+  if ($("create-txt-save-btn")) $("create-txt-save-btn").onclick = saveCreateTxtFile;
+  if ($("create-txt-content")) {
+    const cta = $("create-txt-content");
+    cta.oninput = updateCreateTxtStats;
+    cta.onkeydown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveCreateTxtFile();
+      }
+    };
+  }
   if ($("editor-btn-json-format")) $("editor-btn-json-format").onclick = () => formatEditorJson(false);
   if ($("editor-btn-json-minify")) $("editor-btn-json-minify").onclick = () => formatEditorJson(true);
   if ($("editor-btn-json-validate")) $("editor-btn-json-validate").onclick = validateEditorJson;
@@ -5533,7 +5635,32 @@ function bindEvents() {
 
   $("btn-save-endpoint").onclick = () => saveAdminEndpointSettings();
 
-  $("cluster-nodes-tbody").onchange = (e) => {
+  $("cluster-nodes-tbody").onchange = async (e) => {
+    const clipToggle = e.target.closest("[data-clipboard-toggle]");
+    if (clipToggle) {
+      const nodeID = clipToggle.dataset.clipboardToggle;
+      const enabled = Boolean(clipToggle.checked);
+      clipToggle.disabled = true;
+      try {
+        const data = await api("/api/admin/cluster/clipboard", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_id: nodeID, enabled }),
+        });
+        state.pool = data.pool || state.pool;
+        renderAdminCluster();
+        renderPoolStatus();
+        renderNodeSummary();
+        renderNodeHealthPage();
+        showToast(enabled ? "已为该节点开启超级剪贴板" : "已关闭该节点超级剪贴板", "success");
+      } catch (err) {
+        clipToggle.checked = !enabled;
+        clipToggle.disabled = false;
+        showToast(err.message || "切换超级剪贴板状态失败", "error");
+      }
+      return;
+    }
+
     const driveSel = e.target.closest("[data-drive-select]");
     if (!driveSel || !driveSel.value) return;
     const nodeID = driveSel.dataset.driveSelect;
