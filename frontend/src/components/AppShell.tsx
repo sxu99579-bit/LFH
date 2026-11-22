@@ -129,7 +129,7 @@ export function AppShell({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold tracking-tight">LFH</div>
           <div className="truncate text-[11px] text-muted-foreground">
-            {info?.version || 'V0.11.22.5'} · 分布式共享池
+            {info?.version || 'V0.11.22.6'} · 分布式共享池
           </div>
         </div>
         {sidebarOpen && (
@@ -369,7 +369,7 @@ export function AppShell({
           onClose={() => setMobileMenuOpen(false)}
           side="bottom"
           title="快捷操作与入口切换"
-          subtitle={`当前版本 ${info?.version || 'V0.11.22.5'}`}
+          subtitle={`当前版本 ${info?.version || 'V0.11.22.6'}`}
         >
           <div className="grid grid-cols-2 gap-2.5">
             <button

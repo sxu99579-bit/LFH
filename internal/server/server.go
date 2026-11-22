@@ -458,6 +458,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/update/apply", s.requireAdmin(s.handleApplyUpdate))
 	mux.HandleFunc("POST /api/admin/update/switch", s.requireAdmin(s.handleSwitchVersion))
 	mux.HandleFunc("GET /api/admin/audit", s.requireAdmin(s.handleAdminAudit))
+	mux.HandleFunc("GET /api/admin/logs", s.requireAdmin(s.handleAdminLogs))
+	mux.HandleFunc("POST /api/admin/logs/clear", s.requireAdmin(s.handleAdminLogsClear))
 	mux.HandleFunc("POST /api/admin/integrity/scrub", s.requireAdmin(s.handleAdminIntegrityScrub))
 	mux.HandleFunc("GET /api/admin/integrity/status", s.requireAdmin(s.handleAdminIntegrityStatus))
 	mux.HandleFunc("GET /api/admin/plugins/marketplace", s.requireAdmin(s.handleAdminPluginMarketplace))
@@ -3037,6 +3039,34 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request, u auth
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"entries": entries,
+	})
+}
+
+func (s *Server) handleAdminLogs(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	level := r.URL.Query().Get("level")
+	query := r.URL.Query().Get("q")
+	entries, total, counts := security.GlobalLogs.List(limit, level, query)
+	if entries == nil {
+		entries = []security.LogEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"total":   total,
+		"counts":  counts,
+	})
+}
+
+func (s *Server) handleAdminLogsClear(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	security.GlobalLogs.Clear()
+	s.logAudit(r, u.Username, "logs_clear", "runtime", "ok", "cleared runtime log buffer")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
 	})
 }
 

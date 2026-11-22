@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   CheckCircle2,
   Copy,
+  Download,
   HardDrive,
   History,
   KeyRound,
@@ -11,6 +12,7 @@ import {
   Search,
   Server,
   ShieldCheck,
+  Terminal,
   Trash2,
   UserCheck,
   Users,
@@ -27,6 +29,7 @@ import type {
   NodeStatus,
   ReleaseSummary,
   ServerInfo,
+  SystemLogEntry,
   ThemeMode,
   UpdateStatus,
   User,
@@ -56,7 +59,7 @@ interface SettingsPageProps {
   onOpenMountModal: () => void
 }
 
-type SettingsTab = 'general' | 'security' | 'users' | 'cluster' | 'update'
+type SettingsTab = 'general' | 'security' | 'users' | 'cluster' | 'update' | 'logs'
 
 export function SettingsPage({
   user,
@@ -127,6 +130,16 @@ export function SettingsPage({
   const [autoCheck, setAutoCheck] = useState(true)
   const [busyAction, setBusyAction] = useState('')
 
+  // System Logs state
+  const [logsSubTab, setLogsSubTab] = useState<'runtime' | 'audit'>('runtime')
+  const [runtimeLogs, setRuntimeLogs] = useState<SystemLogEntry[]>([])
+  const [logsTotal, setLogsTotal] = useState(0)
+  const [logsCounts, setLogsCounts] = useState<Record<string, number>>({})
+  const [logLevel, setLogLevel] = useState<'all' | 'INFO' | 'WARN' | 'ERROR'>('all')
+  const [logQuery, setLogQuery] = useState('')
+  const [logsAutoRefresh, setLogsAutoRefresh] = useState(true)
+  const [auditQuery, setAuditQuery] = useState('')
+
   const pool = cluster?.pool || info?.pool || null
   const nodes = pool?.nodes || []
 
@@ -189,12 +202,21 @@ export function SettingsPage({
               setSelectedVersion(relRes.releases[0].tag_name)
             }
           }
+        } else if (targetTab === 'logs') {
+          const [logRes, audRes] = await Promise.all([
+            api.getSystemLogs({ limit: 300, level: logLevel, q: logQuery }),
+            api.getAuditLogs(200),
+          ])
+          setRuntimeLogs(logRes.entries || [])
+          setLogsTotal(logRes.total || 0)
+          setLogsCounts(logRes.counts || {})
+          setAuditLogs(audRes.entries || [])
         }
       } catch (err) {
         toast(err instanceof Error ? err.message : '加载配置失败', 'error')
       }
     },
-    [isAdmin, selectedVersion, toast]
+    [isAdmin, logLevel, logQuery, selectedVersion, toast]
   )
 
   useEffect(() => {
@@ -202,6 +224,21 @@ export function SettingsPage({
       void loadAdminTab(tab)
     }
   }, [tab, loadAdminTab])
+
+  useEffect(() => {
+    if (!isAdmin || tab !== 'logs' || logsSubTab !== 'runtime' || !logsAutoRefresh) return
+    const timer = window.setInterval(() => {
+      void api
+        .getSystemLogs({ limit: 300, level: logLevel, q: logQuery })
+        .then((res) => {
+          setRuntimeLogs(res.entries || [])
+          setLogsTotal(res.total || 0)
+          setLogsCounts(res.counts || {})
+        })
+        .catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [isAdmin, logLevel, logQuery, logsAutoRefresh, logsSubTab, tab])
 
   const saveDeviceName = () => {
     try {
@@ -497,10 +534,11 @@ export function SettingsPage({
 
   const allTabs: Array<{ id: SettingsTab; label: string; adminOnly?: boolean }> = [
     { id: 'general', label: '外观与账号' },
-    { id: 'security', label: '安全、邀请与审计', adminOnly: true },
+    { id: 'security', label: '安全与邀请', adminOnly: true },
     { id: 'users', label: '用户治理', adminOnly: true },
     { id: 'cluster', label: '集群、多网卡与挂载', adminOnly: true },
     { id: 'update', label: '版本升级与退回', adminOnly: true },
+    { id: 'logs', label: '系统日志', adminOnly: true },
   ]
   const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin)
 
@@ -1473,6 +1511,224 @@ export function SettingsPage({
               </div>
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {/* ==================== TAB: SYSTEM LOGS ==================== */}
+      {tab === 'logs' && isAdmin && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-muted/30 p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setLogsSubTab('runtime')}
+                className={cn(
+                  'rounded-md px-3 py-1.5 font-medium transition-colors cursor-pointer',
+                  logsSubTab === 'runtime' ? 'bg-card text-foreground shadow-2xs' : 'text-muted-foreground'
+                )}
+              >
+                服务运行日志 ({logsTotal})
+              </button>
+              <button
+                type="button"
+                onClick={() => setLogsSubTab('audit')}
+                className={cn(
+                  'rounded-md px-3 py-1.5 font-medium transition-colors cursor-pointer',
+                  logsSubTab === 'audit' ? 'bg-card text-foreground shadow-2xs' : 'text-muted-foreground'
+                )}
+              >
+                安全审计日志 ({auditLogs.length})
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {logsSubTab === 'runtime' && (
+                <label className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 cursor-pointer">
+                  <Switch checked={logsAutoRefresh} onCheckedChange={setLogsAutoRefresh} />
+                  <span>3秒自动刷新</span>
+                </label>
+              )}
+              <Button size="xs" variant="outline" onClick={() => void loadAdminTab('logs')}>
+                <RefreshCw className="h-3 w-3" />
+                <span>刷新</span>
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  const text =
+                    logsSubTab === 'runtime'
+                      ? runtimeLogs
+                          .map((l) => `${formatTime(l.timestamp)} [${l.level}] [${l.source}] ${l.message}`)
+                          .join('\n')
+                      : JSON.stringify(auditLogs, null, 2)
+                  const blob = new Blob([text], {
+                    type: logsSubTab === 'runtime' ? 'text/plain;charset=utf-8' : 'application/json;charset=utf-8',
+                  })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = logsSubTab === 'runtime' ? 'lfh-runtime.log' : 'lfh-audit.json'
+                  document.body.appendChild(a)
+                  a.click()
+                  a.remove()
+                  URL.revokeObjectURL(url)
+                }}
+              >
+                <Download className="h-3 w-3" />
+                <span>导出文件</span>
+              </Button>
+              {logsSubTab === 'runtime' && (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  className="text-destructive"
+                  onClick={async () => {
+                    if (!window.confirm('确定清空当前内存运行日志缓冲吗？')) return
+                    await api.clearSystemLogs()
+                    toast('已清空运行日志', 'success')
+                    await loadAdminTab('logs')
+                  }}
+                >
+                  <Trash2 className="h-3 w-3" />
+                  <span>清空</span>
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {logsSubTab === 'runtime' ? (
+            <Card>
+              <CardHeader className="pb-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Terminal className="h-4 w-4 text-primary" />
+                      <span>节点运行日志流</span>
+                    </CardTitle>
+                    <CardDescription>实时保留当前节点最近 1000 条 HTTP、集群通信、升级与系统事件日志</CardDescription>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(['all', 'INFO', 'WARN', 'ERROR'] as const).map((lvl) => (
+                      <button
+                        key={lvl}
+                        type="button"
+                        onClick={() => setLogLevel(lvl)}
+                        className={cn(
+                          'rounded-full border px-2.5 py-0.5 text-[11px] cursor-pointer tabular-nums',
+                          logLevel === lvl
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : 'border-border text-muted-foreground hover:text-foreground'
+                        )}
+                      >
+                        {lvl === 'all' ? `全部 (${logsTotal})` : `${lvl} (${logsCounts[lvl] || 0})`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="pt-2">
+                  <Input
+                    value={logQuery}
+                    onChange={(e) => setLogQuery(e.target.value)}
+                    placeholder="按关键词或模块筛选（如：http、cluster、error、updater）..."
+                    className="h-8 text-xs"
+                  />
+                </div>
+              </CardHeader>
+              <CardContent>
+                {runtimeLogs.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-border p-8 text-center text-xs text-muted-foreground">
+                    当前筛选条件下暂无运行日志记录
+                  </div>
+                ) : (
+                  <div className="max-h-[55vh] overflow-auto rounded-lg border border-border bg-muted/20 divide-y divide-border font-mono text-[11px]">
+                    {runtimeLogs.map((entry) => (
+                      <div key={entry.seq} className="flex flex-wrap sm:flex-nowrap items-start gap-2 px-3 py-2 hover:bg-muted/35">
+                        <span className="shrink-0 text-muted-foreground tabular-nums">
+                          {formatTime(entry.timestamp)}
+                        </span>
+                        <Badge
+                          variant={
+                            entry.level === 'ERROR'
+                              ? 'destructive'
+                              : entry.level === 'WARN'
+                              ? 'warning'
+                              : 'secondary'
+                          }
+                          className="shrink-0 font-mono text-[10px]"
+                        >
+                          {entry.level}
+                        </Badge>
+                        <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
+                          {entry.source}
+                        </Badge>
+                        <span className="min-w-0 break-all text-foreground">{entry.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle>全量安全审计日志</CardTitle>
+                <CardDescription>记录账号登录、文件上传、版本回退、权限调整与系统配置操作</CardDescription>
+                <div className="pt-2">
+                  <Input
+                    value={auditQuery}
+                    onChange={(e) => setAuditQuery(e.target.value)}
+                    placeholder="筛选操作人、动作、目标文件或 IP..."
+                    className="h-8 text-xs"
+                  />
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="max-h-[55vh] overflow-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-border text-muted-foreground sticky top-0 bg-card">
+                      <tr>
+                        <th className="py-2 pr-3 font-medium">时间</th>
+                        <th className="py-2 pr-3 font-medium">操作人</th>
+                        <th className="py-2 pr-3 font-medium">动作</th>
+                        <th className="py-2 pr-3 font-medium">目标</th>
+                        <th className="py-2 pr-3 font-medium">来源 IP</th>
+                        <th className="py-2 pr-3 font-medium">状态</th>
+                        <th className="py-2 font-medium">详情</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {auditLogs
+                        .filter((e) => {
+                          const q = auditQuery.trim().toLowerCase()
+                          if (!q) return true
+                          return `${e.actor} ${e.action} ${e.target || ''} ${e.ip || ''} ${e.detail || ''}`
+                            .toLowerCase()
+                            .includes(q)
+                        })
+                        .map((entry, idx) => (
+                          <tr key={entry.id || idx}>
+                            <td className="py-2 pr-3 whitespace-nowrap text-muted-foreground tabular-nums">
+                              {formatTime(entry.timestamp || entry.time || entry.created_at)}
+                            </td>
+                            <td className="py-2 pr-3">{entry.actor || '-'}</td>
+                            <td className="py-2 pr-3 font-mono text-[11px]">{entry.action}</td>
+                            <td className="py-2 pr-3 max-w-[140px] truncate">{entry.target || '-'}</td>
+                            <td className="py-2 pr-3 font-mono text-[11px]">{entry.ip || '-'}</td>
+                            <td className="py-2 pr-3">
+                              <Badge variant={entry.status === 'error' || entry.status === 'denied' ? 'destructive' : 'success'}>
+                                {entry.status || 'ok'}
+                              </Badge>
+                            </td>
+                            <td className="py-2 max-w-[240px] truncate text-muted-foreground">{entry.detail || '-'}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </div>
       )}
 

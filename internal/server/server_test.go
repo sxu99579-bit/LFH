@@ -3184,3 +3184,56 @@ func TestClusterBandwidthProbeAndPluginRecommendations(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminSystemLogsAndClear(t *testing.T) {
+	srv, _, _, ts := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Logs-Entry",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+
+	security.GlobalLogs.Clear()
+	_, _ = security.GlobalLogs.Write([]byte("2026/11/22 15:20:00 [http] listening on :8080\n"))
+	_, _ = security.GlobalLogs.Write([]byte("2026/11/22 15:20:01 [cluster] failed dial peer: timeout\n"))
+
+	// Unauthenticated request must be rejected.
+	unauthRes, err := http.Get(ts.URL + "/api/admin/logs")
+	if err != nil {
+		t.Fatalf("GET /api/admin/logs unauth: %v", err)
+	}
+	unauthRes.Body.Close()
+	if unauthRes.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated logs request, got %d", unauthRes.StatusCode)
+	}
+
+	res, err := adminClient.Get(ts.URL + "/api/admin/logs?level=error&q=timeout")
+	if err != nil {
+		t.Fatalf("GET /api/admin/logs: %v", err)
+	}
+	var out struct {
+		Entries []security.LogEntry `json:"entries"`
+		Total   int                 `json:"total"`
+		Counts  map[string]int      `json:"counts"`
+	}
+	_ = json.NewDecoder(res.Body).Decode(&out)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || len(out.Entries) != 1 || out.Total != 2 || out.Counts["ERROR"] != 1 {
+		t.Fatalf("unexpected logs output: status=%d out=%+v", res.StatusCode, out)
+	}
+
+	clrRes, err := adminClient.Post(ts.URL+"/api/admin/logs/clear", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/admin/logs/clear: %v", err)
+	}
+	clrRes.Body.Close()
+	if clrRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 clearing logs, got %d", clrRes.StatusCode)
+	}
+
+	afterEntries, afterTotal, _ := security.GlobalLogs.List(10, "", "")
+	if len(afterEntries) != 0 || afterTotal != 0 {
+		t.Fatalf("expected logs cleared cleanly, got len=%d total=%d", len(afterEntries), afterTotal)
+	}
+}

@@ -384,6 +384,14 @@ export interface AuditEntry {
   detail?: string
 }
 
+export interface SystemLogEntry {
+  seq: number
+  timestamp: string
+  level: 'INFO' | 'WARN' | 'ERROR' | string
+  source: string
+  message: string
+}
+
 export interface IntegrityStatus {
   corrupted_count: number
   corrupted_ids?: string[]

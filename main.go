@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"lfh/internal/auth"
 	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
+	"lfh/internal/security"
 	"lfh/internal/server"
 	"lfh/internal/storage"
 	"lfh/internal/updater"
@@ -128,6 +130,8 @@ func filterUpgradeEnv(readyPath string) []string {
 }
 
 func main() {
+	log.SetOutput(io.MultiWriter(os.Stderr, security.GlobalLogs))
+
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	port := flag.String("port", "8080", "HTTP listen port")
 	dataDir := flag.String("data", "./data", "Data directory for users and uploaded files")
@@ -397,6 +401,8 @@ func main() {
 	}()
 
 	st := clusterMgr.SelfStatus()
+	log.Printf("[system] LFH %s started (role=%s node=%s url=%s entry=%s)",
+		version.Version, st.Role, st.NodeName, st.HTTPURL, clusterMgr.EntryURL())
 	fmt.Printf("%s %s 已启动:\n", version.AppName, version.Version)
 	fmt.Printf("  节点角色: %s (%s)\n", st.Role, st.NodeName)
 	fmt.Printf("  预留空间: %s\n", formatQuotaText(st.QuotaBytes))

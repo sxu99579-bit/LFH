@@ -16,6 +16,7 @@ import type {
   ReleaseSummary,
   ServerInfo,
   SummaryStats,
+  SystemLogEntry,
   UpdateStatus,
   UploadPolicy,
   User,
@@ -208,6 +209,19 @@ export const api = {
       method: 'POST',
     }),
   getAuditLogs: (limit = 100) => apiFetch<{ entries: AuditEntry[] }>(`/api/admin/audit?limit=${limit}`),
+  getSystemLogs: (params?: { limit?: number; level?: string; q?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.limit) qs.set('limit', String(params.limit))
+    if (params?.level && params.level !== 'all') qs.set('level', params.level)
+    if (params?.q?.trim()) qs.set('q', params.q.trim())
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return apiFetch<{
+      entries: SystemLogEntry[]
+      total: number
+      counts: Record<string, number>
+    }>(`/api/admin/logs${suffix}`)
+  },
+  clearSystemLogs: () => apiFetch<{ ok: boolean }>('/api/admin/logs/clear', { method: 'POST' }),
 
   // Cluster governance, zero-copy mounts & bandwidth
   probeBandwidth: () =>
