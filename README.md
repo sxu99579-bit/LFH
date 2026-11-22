@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.6</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">问题反馈</a> · <code>V0.11.22.6</code>
 </p>
 
 ---
@@ -179,6 +179,13 @@ go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
 ```bash
 go test -count=1 ./...
 ```
+
+## 反馈与交流
+
+欢迎任何部署反馈、改进建议或功能点子：
+
+- **自由留言与讨论区**：前往 [GitHub Discussions](https://github.com/sxu99579-bit/LFH/discussions) 发帖交流、晒出你的局域网部署方案或提问答疑。
+- **Bug 反馈与功能建议**：前往 [GitHub Issues](https://github.com/sxu99579-bit/LFH/issues) 选择对应模板提交，附带「设置 -> 系统日志」导出日志能帮我们更快定位问题。
 
 ## 开源协议
 

@@ -1,0 +1,24 @@
+name: Feature Request / 功能建议
+description: 提出新功能、界面改进、插件扩展或组网体验建议
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 期望的功能或改进 / Feature Summary
+      description: 简述你想让 LFH 支持什么新能力或交互优化
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: 使用场景 / Use Case
+      description: 这个功能能帮你解决局域网文件协作、存储或算力调度中的什么痛点？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望表现或参考设计 / Proposed Design (Optional)
+      description: 如有参考产品截图或接口思路，欢迎补充说明

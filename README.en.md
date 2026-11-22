@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.6</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.22.6</code>
 </p>
 
 ---
@@ -179,6 +179,13 @@ Forks, custom integrations, and secondary development are warmly encouraged. Run
 ```bash
 go test -count=1 ./...
 ```
+
+## Feedback & Community
+
+Bug reports, feature ideas, and deployment showcases are always welcome:
+
+- **Community Discussions**: Join [GitHub Discussions](https://github.com/sxu99579-bit/LFH/discussions) for Q&A, ideas, or sharing your setup.
+- **Bug Reports & Feature Requests**: Open a structured issue on [GitHub Issues](https://github.com/sxu99579-bit/LFH/issues) (exporting runtime logs from **Settings -> System Logs** helps speed up diagnosis).
 
 ## License
 
