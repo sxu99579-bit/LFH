@@ -25,7 +25,7 @@ export function AuthView({
   const [notice, setNotice] = useState('')
 
   const inviteRequired = serverInfo?.invite_required !== false
-  const ver = serverInfo?.version || 'V0.11.22.4'
+  const ver = serverInfo?.version || 'V0.11.22.5'
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -69,8 +69,12 @@ export function AuthView({
 
       <div className="w-full max-w-md space-y-5">
         <div className="flex flex-col items-center text-center">
-          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-card shadow-sm overflow-hidden">
-            <img src="/logo.png" alt="LFH" className="h-10 w-10 object-cover" />
+          <div className="mb-3 flex h-13 w-13 items-center justify-center">
+            <img
+              src={theme === 'dark' ? '/logo-icon-dark.png' : '/logo-icon-light.png'}
+              alt="LFH"
+              className="h-12 w-12 object-contain"
+            />
           </div>
           <div className="flex items-center gap-2">
             <h1 className="text-xl font-bold tracking-tight">LAN File Hub</h1>

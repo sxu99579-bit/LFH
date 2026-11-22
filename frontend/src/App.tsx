@@ -267,7 +267,11 @@ function WorkspaceApp() {
   if (booting) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-background text-foreground">
-        <img src="/logo.png" alt="LFH" className="h-12 w-12 rounded-xl shadow-md animate-pulse" />
+        <img
+          src={theme === 'dark' ? '/logo-dark.png' : '/logo-light.png'}
+          alt="LFH"
+          className="h-14 w-14 object-contain animate-pulse"
+        />
         <div className="text-xs text-muted-foreground">正在连接 LFH 分布式中枢...</div>
       </div>
     )

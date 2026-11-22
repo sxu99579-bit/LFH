@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="./web/logo.png" width="92" alt="LFH Logo" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./web/logo-dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="./web/logo-light.png" />
+    <img src="./web/logo.png" width="112" alt="LFH Logo" />
+  </picture>
 </p>
 
 <h1 align="center">LFH — LAN FileHub</h1>
@@ -9,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.4</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.5</code>
 </p>
 
 ---

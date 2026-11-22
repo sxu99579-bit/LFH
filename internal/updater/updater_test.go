@@ -46,7 +46,8 @@ func TestCompareVersions(t *testing.T) {
 		{"V0.11.22.2", "V0.11.22.1", 1},
 		{"V0.11.22.3", "V0.11.22.2", 1},
 		{"V0.11.22.4", "V0.11.22.3", 1},
-		{"V0.12.0", "V0.11.22.4", 1},
+		{"V0.11.22.5", "V0.11.22.4", 1},
+		{"V0.12.0", "V0.11.22.5", 1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersions(tc.a, tc.b); got != tc.want {
@@ -278,7 +279,7 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 	oldSum := sha256.Sum256(oldBytes)
 	oldHex := hex.EncodeToString(oldSum[:])
 
-	curBytes := []byte("LFH-CURRENT-BINARY-V0.11.22.4")
+	curBytes := []byte("LFH-CURRENT-BINARY-V0.11.22.5")
 	curSum := sha256.Sum256(curBytes)
 	curHex := hex.EncodeToString(curSum[:])
 
@@ -288,8 +289,8 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 		case "/repos/tester/LFH/releases":
 			_ = json.NewEncoder(w).Encode([]githubRelease{
 				{
-					TagName:     "V0.11.22.4",
-					Name:        "V0.11.22.4",
+					TagName:     "V0.11.22.5",
+					Name:        "V0.11.22.5",
 					PublishedAt: "2026-11-22T10:00:00Z",
 					Assets: []ReleaseAsset{
 						{Name: assetName, Size: int64(len(curBytes)), BrowserDownloadURL: ts.URL + "/dl/cur/" + assetName},

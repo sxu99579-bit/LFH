@@ -121,11 +121,15 @@ export function AppShell({
     <div className="flex h-full flex-col bg-sidebar text-sidebar-foreground">
       {/* Brand header */}
       <div className="flex h-14 items-center gap-2.5 border-b border-sidebar-border px-4">
-        <img src="/logo.png" alt="LFH" className="h-8 w-8 rounded-lg object-cover shadow-xs" />
+        <img
+          src={theme === 'dark' ? '/logo-icon-dark.png' : '/logo-icon-light.png'}
+          alt="LFH"
+          className="h-8 w-8 object-contain shrink-0"
+        />
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold tracking-tight">LFH</div>
           <div className="truncate text-[11px] text-muted-foreground">
-            {info?.version || 'V0.11.22.4'} · 分布式共享池
+            {info?.version || 'V0.11.22.5'} · 分布式共享池
           </div>
         </div>
         {sidebarOpen && (
@@ -236,7 +240,11 @@ export function AppShell({
         {/* Mobile Header */}
         <header className="sticky top-0 z-30 flex h-13 items-center justify-between gap-2 border-b border-border bg-card/90 px-3 backdrop-blur-md">
           <div className="flex items-center gap-2 min-w-0">
-            <img src="/logo.png" alt="LFH" className="h-7 w-7 rounded-lg object-cover shrink-0" />
+            <img
+              src={theme === 'dark' ? '/logo-icon-dark.png' : '/logo-icon-light.png'}
+              alt="LFH"
+              className="h-7 w-7 object-contain shrink-0"
+            />
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold">LFH 局域网中枢</div>
               <div className="truncate text-[10px] text-muted-foreground">
@@ -361,7 +369,7 @@ export function AppShell({
           onClose={() => setMobileMenuOpen(false)}
           side="bottom"
           title="快捷操作与入口切换"
-          subtitle={`当前版本 ${info?.version || 'V0.11.22.4'}`}
+          subtitle={`当前版本 ${info?.version || 'V0.11.22.5'}`}
         >
           <div className="grid grid-cols-2 gap-2.5">
             <button
