@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,30 @@ func TestSignAndVerifyRequest(t *testing.T) {
 	reqTampered.Header = req.Header.Clone()
 	if VerifyRequest(reqTampered, "super-secret") {
 		t.Fatalf("expected method tampering to fail verification")
+	}
+}
+
+func TestVerifyRequestAntiReplayNonce(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/internal/cluster/clipboard", nil)
+	SignRequest(req, "cluster-sec", "node-1")
+	if req.Header.Get(hdrNonce) == "" {
+		t.Fatal("expected SignRequest to attach X-LFH-Nonce")
+	}
+	if !VerifyRequest(req, "cluster-sec") {
+		t.Fatal("first verification with valid nonce should succeed")
+	}
+	if VerifyRequest(req, "cluster-sec") {
+		t.Fatal("replayed request with identical nonce must be rejected")
+	}
+
+	// Legacy peer without X-LFH-Nonce remains accepted within time window.
+	legacyReq := httptest.NewRequest(http.MethodGet, "/internal/cluster/mounts", nil)
+	nowStr := strconv.FormatInt(time.Now().Unix(), 10)
+	legacyReq.Header.Set(hdrNodeID, "legacy-node")
+	legacyReq.Header.Set(hdrTimestamp, nowStr)
+	legacyReq.Header.Set(hdrSignature, computeSignature("cluster-sec", http.MethodGet, "/internal/cluster/mounts", nowStr, "legacy-node", ""))
+	if !VerifyRequest(legacyReq, "cluster-sec") {
+		t.Fatal("legacy signed request without nonce should remain accepted")
 	}
 }
 

@@ -21,9 +21,12 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.12",
+  appVersion: "V0.11.21.13",
   localImportMode: "import",
   mounts: [],
+  transfers: [],
+  transferTab: "upload",
+  transferOpen: false,
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -667,7 +670,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.12";
+  const ver = state.appVersion || "V0.11.21.13";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -1601,6 +1604,9 @@ function formatStorageModeBadge(rec) {
   if (rec?.source_missing) {
     badges.push(`<span class="zc-badge zc-missing" title="原始路径上的源文件已移动或删除，外部引用失效">源文件已失效</span>`);
   }
+  if (rec?.integrity_status === "corrupted") {
+    badges.push(`<span class="zc-badge zc-corrupt" title="底层文件 SHA-256 校验与索引记录不一致，可能发生磁盘静默损坏">校验异常</span>`);
+  }
   return badges.join("");
 }
 
@@ -1631,7 +1637,7 @@ function buildRecordMeta(rec) {
     ? `<button class="btn btn-ghost btn-xs" type="button" disabled title="节点离线">离线</button>`
     : rec.source_missing
     ? `<button class="btn btn-ghost btn-xs" type="button" disabled title="源文件已移动或删除">失效</button>`
-    : `<a class="btn btn-ghost btn-xs" href="/api/files/${rec.id}/download">下载</a>`;
+    : `<a class="btn btn-ghost btn-xs" href="/api/files/${rec.id}/download">下载</a><button class="btn btn-ghost btn-xs" type="button" data-action="queued-download" data-id="${rec.id}" title="加入下载队列（支持暂停/断点续传）">队列</button>`;
   const canDel = state.user && (state.user.role === "admin" || state.user.username === rec.uploader);
   const accessBtn = canDel && !isMountRec
     ? `<button class="btn btn-ghost btn-xs" type="button" data-action="access" data-id="${rec.id}" title="指定哪些用户可见与下载">${Array.isArray(rec.allowed_users) && rec.allowed_users.length > 0 ? "权限*" : "权限"}</button>`
@@ -2175,6 +2181,575 @@ function sendUploadBatchXHR(items, targetNode, onProgress) {
   });
 }
 
+const TRANSFER_CHUNK_BYTES = 4 * 1024 * 1024;
+const MAX_CONCURRENT_UPLOADS = 3;
+const MAX_CONCURRENT_DOWNLOADS = 2;
+const CHUNK_UPLOAD_WORKERS = 3;
+let transferRenderTimer = null;
+
+function formatETA(sec) {
+  if (sec == null || !isFinite(sec) || sec < 0) return "-";
+  const s = Math.round(sec);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${s % 60}s`;
+  return `${Math.floor(m / 60)}h${m % 60}m`;
+}
+
+function hasActiveTransfers() {
+  return state.transfers.some((t) => t.status === "running" || t.status === "queued");
+}
+
+function setTransferTab(tab) {
+  state.transferTab = ["upload", "download", "done"].includes(tab) ? tab : "upload";
+  document.querySelectorAll("[data-transfer-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.transferTab === state.transferTab);
+  });
+  renderTransferDrawer();
+}
+
+function setTransferDrawerOpen(open) {
+  state.transferOpen = Boolean(open);
+  if ($("transfer-drawer")) {
+    $("transfer-drawer").classList.toggle("hidden", !state.transferOpen);
+  }
+  renderTransferDrawer();
+}
+
+function scheduleTransferRender() {
+  if (transferRenderTimer) return;
+  transferRenderTimer = setTimeout(() => {
+    transferRenderTimer = null;
+    renderTransferDrawer();
+  }, 120);
+}
+
+function renderTransferDrawer() {
+  const fab = $("transfer-fab");
+  const badge = $("transfer-fab-badge");
+  const listEl = $("transfer-queue-list");
+  if (!fab || !listEl) return;
+
+  const uploads = state.transfers.filter((t) => t.direction === "upload" && t.status !== "done");
+  const downloads = state.transfers.filter((t) => t.direction === "download" && t.status !== "done");
+  const doneList = state.transfers.filter((t) => t.status === "done");
+  const activeCnt = state.transfers.filter((t) => t.status === "running" || t.status === "queued").length;
+
+  fab.classList.toggle("hidden", state.transfers.length === 0);
+  if (badge) {
+    badge.textContent = String(activeCnt);
+    badge.classList.toggle("hidden", activeCnt === 0);
+  }
+  if ($("transfer-count-upload")) $("transfer-count-upload").textContent = String(uploads.length);
+  if ($("transfer-count-download")) $("transfer-count-download").textContent = String(downloads.length);
+  if ($("transfer-count-done")) $("transfer-count-done").textContent = String(doneList.length);
+
+  // Sync compact top upload bar cleanly while uploads are active.
+  const wrap = $("upload-progress-wrap");
+  const fill = $("upload-progress-fill");
+  const text = $("upload-progress-text");
+  if (wrap && fill && text) {
+    const activeUps = state.transfers.filter((t) => t.direction === "upload" && (t.status === "running" || t.status === "queued"));
+    if (activeUps.length > 0) {
+      const tot = activeUps.reduce((s, t) => s + Math.max(1, t.size), 0);
+      const got = activeUps.reduce((s, t) => s + Math.min(t.loadedBytes || 0, Math.max(1, t.size)), 0);
+      const pct = Math.min(99, Math.round((got * 100) / Math.max(1, tot)));
+      wrap.classList.remove("hidden");
+      fill.style.width = `${pct}%`;
+      text.textContent = `${pct}% (${activeUps.length}个)`;
+    } else if (!hasActiveTransfers()) {
+      wrap.classList.add("hidden");
+    }
+  }
+
+  const visible =
+    state.transferTab === "download"
+      ? downloads
+      : state.transferTab === "done"
+      ? doneList
+      : uploads;
+
+  if (visible.length === 0) {
+    listEl.innerHTML = `<div style="color:var(--muted);font-size:12px;text-align:center;padding:24px 10px;">当前列表暂无传输任务</div>`;
+    return;
+  }
+
+  listEl.innerHTML = visible
+    .map((t) => {
+      const total = Math.max(1, Number(t.size || 0));
+      const got = t.status === "done" ? total : Math.min(total, Number(t.loadedBytes || 0));
+      const pct = t.status === "done" ? 100 : Math.min(99, Math.round((got * 100) / total));
+      const statusText =
+        t.status === "running"
+          ? `${formatRate(t.speedBps || 0)} · 剩余 ${formatETA(t.etaSec)}`
+          : t.status === "queued"
+          ? "排队等待中"
+          : t.status === "paused"
+          ? "已暂停（支持断点续传）"
+          : t.status === "error"
+          ? `失败：${t.error || "网络错误"}`
+          : t.note || "已完成";
+
+      const actionBtns = [];
+      if (t.status === "running" || t.status === "queued") {
+        actionBtns.push(`<button type="button" class="btn btn-ghost btn-xs" data-transfer-act="pause" data-tid="${escapeHtml(t.id)}">暂停</button>`);
+      } else if (t.status === "paused" || t.status === "error") {
+        actionBtns.push(`<button type="button" class="btn btn-primary btn-xs" data-transfer-act="resume" data-tid="${escapeHtml(t.id)}">${t.status === "error" ? "重试" : "继续"}</button>`);
+      }
+      if (t.status !== "done") {
+        actionBtns.push(`<button type="button" class="btn btn-danger btn-xs" data-transfer-act="cancel" data-tid="${escapeHtml(t.id)}">取消</button>`);
+      } else {
+        actionBtns.push(`<button type="button" class="btn btn-ghost btn-xs" data-transfer-act="remove" data-tid="${escapeHtml(t.id)}">清除</button>`);
+      }
+
+      return `
+        <div class="transfer-item">
+          <div class="transfer-item-head">
+            <span class="transfer-item-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
+            <div class="row-actions">${actionBtns.join("")}</div>
+          </div>
+          <div class="transfer-bar">
+            <div class="transfer-bar-fill ${t.status === "done" ? "done" : t.status === "error" ? "error" : ""}" style="width:${pct}%"></div>
+          </div>
+          <div class="transfer-item-meta">
+            <span>${formatSize(got)} / ${formatSize(t.size)} (${pct}%)</span>
+            <span>${escapeHtml(statusText)}</span>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function computeBlobSHA256(blob) {
+  if (!window.crypto || !window.crypto.subtle || typeof blob.arrayBuffer !== "function") {
+    return "";
+  }
+  try {
+    const buf = await blob.arrayBuffer();
+    const digest = await window.crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return "";
+  }
+}
+
+function sendSingleUploadTaskXHR(task) {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append("files", task.file);
+    formData.append("relative_paths", task.relativePath || task.file.name);
+    formData.append("target_node", task.targetNode || "auto");
+    if (Array.isArray(task.allowedUsers) && task.allowedUsers.length > 0) {
+      formData.append("allowed_users", JSON.stringify(task.allowedUsers));
+    }
+    formData.append("device_fp", state.device.fp || "");
+    formData.append("device_name", state.device.name || "");
+    formData.append("device_detail", state.device.detail || "");
+
+    const xhr = new XMLHttpRequest();
+    task.abortXhr = xhr;
+    let lastAt = Date.now();
+    let lastLoaded = 0;
+
+    xhr.open("POST", "/api/upload", true);
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const now = Date.now();
+      const dt = Math.max(0.05, (now - lastAt) / 1000);
+      const delta = Math.max(0, e.loaded - lastLoaded);
+      if (dt >= 0.25) {
+        task.speedBps = delta / dt;
+        task.etaSec = task.speedBps > 0 ? Math.max(0, (task.size - e.loaded) / task.speedBps) : null;
+        lastAt = now;
+        lastLoaded = e.loaded;
+      }
+      task.loadedBytes = Math.min(task.size, e.loaded);
+      scheduleTransferRender();
+    };
+    xhr.onload = () => {
+      task.abortXhr = null;
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText || "{}");
+      } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data.uploaded?.[0] || null);
+      } else {
+        reject(new Error(data.error || `上传失败 (${xhr.status})`));
+      }
+    };
+    xhr.onabort = () => {
+      task.abortXhr = null;
+      const err = new Error("ABORTED");
+      err.name = "AbortError";
+      reject(err);
+    };
+    xhr.onerror = () => {
+      task.abortXhr = null;
+      reject(new Error("网络错误，上传失败"));
+    };
+    xhr.send(formData);
+  });
+}
+
+async function runChunkedUploadTask(task) {
+  task.abortCtrl = new AbortController();
+  const sig = task.abortCtrl.signal;
+  const folderPath = task.folderPath || "";
+  const fileSHA = task.size <= 128 * 1024 * 1024 ? await computeBlobSHA256(task.file) : "";
+  if (sig.aborted) throw new DOMException("Aborted", "AbortError");
+
+  const initData = await api("/api/uploads/init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: sig,
+    body: JSON.stringify({
+      name: task.name,
+      folder_path: folderPath,
+      file_size: task.size,
+      chunk_size: TRANSFER_CHUNK_BYTES,
+      file_sha256: fileSHA,
+      target_node: task.targetNode || "auto",
+      allowed_users: task.allowedUsers || [],
+    }),
+  });
+
+  if (initData.instant) {
+    task.loadedBytes = task.size;
+    task.speedBps = 0;
+    task.note = "SHA-256 秒传成功";
+    return initData.file || null;
+  }
+
+  task.uploadId = initData.upload_id;
+  task.totalChunks = Number(initData.total_chunks || 1);
+  const doneSet = new Set(Array.isArray(initData.uploaded_chunks) ? initData.uploaded_chunks : []);
+  task.uploadedSet = doneSet;
+
+  const chunkSize = Number(initData.chunk_size || TRANSFER_CHUNK_BYTES);
+  const sizeForChunk = (idx) => {
+    if (task.size === 0) return 0;
+    if (idx < task.totalChunks - 1) return chunkSize;
+    return Math.max(0, task.size - idx * chunkSize);
+  };
+  let uploadedBytes = 0;
+  for (const idx of doneSet) {
+    uploadedBytes += sizeForChunk(idx);
+  }
+  task.loadedBytes = uploadedBytes;
+  scheduleTransferRender();
+
+  const pending = [];
+  for (let i = 0; i < task.totalChunks; i++) {
+    if (!doneSet.has(i)) pending.push(i);
+  }
+
+  let cursor = 0;
+  let sampleAt = Date.now();
+  let sampleBytes = 0;
+
+  const worker = async () => {
+    while (cursor < pending.length) {
+      if (sig.aborted) throw new DOMException("Aborted", "AbortError");
+      const idx = pending[cursor++];
+      const start = idx * chunkSize;
+      const end = Math.min(task.size, start + chunkSize);
+      const blob = task.file.slice(start, end);
+      const chunkSHA = await computeBlobSHA256(blob);
+      if (sig.aborted) throw new DOMException("Aborted", "AbortError");
+
+      await api(`/api/uploads/${encodeURIComponent(task.uploadId)}/chunk/${idx}`, {
+        method: "PUT",
+        headers: chunkSHA ? { "X-Chunk-SHA256": chunkSHA } : {},
+        body: blob,
+        signal: sig,
+      });
+      doneSet.add(idx);
+      const cLen = blob.size;
+      task.loadedBytes = Math.min(task.size, task.loadedBytes + cLen);
+      sampleBytes += cLen;
+      const now = Date.now();
+      const dt = (now - sampleAt) / 1000;
+      if (dt >= 0.25) {
+        task.speedBps = sampleBytes / dt;
+        task.etaSec = task.speedBps > 0 ? Math.max(0, (task.size - task.loadedBytes) / task.speedBps) : null;
+        sampleAt = now;
+        sampleBytes = 0;
+      }
+      scheduleTransferRender();
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(CHUNK_UPLOAD_WORKERS, Math.max(1, pending.length)) }, () => worker());
+  await Promise.all(workers);
+  if (sig.aborted) throw new DOMException("Aborted", "AbortError");
+
+  task.note = "正在合并校验分片...";
+  scheduleTransferRender();
+  const completeData = await api(`/api/uploads/${encodeURIComponent(task.uploadId)}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: sig,
+    body: JSON.stringify({ target_node: task.targetNode || "auto" }),
+  });
+  task.loadedBytes = task.size;
+  task.speedBps = 0;
+  task.note = "分片合并校验通过";
+  return completeData.file || null;
+}
+
+async function runUploadTask(task) {
+  task.status = "running";
+  task.error = "";
+  task.speedBps = 0;
+  state.isUploadingSelf = true;
+  renderTransferDrawer();
+
+  try {
+    const rec = task.size >= TRANSFER_CHUNK_BYTES
+      ? await runChunkedUploadTask(task)
+      : await sendSingleUploadTaskXHR(task);
+    task.status = "done";
+    task.loadedBytes = task.size;
+    task.speedBps = 0;
+    task.etaSec = 0;
+    if (!task.note) {
+      task.note = rec?.node_name ? `已存至 ${rec.node_name}` : "上传完成";
+    }
+    renderTransferDrawer();
+    await refreshAll();
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      if (task.status !== "cancelled") {
+        task.status = "paused";
+      }
+    } else {
+      task.status = "error";
+      task.error = err?.message || "上传失败";
+      showToast(`${task.name}：${task.error}`, "error");
+    }
+    task.speedBps = 0;
+    renderTransferDrawer();
+  } finally {
+    task.abortCtrl = null;
+    task.abortXhr = null;
+    setTimeout(() => {
+      if (!hasActiveTransfers()) {
+        state.isUploadingSelf = false;
+      }
+    }, 600);
+    pumpTransferQueue();
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "download";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    a.remove();
+  }, 8000);
+}
+
+async function runDownloadTask(task) {
+  task.status = "running";
+  task.error = "";
+  task.abortCtrl = new AbortController();
+  const sig = task.abortCtrl.signal;
+  if (!Array.isArray(task.parts)) task.parts = [];
+  renderTransferDrawer();
+
+  let sampleAt = Date.now();
+  let sampleBytes = 0;
+
+  try {
+    if (task.size <= 0) {
+      const res = await fetch(`/api/files/${encodeURIComponent(task.fileId)}/download`, { signal: sig });
+      if (!res.ok) throw new Error(`下载失败 (${res.status})`);
+      const blob = await res.blob();
+      task.status = "done";
+      task.size = blob.size;
+      task.loadedBytes = blob.size;
+      task.note = "下载完成";
+      triggerBlobDownload(blob, task.name);
+      renderTransferDrawer();
+      return;
+    }
+
+    while (task.loadedBytes < task.size) {
+      if (sig.aborted) throw new DOMException("Aborted", "AbortError");
+      const start = task.loadedBytes;
+      const end = Math.min(task.size - 1, start + TRANSFER_CHUNK_BYTES - 1);
+      const res = await fetch(`/api/files/${encodeURIComponent(task.fileId)}/download`, {
+        headers: { Range: `bytes=${start}-${end}` },
+        signal: sig,
+      });
+      if (!res.ok) {
+        const msg = await res.text().catch(() => "");
+        throw new Error(msg || `下载失败 (${res.status})`);
+      }
+      const buf = await res.arrayBuffer();
+      if (sig.aborted) throw new DOMException("Aborted", "AbortError");
+
+      if (res.status === 200) {
+        // Server sent full body without partial slicing; save directly cleanly.
+        const blob = new Blob([buf]);
+        task.parts = [];
+        task.loadedBytes = blob.size;
+        task.status = "done";
+        task.speedBps = 0;
+        task.note = "下载完成";
+        triggerBlobDownload(blob, task.name);
+        renderTransferDrawer();
+        return;
+      }
+
+      task.parts.push(buf);
+      task.loadedBytes += buf.byteLength;
+      sampleBytes += buf.byteLength;
+      const now = Date.now();
+      const dt = (now - sampleAt) / 1000;
+      if (dt >= 0.25) {
+        task.speedBps = sampleBytes / dt;
+        task.etaSec = task.speedBps > 0 ? Math.max(0, (task.size - task.loadedBytes) / task.speedBps) : null;
+        sampleAt = now;
+        sampleBytes = 0;
+      }
+      scheduleTransferRender();
+      if (buf.byteLength === 0) break;
+    }
+
+    const finalBlob = new Blob(task.parts);
+    task.parts = [];
+    task.status = "done";
+    task.speedBps = 0;
+    task.etaSec = 0;
+    task.note = "下载完成";
+    triggerBlobDownload(finalBlob, task.name);
+    showToast(`已下载完成：${task.name}`, "success");
+    renderTransferDrawer();
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      if (task.status !== "cancelled") {
+        task.status = "paused";
+      } else {
+        task.parts = [];
+      }
+    } else {
+      task.status = "error";
+      task.error = err?.message || "下载失败";
+      showToast(`${task.name}：${task.error}`, "error");
+    }
+    task.speedBps = 0;
+    renderTransferDrawer();
+  } finally {
+    task.abortCtrl = null;
+    pumpTransferQueue();
+  }
+}
+
+function pumpTransferQueue() {
+  let activeUp = state.transfers.filter((t) => t.direction === "upload" && t.status === "running").length;
+  for (const t of state.transfers) {
+    if (activeUp >= MAX_CONCURRENT_UPLOADS) break;
+    if (t.direction === "upload" && t.status === "queued") {
+      activeUp++;
+      runUploadTask(t);
+    }
+  }
+
+  let activeDl = state.transfers.filter((t) => t.direction === "download" && t.status === "running").length;
+  for (const t of state.transfers) {
+    if (activeDl >= MAX_CONCURRENT_DOWNLOADS) break;
+    if (t.direction === "download" && t.status === "queued") {
+      activeDl++;
+      runDownloadTask(t);
+    }
+  }
+}
+
+function pauseTransferTask(tid) {
+  const t = state.transfers.find((x) => x.id === tid);
+  if (!t) return;
+  if (t.status === "queued") {
+    t.status = "paused";
+    t.speedBps = 0;
+    renderTransferDrawer();
+    return;
+  }
+  if (t.status === "running") {
+    t.status = "paused";
+    if (t.abortCtrl) t.abortCtrl.abort();
+    if (t.abortXhr) t.abortXhr.abort();
+    renderTransferDrawer();
+  }
+}
+
+function resumeTransferTask(tid) {
+  const t = state.transfers.find((x) => x.id === tid);
+  if (!t) return;
+  if (t.status === "paused" || t.status === "error") {
+    t.status = "queued";
+    t.error = "";
+    renderTransferDrawer();
+    pumpTransferQueue();
+  }
+}
+
+function cancelTransferTask(tid) {
+  const idx = state.transfers.findIndex((x) => x.id === tid);
+  if (idx < 0) return;
+  const t = state.transfers[idx];
+  t.status = "cancelled";
+  if (t.abortCtrl) t.abortCtrl.abort();
+  if (t.abortXhr) t.abortXhr.abort();
+  t.parts = [];
+  if (t.uploadId) {
+    api(`/api/uploads/${encodeURIComponent(t.uploadId)}`, { method: "DELETE" }).catch(() => {});
+  }
+  state.transfers.splice(idx, 1);
+  renderTransferDrawer();
+  pumpTransferQueue();
+}
+
+function enqueueRangeDownload(rec) {
+  if (!rec) return;
+  const existing = state.transfers.find(
+    (t) => t.direction === "download" && t.fileId === rec.id && (t.status === "running" || t.status === "queued" || t.status === "paused")
+  );
+  if (existing) {
+    setTransferTab("download");
+    setTransferDrawerOpen(true);
+    if (existing.status === "paused") resumeTransferTask(existing.id);
+    return;
+  }
+  state.transfers.unshift({
+    id: "dl-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8),
+    direction: "download",
+    fileId: rec.id,
+    name: rec.name,
+    size: Number(rec.size || 0),
+    loadedBytes: 0,
+    parts: [],
+    status: "queued",
+    speedBps: 0,
+    etaSec: null,
+    error: "",
+    note: "",
+  });
+  setTransferTab("download");
+  setTransferDrawerOpen(true);
+  pumpTransferQueue();
+}
+
 async function uploadEntries(rawItems) {
   if (!rawItems || rawItems.length === 0) return;
 
@@ -2200,78 +2775,42 @@ async function uploadEntries(rawItems) {
     showToast(`已自动跳过 ${rejectedNames.length} 个受限文件（${firstReason}）`, "error");
   }
 
-  const MAX_BATCH_FILES = 20;
-  const MAX_BATCH_BYTES = 64 * 1024 * 1024;
-  const batches = [];
-  let current = [];
-  let curBytes = 0;
-  for (const it of allowedItems) {
-    const fSize = it.file.size || 0;
-    if (
-      current.length > 0 &&
-      (current.length >= MAX_BATCH_FILES || curBytes + fSize > MAX_BATCH_BYTES)
-    ) {
-      batches.push(current);
-      current = [];
-      curBytes = 0;
-    }
-    current.push(it);
-    curBytes += fSize;
-  }
-  if (current.length > 0) batches.push(current);
-
-  const totalBytes = allowedItems.reduce((sum, it) => sum + (it.file.size || 1), 0);
-  let completedBytes = 0;
-
-  const wrap = $("upload-progress-wrap");
-  const fill = $("upload-progress-fill");
-  const text = $("upload-progress-text");
-  wrap.classList.remove("hidden");
-  fill.style.width = "0%";
-  text.textContent = "0%";
-
   const targetNode = (state.user && state.user.role === "admin" && $("upload-target-node"))
     ? $("upload-target-node").value
     : "auto";
-  const allUploaded = [];
+  const allowedUsers = Array.isArray(state.uploadAllowedUsers) ? [...state.uploadAllowedUsers] : [];
 
-  state.isUploadingSelf = true;
-  try {
-    for (const batch of batches) {
-      const batchSize = batch.reduce((sum, it) => sum + (it.file.size || 1), 0);
-      const uploaded = await sendUploadBatchXHR(batch, targetNode, (loaded) => {
-        const overall = Math.min(totalBytes, completedBytes + Math.min(loaded, batchSize));
-        const pct = Math.min(99, Math.round((overall / Math.max(totalBytes, 1)) * 100));
-        fill.style.width = `${pct}%`;
-        text.textContent = `${pct}%`;
-      });
-      completedBytes += batchSize;
-      allUploaded.push(...uploaded);
-      const pct = Math.min(100, Math.round((completedBytes / Math.max(totalBytes, 1)) * 100));
-      fill.style.width = `${pct}%`;
-      text.textContent = `${pct}%`;
+  for (const it of allowedItems) {
+    const rel = String(it.relativePath || it.file.name || "").replace(/\\/g, "/");
+    let folderPath = "";
+    const slashIdx = rel.lastIndexOf("/");
+    if (slashIdx > 0) {
+      folderPath = rel.slice(0, slashIdx);
     }
-
-    fill.style.width = "100%";
-    text.textContent = "完成";
-    const nodeNames = [...new Set(allUploaded.map((r) => r.node_name).filter(Boolean))];
-    let msg = `成功上传 ${allUploaded.length} 个文件`;
-    if (nodeNames.length === 1) {
-      msg = `已上传 ${allUploaded.length} 个文件至节点：${nodeNames[0]}`;
-    } else if (nodeNames.length > 1) {
-      msg = `已分布上传 ${allUploaded.length} 个文件至 ${nodeNames.join(" / ")}`;
-    }
-    showToast(msg, "success");
-    setTimeout(() => wrap.classList.add("hidden"), 900);
-    refreshAll();
-  } catch (err) {
-    showToast(err.message || "上传失败", "error");
-    wrap.classList.add("hidden");
-  } finally {
-    setTimeout(() => {
-      state.isUploadingSelf = false;
-    }, 600);
+    state.transfers.unshift({
+      id: "up-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8),
+      direction: "upload",
+      name: it.file.name,
+      relativePath: rel,
+      folderPath,
+      file: it.file,
+      size: Number(it.file.size || 0),
+      targetNode,
+      allowedUsers,
+      loadedBytes: 0,
+      status: "queued",
+      speedBps: 0,
+      etaSec: null,
+      error: "",
+      note: "",
+      uploadId: null,
+      totalChunks: 1,
+    });
   }
+
+  setTransferTab("upload");
+  setTransferDrawerOpen(true);
+  pumpTransferQueue();
 }
 
 function uploadFiles(fileList) {
@@ -3901,6 +4440,15 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
       : "普通副本";
   const isMissingSrc = Boolean((meta && meta.source_missing) || fileRec.source_missing);
   const storageModeHtml = `${escapeHtml(storageModeText)}${isMissingSrc ? ` <span class="zc-badge zc-missing">源文件已失效</span>` : ""}`;
+  const integrityStatus = (meta && meta.integrity_status) || fileRec.integrity_status || "";
+  const integrityHtml =
+    integrityStatus === "corrupted"
+      ? `<span class="zc-badge zc-corrupt">校验异常（可能已损坏）</span>`
+      : integrityStatus === "missing"
+      ? `<span class="zc-badge zc-missing">底层文件缺失</span>`
+      : integrityStatus === "ok"
+      ? `<span class="status-pill status-ok">校验正常</span>${fileRec.last_verified_at ? ` <span style="color:var(--muted);font-size:11.5px;">(${escapeHtml(formatTime(fileRec.last_verified_at))})</span>` : ""}`
+      : `<span style="color:var(--muted)">待巡检</span>`;
   const adminPathRow = isAdmin
     ? `<div class="props-row"><div class="props-key">物理存储位置</div><div class="props-val props-mono">${physicalPath ? `<span>${escapeHtml(physicalPath)}</span> <button type="button" class="btn btn-ghost btn-xs" id="props-copy-path">复制路径</button>` : `<span style="color:var(--muted)">获取中...</span>`}</div></div>
        ${sourcePathVal ? `<div class="props-row"><div class="props-key">源文件路径</div><div class="props-val props-mono">${escapeHtml(sourcePathVal)}</div></div>` : ""}`
@@ -3960,6 +4508,7 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
       <div class="props-row"><div class="props-key">更新时间</div><div class="props-val">${escapeHtml(formatTime(fileRec.uploaded_at))} (${escapeHtml(formatRelativeTime(fileRec.uploaded_at))})</div></div>
       <div class="props-row"><div class="props-key">版本备注</div><div class="props-val">${escapeHtml(fileRec.version_note || formatUpdateMethodLabel(fileRec.update_method, fileRec.version))}</div></div>
       <div class="props-row"><div class="props-key">SHA-256</div><div class="props-val props-mono">${shaHtml}</div></div>
+      <div class="props-row"><div class="props-key">完整性校验</div><div class="props-val">${integrityHtml}</div></div>
     </div>
     <div class="props-group">
       <div class="props-group-title">存储节点与设备指纹</div>
@@ -4074,7 +4623,108 @@ function switchSettingsTab(tab) {
   if (tab === "cluster" && state.user && state.user.role === "admin") {
     loadPassiveDiscovered();
     loadAdminMounts();
+  } else if (tab === "security" && state.user && state.user.role === "admin") {
+    loadIntegrityStatus();
+    loadAdminAudit();
   }
+}
+
+function formatScrubSummaryHtml(res, corruptedCount = 0) {
+  if (!res) {
+    return `暂无完整巡检记录（当前异常文件数：${Number(corruptedCount || 0)}）。点击右上角「立即全盘完整性巡检」可校验全部底层文件 SHA-256。`;
+  }
+  const warn = Number(res.corrupted || 0) + Number(res.missing || 0) + Number(corruptedCount || 0);
+  const pill = warn > 0
+    ? `<span class="zc-badge zc-corrupt">发现 ${warn} 个异常</span>`
+    : `<span class="status-pill status-ok">全部校验正常</span>`;
+  return `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+      ${pill}
+      <span>最近巡检：${escapeHtml(formatTime(res.finished_at))}（耗时 ${Number(res.duration_ms || 0)} ms）</span>
+    </div>
+    <div style="color:var(--muted);font-size:12px;">
+      已检查 ${Number(res.checked || 0)} 个文件 · 正常 ${Number(res.ok || 0)} · 补全哈希 ${Number(res.backfilled || 0)} · 损坏 ${Number(res.corrupted || 0)} · 缺失 ${Number(res.missing || 0)}
+    </div>
+  `;
+}
+
+async function loadIntegrityStatus() {
+  const box = $("integrity-scrub-summary");
+  if (!box || !state.user || state.user.role !== "admin") return;
+  try {
+    const data = await api("/api/admin/integrity/status");
+    box.innerHTML = formatScrubSummaryHtml(data.last_result || null, data.corrupted_count || 0);
+  } catch (err) {
+    box.textContent = err.message || "加载完整性状态失败";
+  }
+}
+
+async function runIntegrityScrub() {
+  const btn = $("btn-run-scrub");
+  const box = $("integrity-scrub-summary");
+  const orig = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "全盘校验中...";
+  }
+  try {
+    const data = await api("/api/admin/integrity/scrub", { method: "POST" });
+    if (box) {
+      box.innerHTML = formatScrubSummaryHtml(data.result || null, data.corrupted_count || 0);
+    }
+    const r = data.result || {};
+    const bad = Number(r.corrupted || 0) + Number(r.missing || 0);
+    showToast(bad > 0 ? `完整性巡检发现 ${bad} 个异常文件` : `完整性巡检完成：${Number(r.checked || 0)} 个文件全部正常`, bad > 0 ? "error" : "success");
+    loadAdminAudit();
+    loadFiles();
+  } catch (err) {
+    showToast(err.message || "执行完整性巡检失败", "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  }
+}
+
+async function loadAdminAudit() {
+  const tbody = $("audit-log-tbody");
+  if (!tbody || !state.user || state.user.role !== "admin") return;
+  try {
+    const data = await api("/api/admin/audit?limit=100");
+    renderAdminAudit(Array.isArray(data.entries) ? data.entries : []);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--danger);text-align:center;">${escapeHtml(err.message || "加载失败")}</td></tr>`;
+  }
+}
+
+function renderAdminAudit(entries) {
+  const tbody = $("audit-log-tbody");
+  if (!tbody) return;
+  if (!entries || entries.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--muted);text-align:center;">暂无审计日志记录</td></tr>`;
+    return;
+  }
+  const statusPill = (st) => {
+    if (st === "denied" || st === "error") {
+      return `<span class="status-pill status-off">${escapeHtml(st)}</span>`;
+    }
+    return `<span class="status-pill status-ok">${escapeHtml(st || "ok")}</span>`;
+  };
+  tbody.innerHTML = entries
+    .map(
+      (e) => `
+      <tr>
+        <td data-label="时间">${escapeHtml(formatTime(e.timestamp))}</td>
+        <td data-label="操作人">${escapeHtml(e.actor || "-")}</td>
+        <td data-label="动作"><code>${escapeHtml(e.action || "-")}</code></td>
+        <td data-label="目标">${escapeHtml(e.target || "-")}</td>
+        <td data-label="IP">${escapeHtml(e.ip || "-")}</td>
+        <td data-label="状态">${statusPill(e.status)}</td>
+        <td data-label="详情">${escapeHtml(e.detail || "-")}</td>
+      </tr>`
+    )
+    .join("");
 }
 
 function setLocalImportMode(mode) {
@@ -4304,6 +4954,8 @@ async function refreshAdminData() {
     renderAdminCluster();
     loadPassiveDiscovered();
     loadAdminMounts();
+    loadIntegrityStatus();
+    loadAdminAudit();
     renderInvitesTable(invData.invites || []);
     renderUsersTable(usersData.users || []);
     if (updateData && updateData.status) {
@@ -5154,6 +5806,9 @@ function bindEvents() {
     const { action, id } = btn.dataset;
     if (action === "preview") {
       openPreview(id);
+    } else if (action === "queued-download") {
+      const rec = state.files.find((f) => f.id === id);
+      if (rec) enqueueRangeDownload(rec);
     } else if (action === "edit") {
       openTextEditor(id);
     } else if (action === "versions") {
@@ -6179,6 +6834,52 @@ function bindEvents() {
       }
     };
   }
+
+  if ($("btn-run-scrub")) {
+    $("btn-run-scrub").onclick = runIntegrityScrub;
+  }
+  if ($("btn-refresh-audit")) {
+    $("btn-refresh-audit").onclick = loadAdminAudit;
+  }
+  if ($("transfer-fab")) {
+    $("transfer-fab").onclick = () => setTransferDrawerOpen(!state.transferOpen);
+  }
+  if ($("transfer-drawer-close")) {
+    $("transfer-drawer-close").onclick = () => setTransferDrawerOpen(false);
+  }
+  if ($("transfer-clear-done")) {
+    $("transfer-clear-done").onclick = () => {
+      state.transfers = state.transfers.filter((t) => t.status !== "done");
+      renderTransferDrawer();
+    };
+  }
+  document.querySelectorAll("[data-transfer-tab]").forEach((btn) => {
+    btn.onclick = () => setTransferTab(btn.dataset.transferTab);
+  });
+  if ($("transfer-queue-list")) {
+    $("transfer-queue-list").onclick = (e) => {
+      const btn = e.target.closest("[data-transfer-act]");
+      if (!btn) return;
+      const act = btn.dataset.transferAct;
+      const tid = btn.dataset.tid;
+      if (act === "pause") {
+        pauseTransferTask(tid);
+      } else if (act === "resume") {
+        resumeTransferTask(tid);
+      } else if (act === "cancel") {
+        cancelTransferTask(tid);
+      } else if (act === "remove") {
+        state.transfers = state.transfers.filter((t) => t.id !== tid);
+        renderTransferDrawer();
+      }
+    };
+  }
+  window.addEventListener("beforeunload", (e) => {
+    if (hasActiveTransfers()) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
 
   // Password form inside Settings -> General
   $("pwd-form").onsubmit = async (e) => {

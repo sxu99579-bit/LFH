@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.12</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.13</code>
 </p>
 
 ---
@@ -20,6 +20,10 @@ Ships as a single binary with zero database setup required—ready for both Dock
 
 ## Key Features
 
+- **Resumable Chunked Transfers, Queue Drawer & Integrity Scrubbing**:
+  - Automatic 4 MB parallel chunked uploads (`/api/uploads/init` -> `chunk` -> `complete`) with fingerprint-based resume and SHA-256 instant deduplication, paired with Range-segmented queued downloads inside a collapsible **Transfer Queue** drawer (pause/resume/retry/cancel, live speed & ETA);
+  - Persists streaming SHA-256 checksums on write and runs scheduled/on-demand **Bit-Rot Integrity Scrubbing** to detect silent disk corruption;
+  - Hardened with per-IP login brute-force rate limiting, anti-replay HMAC `X-LFH-Nonce` signatures across cluster RPCs, `SameSite=Lax` cookies, and a persistent security **Audit Log**.
 - **Zero-Copy Local Import & Virtual Directory Mounts**:
   - Administrators can index existing local files/folders on any online node by host path without duplicating bytes: **same-volume imports create OS hard links (`os.Link`)** (zero extra disk usage, surviving source rename/move/deletion), while **cross-volume imports fall back to read-only external references** with background missing-source detection;
   - Mount large existing host directories (e.g., `D:\Movies`, `/mnt/media`) directly as auto-synced read-only virtual libraries with zero disk duplication, zero upload quota consumption, and non-destructive unmounting.

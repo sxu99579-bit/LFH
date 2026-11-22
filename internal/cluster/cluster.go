@@ -50,6 +50,7 @@ const (
 	hdrNodeID    = "X-Cluster-Node-ID"
 	hdrTimestamp = "X-Cluster-Timestamp"
 	hdrSignature = "X-Cluster-Signature"
+	hdrNonce     = "X-LFH-Nonce"
 )
 
 type Config struct {
@@ -1443,11 +1444,40 @@ func SecretHash(secret string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
+var seenNonceCache = struct {
+	mu   sync.Mutex
+	seen map[string]int64
+}{
+	seen: make(map[string]int64),
+}
+
+func markNonceFresh(key string, nowUnix int64) bool {
+	const ttlSeconds = int64(360)
+	seenNonceCache.mu.Lock()
+	defer seenNonceCache.mu.Unlock()
+	if exp, ok := seenNonceCache.seen[key]; ok && exp >= nowUnix {
+		return false
+	}
+	seenNonceCache.seen[key] = nowUnix + ttlSeconds
+	if len(seenNonceCache.seen) > 2048 {
+		for k, exp := range seenNonceCache.seen {
+			if exp < nowUnix {
+				delete(seenNonceCache.seen, k)
+			}
+		}
+	}
+	return true
+}
+
 func SignRequest(req *http.Request, secret, nodeID string) {
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	sig := computeSignature(secret, req.Method, req.URL.Path, ts, nodeID)
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	nonce := hex.EncodeToString(b[:])
+	sig := computeSignature(secret, req.Method, req.URL.Path, ts, nodeID, nonce)
 	req.Header.Set(hdrNodeID, nodeID)
 	req.Header.Set(hdrTimestamp, ts)
+	req.Header.Set(hdrNonce, nonce)
 	req.Header.Set(hdrSignature, sig)
 }
 
@@ -1455,6 +1485,7 @@ func VerifyRequest(r *http.Request, secret string) bool {
 	nodeID := strings.TrimSpace(r.Header.Get(hdrNodeID))
 	tsStr := strings.TrimSpace(r.Header.Get(hdrTimestamp))
 	sig := strings.TrimSpace(r.Header.Get(hdrSignature))
+	nonce := strings.TrimSpace(r.Header.Get(hdrNonce))
 	if nodeID == "" || tsStr == "" || sig == "" {
 		return false
 	}
@@ -1462,20 +1493,31 @@ func VerifyRequest(r *http.Request, secret string) bool {
 	if err != nil {
 		return false
 	}
-	diff := time.Now().Unix() - ts
+	nowUnix := time.Now().Unix()
+	diff := nowUnix - ts
 	if diff < 0 {
 		diff = -diff
 	}
-	if diff > 120 {
+	if diff > 300 {
 		return false
 	}
-	expected := computeSignature(secret, r.Method, r.URL.Path, tsStr, nodeID)
-	return hmac.Equal([]byte(sig), []byte(expected))
+	expected := computeSignature(secret, r.Method, r.URL.Path, tsStr, nodeID, nonce)
+	if !hmac.Equal([]byte(sig), []byte(expected)) {
+		return false
+	}
+	if nonce != "" {
+		return markNonceFresh(nodeID+"|"+nonce, nowUnix)
+	}
+	return true
 }
 
-func computeSignature(secret, method, path, ts, nodeID string) string {
+func computeSignature(secret, method, path, ts, nodeID, nonce string) string {
+	payload := method + "|" + path + "|" + ts + "|" + nodeID
+	if nonce != "" {
+		payload += "|" + nonce
+	}
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(method + "|" + path + "|" + ts + "|" + nodeID))
+	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

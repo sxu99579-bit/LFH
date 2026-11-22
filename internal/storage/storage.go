@@ -2,6 +2,7 @@ package storage
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -61,41 +62,45 @@ type FileVersion struct {
 	DeviceIP     string    `json:"device_ip,omitempty"`
 	DeviceDetail string    `json:"device_detail,omitempty"`
 	StorageDir   string    `json:"storage_dir,omitempty"`
+	SHA256       string    `json:"sha256,omitempty"`
 	Note         string    `json:"note,omitempty"`
 	UpdateMethod string    `json:"update_method,omitempty"`
 }
 
 type FileRecord struct {
-	ID           string        `json:"id"`
-	Name         string        `json:"name"`
-	FolderPath   string        `json:"folder_path,omitempty"`
-	StoredName   string        `json:"stored_name"`
-	Size         int64         `json:"size"`
-	Ext          string        `json:"ext"`
-	Category     string        `json:"category"` // video, audio, document, markdown, image, archive, other
-	Uploader     string        `json:"uploader"`
-	UploadedAt   time.Time     `json:"uploaded_at"`
-	MonthKey     string        `json:"month_key"` // YYYY-MM
-	DateKey      string        `json:"date_key"`  // YYYY-MM-DD
-	DeviceFP     string        `json:"device_fp,omitempty"`
-	DeviceName   string        `json:"device_name,omitempty"`
-	DeviceIP     string        `json:"device_ip,omitempty"`
-	DeviceDetail string        `json:"device_detail,omitempty"`
-	AllowedUsers []string      `json:"allowed_users,omitempty"`
-	StorageDir    string        `json:"storage_dir,omitempty"`
-	StorageMode   string        `json:"storage_mode,omitempty"` // copy, hardlink, ref, mount
-	SourcePath    string        `json:"source_path,omitempty"`
-	SourceMissing bool          `json:"source_missing,omitempty"`
-	MountID       string        `json:"mount_id,omitempty"`
-	Version       int           `json:"version"`
-	VersionCount int           `json:"version_count"`
-	VersionNote  string        `json:"version_note,omitempty"`
-	UpdateMethod string        `json:"update_method,omitempty"`
-	Versions     []FileVersion `json:"versions,omitempty"`
-	NodeID       string        `json:"node_id,omitempty"`
-	NodeName     string        `json:"node_name,omitempty"`
-	NodeOS       string        `json:"node_os,omitempty"`
-	NodeOnline   bool          `json:"node_online"`
+	ID              string        `json:"id"`
+	Name            string        `json:"name"`
+	FolderPath      string        `json:"folder_path,omitempty"`
+	StoredName      string        `json:"stored_name"`
+	Size            int64         `json:"size"`
+	Ext             string        `json:"ext"`
+	Category        string        `json:"category"` // video, audio, document, markdown, image, archive, other
+	Uploader        string        `json:"uploader"`
+	UploadedAt      time.Time     `json:"uploaded_at"`
+	MonthKey        string        `json:"month_key"` // YYYY-MM
+	DateKey         string        `json:"date_key"`  // YYYY-MM-DD
+	DeviceFP        string        `json:"device_fp,omitempty"`
+	DeviceName      string        `json:"device_name,omitempty"`
+	DeviceIP        string        `json:"device_ip,omitempty"`
+	DeviceDetail    string        `json:"device_detail,omitempty"`
+	AllowedUsers    []string      `json:"allowed_users,omitempty"`
+	StorageDir      string        `json:"storage_dir,omitempty"`
+	StorageMode     string        `json:"storage_mode,omitempty"` // copy, hardlink, ref, mount
+	SourcePath      string        `json:"source_path,omitempty"`
+	SourceMissing   bool          `json:"source_missing,omitempty"`
+	MountID         string        `json:"mount_id,omitempty"`
+	SHA256          string        `json:"sha256,omitempty"`
+	IntegrityStatus string        `json:"integrity_status,omitempty"` // ok, corrupted, missing
+	LastVerifiedAt  *time.Time    `json:"last_verified_at,omitempty"`
+	Version         int           `json:"version"`
+	VersionCount    int           `json:"version_count"`
+	VersionNote     string        `json:"version_note,omitempty"`
+	UpdateMethod    string        `json:"update_method,omitempty"`
+	Versions        []FileVersion `json:"versions,omitempty"`
+	NodeID          string        `json:"node_id,omitempty"`
+	NodeName        string        `json:"node_name,omitempty"`
+	NodeOS          string        `json:"node_os,omitempty"`
+	NodeOnline      bool          `json:"node_online"`
 }
 
 type SummaryBucket struct {
@@ -124,10 +129,14 @@ type Store struct {
 	mu               sync.RWMutex
 	defaultUploadDir string
 	uploadDir        string
+	uploadsTmpDir    string
 	indexPath        string
 	mountsPath       string
 	records          map[string]FileRecord
 	mounts           map[string]MountEntry
+
+	scrubMu   sync.RWMutex
+	lastScrub *ScrubResult
 
 	readErrors         atomic.Int64
 	writeErrors        atomic.Int64
@@ -187,6 +196,7 @@ func NewStore(dataDir string) (*Store, error) {
 	s := &Store{
 		defaultUploadDir: uploadDir,
 		uploadDir:        uploadDir,
+		uploadsTmpDir:    filepath.Join(dataDir, "tmp", "uploads"),
 		indexPath:        filepath.Join(dataDir, "files.json"),
 		mountsPath:       filepath.Join(dataDir, "mounts.json"),
 		records:          make(map[string]FileRecord),
@@ -301,6 +311,10 @@ func (s *Store) UploadDir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.uploadDir
+}
+
+func (s *Store) DataDir() string {
+	return filepath.Dir(s.indexPath)
 }
 
 func (s *Store) RecordDir(rec FileRecord) string {
@@ -480,6 +494,25 @@ func (s *Store) SaveUploadWithOptions(origName, folderPath, uploader string, all
 	return s.SaveUploadWithVersionNote(origName, folderPath, "", uploader, allowedUsers, dev, r)
 }
 
+func writeBlobAndHash(dstPath string, r io.Reader) (int64, string, error) {
+	f, err := os.Create(dstPath)
+	if err != nil {
+		return 0, "", err
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(f, io.TeeReader(r, h))
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(dstPath)
+		return 0, "", copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(dstPath)
+		return 0, "", closeErr
+	}
+	return n, hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, uploader string, allowedUsers []string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
 	origName = sanitizeFilename(origName)
 	folderPath = SanitizeFolderPath(folderPath)
@@ -493,22 +526,10 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 	}
 	dstPath := filepath.Join(activeDir, storedName)
 
-	f, err := os.Create(dstPath)
+	n, shaHex, err := writeBlobAndHash(dstPath, r)
 	if err != nil {
 		s.RecordWriteError()
 		return FileRecord{}, err
-	}
-	n, copyErr := io.Copy(f, r)
-	closeErr := f.Close()
-	if copyErr != nil {
-		s.RecordWriteError()
-		_ = os.Remove(dstPath)
-		return FileRecord{}, copyErr
-	}
-	if closeErr != nil {
-		s.RecordWriteError()
-		_ = os.Remove(dstPath)
-		return FileRecord{}, closeErr
 	}
 	s.AddUploadBytes(n)
 
@@ -553,6 +574,7 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 				DeviceIP:     cur.DeviceIP,
 				DeviceDetail: cur.DeviceDetail,
 				StorageDir:   cur.StorageDir,
+				SHA256:       cur.SHA256,
 				Note:         cur.VersionNote,
 				UpdateMethod: DefaultUpdateMethod(cur.UpdateMethod, curVer),
 			}
@@ -570,6 +592,10 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 		cur.SourcePath = ""
 		cur.SourceMissing = false
 		cur.MountID = ""
+		cur.SHA256 = shaHex
+		cur.IntegrityStatus = "ok"
+		verifiedNow := now
+		cur.LastVerifiedAt = &verifiedNow
 		cur.Size = n
 		cur.Ext = ext
 		cur.Category = ClassifyExt(ext)
@@ -589,29 +615,33 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 		rec = cur
 		s.records[existingID] = rec
 	} else {
+		verifiedNow := now
 		rec = FileRecord{
-			ID:           blobID,
-			Name:         origName,
-			FolderPath:   folderPath,
-			StoredName:   storedName,
-			Size:         n,
-			Ext:          ext,
-			Category:     ClassifyExt(ext),
-			Uploader:     uploader,
-			UploadedAt:   now,
-			MonthKey:     now.Format("2006-01"),
-			DateKey:      now.Format("2006-01-02"),
-			DeviceFP:     strings.TrimSpace(dev.FP),
-			DeviceName:   strings.TrimSpace(dev.Name),
-			DeviceIP:     strings.TrimSpace(dev.IP),
-			DeviceDetail: strings.TrimSpace(dev.Detail),
-			AllowedUsers: normAllowed,
-			StorageDir:   activeDir,
-			Version:      1,
-			VersionCount: 1,
-			VersionNote:  cleanNote,
-			UpdateMethod: MethodInitialUpload,
-			NodeOnline:   true,
+			ID:              blobID,
+			Name:            origName,
+			FolderPath:      folderPath,
+			StoredName:      storedName,
+			Size:            n,
+			Ext:             ext,
+			Category:        ClassifyExt(ext),
+			Uploader:        uploader,
+			UploadedAt:      now,
+			MonthKey:        now.Format("2006-01"),
+			DateKey:         now.Format("2006-01-02"),
+			DeviceFP:        strings.TrimSpace(dev.FP),
+			DeviceName:      strings.TrimSpace(dev.Name),
+			DeviceIP:        strings.TrimSpace(dev.IP),
+			DeviceDetail:    strings.TrimSpace(dev.Detail),
+			AllowedUsers:    normAllowed,
+			StorageDir:      activeDir,
+			SHA256:          shaHex,
+			IntegrityStatus: "ok",
+			LastVerifiedAt:  &verifiedNow,
+			Version:         1,
+			VersionCount:    1,
+			VersionNote:     cleanNote,
+			UpdateMethod:    MethodInitialUpload,
+			NodeOnline:      true,
 		}
 		s.records[blobID] = rec
 	}
@@ -654,22 +684,10 @@ func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader st
 		return FileRecord{}, err
 	}
 	dstPath := filepath.Join(activeDir, storedName)
-	f, err := os.Create(dstPath)
+	n, shaHex, err := writeBlobAndHash(dstPath, r)
 	if err != nil {
 		s.RecordWriteError()
 		return FileRecord{}, err
-	}
-	n, copyErr := io.Copy(f, r)
-	closeErr := f.Close()
-	if copyErr != nil {
-		s.RecordWriteError()
-		_ = os.Remove(dstPath)
-		return FileRecord{}, copyErr
-	}
-	if closeErr != nil {
-		s.RecordWriteError()
-		_ = os.Remove(dstPath)
-		return FileRecord{}, closeErr
 	}
 	s.AddUploadBytes(n)
 
@@ -707,6 +725,7 @@ func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader st
 			DeviceIP:     latest.DeviceIP,
 			DeviceDetail: latest.DeviceDetail,
 			StorageDir:   latest.StorageDir,
+			SHA256:       latest.SHA256,
 			Note:         latest.VersionNote,
 			UpdateMethod: DefaultUpdateMethod(latest.UpdateMethod, curVer),
 		}
@@ -727,6 +746,10 @@ func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader st
 	latest.SourcePath = ""
 	latest.SourceMissing = false
 	latest.MountID = ""
+	latest.SHA256 = shaHex
+	latest.IntegrityStatus = "ok"
+	verifiedNow := now
+	latest.LastVerifiedAt = &verifiedNow
 	latest.Size = n
 	latest.Uploader = uploader
 	latest.UploadedAt = now
@@ -836,6 +859,7 @@ func (s *Store) RestoreVersionByUser(id string, targetVer int, note, actor strin
 		DeviceIP:     rec.DeviceIP,
 		DeviceDetail: rec.DeviceDetail,
 		StorageDir:   rec.StorageDir,
+		SHA256:       rec.SHA256,
 		Note:         rec.VersionNote,
 		UpdateMethod: DefaultUpdateMethod(rec.UpdateMethod, curVer),
 	}
@@ -853,6 +877,8 @@ func (s *Store) RestoreVersionByUser(id string, targetVer int, note, actor strin
 	rec.Version = target.Version
 	rec.StoredName = target.StoredName
 	rec.Size = target.Size
+	rec.SHA256 = target.SHA256
+	rec.IntegrityStatus = "ok"
 	rec.UpdateMethod = MethodVersionRestore
 	if strings.TrimSpace(actor) != "" {
 		now := time.Now()
@@ -924,6 +950,8 @@ func (s *Store) DeleteVersion(id string, targetVer int) (FileRecord, error) {
 		rec.SourcePath = ""
 		rec.SourceMissing = false
 		rec.MountID = ""
+		rec.SHA256 = nextActive.SHA256
+		rec.IntegrityStatus = "ok"
 		rec.Size = nextActive.Size
 		rec.Uploader = nextActive.Uploader
 		rec.UploadedAt = nextActive.UploadedAt
@@ -1183,6 +1211,60 @@ func (s *Store) ZeroCopyStats() (hardlinkCount, refCount, mountCount int, savedB
 		}
 	}
 	return hardlinkCount, refCount, mountCount, savedBytes
+}
+
+func (s *Store) SetRecordSHA256(id, shaHex string) {
+	cleanHex := strings.ToLower(strings.TrimSpace(shaHex))
+	if cleanHex == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	rec.SHA256 = cleanHex
+	if rec.IntegrityStatus == "" {
+		rec.IntegrityStatus = "ok"
+	}
+	rec.LastVerifiedAt = &now
+	s.records[id] = rec
+	_ = s.saveLocked()
+}
+
+func (s *Store) FindBySHA256(shaHex string) (FileRecord, string, bool) {
+	cleanHex := strings.ToLower(strings.TrimSpace(shaHex))
+	if len(cleanHex) != 64 {
+		return FileRecord{}, "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, rec := range s.records {
+		if rec.SourceMissing || rec.IntegrityStatus == "corrupted" || rec.IntegrityStatus == "missing" {
+			continue
+		}
+		if strings.EqualFold(rec.SHA256, cleanHex) {
+			diskPath := s.recordDiskPathLocked(rec)
+			if st, err := os.Stat(diskPath); err == nil && !st.IsDir() && st.Size() == rec.Size {
+				return rec, diskPath, true
+			}
+		}
+	}
+	return FileRecord{}, "", false
+}
+
+func (s *Store) CorruptedCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, rec := range s.records {
+		if rec.IntegrityStatus == "corrupted" || rec.IntegrityStatus == "missing" {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *Store) AllRecords() []FileRecord {

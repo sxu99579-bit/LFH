@@ -377,13 +377,21 @@ func main() {
 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
+		scrubTicker := time.NewTicker(30 * time.Minute)
+		gcTicker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
+		defer scrubTicker.Stop()
+		defer gcTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				srv.SyncLocalZeroCopy()
+			case <-scrubTicker.C:
+				store.ScrubIntegrity(50)
+			case <-gcTicker.C:
+				store.GCUploadSessions(24 * time.Hour)
 			}
 		}
 	}()

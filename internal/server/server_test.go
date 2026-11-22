@@ -5,9 +5,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net"
@@ -24,6 +27,7 @@ import (
 	"lfh/internal/auth"
 	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
+	"lfh/internal/security"
 	"lfh/internal/storage"
 	"lfh/internal/updater"
 	"lfh/internal/version"
@@ -53,12 +57,18 @@ func newTestServerWithCluster(t *testing.T, opts cluster.Options) (*Server, *clu
 	if err != nil {
 		t.Fatalf("NewManager updater: %v", err)
 	}
+	auditLog, err := security.NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
 	srv := &Server{
 		auth:    authMgr,
 		store:   store,
 		cluster: cm,
 		events:  NewEventHub(),
 		updater: upMgr,
+		limiter: security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
+		audit:   auditLog,
 		webFS:   testEmbedFS,
 		port:    "8080",
 	}
@@ -2401,5 +2411,188 @@ func TestZeroCopyLocalImportAndMountsClusterFlow(t *testing.T) {
 	}
 	if _, statErr := os.Stat(mntFile1); statErr != nil {
 		t.Fatalf("RemoveMount should never remove underlying file on disk: %v", statErr)
+	}
+}
+
+func TestStage3ChunkedUploadIntegrityAndSecurity(t *testing.T) {
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Stage3-Entry",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+
+	// 1. Chunked upload init -> out-of-order chunk upload with X-Chunk-SHA256 -> resume -> complete.
+	c0 := bytes.Repeat([]byte("X"), 1024)
+	c1 := bytes.Repeat([]byte("Y"), 1024)
+	c2 := []byte("FINAL-TAIL")
+	full := append(append([]byte(nil), c0...), c1...)
+	full = append(full, c2...)
+	sum := sha256.Sum256(full)
+	fullSHA := hex.EncodeToString(sum[:])
+
+	initBody, _ := json.Marshal(map[string]any{
+		"name":        "stage3-chunked.bin",
+		"folder_path": "backups",
+		"file_size":   len(full),
+		"chunk_size":  1024,
+		"file_sha256": fullSHA,
+		"target_node": entryMgr.NodeID(),
+	})
+	initRes, err := adminClient.Post(entryTS.URL+"/api/uploads/init", "application/json", bytes.NewReader(initBody))
+	if err != nil {
+		t.Fatalf("POST /api/uploads/init: %v", err)
+	}
+	var initOut struct {
+		Instant        bool   `json:"instant"`
+		UploadID       string `json:"upload_id"`
+		TotalChunks    int    `json:"total_chunks"`
+		UploadedChunks []int  `json:"uploaded_chunks"`
+		Resumed        bool   `json:"resumed"`
+	}
+	_ = json.NewDecoder(initRes.Body).Decode(&initOut)
+	initRes.Body.Close()
+	if initRes.StatusCode != http.StatusOK || initOut.Instant || initOut.TotalChunks != 3 {
+		t.Fatalf("unexpected chunk init response: status=%d out=%+v", initRes.StatusCode, initOut)
+	}
+
+	uploadChunk := func(idx int, data []byte, shaHex string) int {
+		req, _ := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/uploads/%s/chunk/%d", entryTS.URL, initOut.UploadID, idx), bytes.NewReader(data))
+		if shaHex != "" {
+			req.Header.Set("X-Chunk-SHA256", shaHex)
+		}
+		res, reqErr := adminClient.Do(req)
+		if reqErr != nil {
+			t.Fatalf("PUT chunk %d: %v", idx, reqErr)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+
+	// Bad SHA rejected; out-of-order chunks 2 & 1 accepted.
+	if st := uploadChunk(1, c1, strings.Repeat("f", 64)); st != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad chunk SHA-256, got %d", st)
+	}
+	c1Sum := sha256.Sum256(c1)
+	if st := uploadChunk(2, c2, ""); st != http.StatusOK {
+		t.Fatalf("PUT chunk 2 status=%d", st)
+	}
+	if st := uploadChunk(1, c1, hex.EncodeToString(c1Sum[:])); st != http.StatusOK {
+		t.Fatalf("PUT chunk 1 status=%d", st)
+	}
+
+	// Resume /init reports uploaded chunks [1, 2].
+	resRes, _ := adminClient.Post(entryTS.URL+"/api/uploads/init", "application/json", bytes.NewReader(initBody))
+	var resOut struct {
+		UploadID       string `json:"upload_id"`
+		UploadedChunks []int  `json:"uploaded_chunks"`
+		Resumed        bool   `json:"resumed"`
+	}
+	_ = json.NewDecoder(resRes.Body).Decode(&resOut)
+	resRes.Body.Close()
+	if !resOut.Resumed || resOut.UploadID != initOut.UploadID || len(resOut.UploadedChunks) != 2 {
+		t.Fatalf("expected resume with 2 chunks, got %+v", resOut)
+	}
+
+	// Finish chunk 0 -> complete.
+	if st := uploadChunk(0, c0, ""); st != http.StatusOK {
+		t.Fatalf("PUT chunk 0 status=%d", st)
+	}
+	compRes, err := adminClient.Post(entryTS.URL+"/api/uploads/"+initOut.UploadID+"/complete", "application/json", strings.NewReader(`{"version_note":"分片合并完成"}`))
+	if err != nil {
+		t.Fatalf("POST complete: %v", err)
+	}
+	var compOut struct {
+		OK   bool               `json:"ok"`
+		File storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(compRes.Body).Decode(&compOut)
+	compRes.Body.Close()
+	if compRes.StatusCode != http.StatusCreated || !compOut.OK || compOut.File.SHA256 != fullSHA {
+		t.Fatalf("unexpected complete output: status=%d out=%+v", compRes.StatusCode, compOut)
+	}
+	dlRes, _ := adminClient.Get(entryTS.URL + "/api/files/" + compOut.File.ID + "/download")
+	dlRaw, _ := io.ReadAll(dlRes.Body)
+	dlRes.Body.Close()
+	if dlRes.StatusCode != http.StatusOK || !bytes.Equal(dlRaw, full) {
+		t.Fatalf("chunk-assembled download mismatch: status=%d len=%d want=%d", dlRes.StatusCode, len(dlRaw), len(full))
+	}
+
+	// 2. Instant upload (second file with identical SHA-256 skips chunk uploads).
+	instBody, _ := json.Marshal(map[string]any{
+		"name":        "stage3-instant.bin",
+		"folder_path": "instant",
+		"file_size":   len(full),
+		"file_sha256": fullSHA,
+		"target_node": entryMgr.NodeID(),
+	})
+	instRes, _ := adminClient.Post(entryTS.URL+"/api/uploads/init", "application/json", bytes.NewReader(instBody))
+	var instOut struct {
+		Instant bool               `json:"instant"`
+		File    storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(instRes.Body).Decode(&instOut)
+	instRes.Body.Close()
+	if instRes.StatusCode != http.StatusCreated || !instOut.Instant || instOut.File.Name != "stage3-instant.bin" {
+		t.Fatalf("expected instant upload success, status=%d out=%+v", instRes.StatusCode, instOut)
+	}
+
+	// 3. Bit-rot integrity scrub detects corrupted blob.
+	_, diskPath, ok := entrySrv.store.Get(compOut.File.ID)
+	if !ok {
+		t.Fatal("missing uploaded record in store")
+	}
+	tampered := append([]byte(nil), full...)
+	tampered[0] ^= 0xff
+	if err := os.WriteFile(diskPath, tampered, 0644); err != nil {
+		t.Fatal(err)
+	}
+	scrubRes, _ := adminClient.Post(entryTS.URL+"/api/admin/integrity/scrub", "application/json", nil)
+	var scrubOut struct {
+		OK     bool                `json:"ok"`
+		Result storage.ScrubResult `json:"result"`
+	}
+	_ = json.NewDecoder(scrubRes.Body).Decode(&scrubOut)
+	scrubRes.Body.Close()
+	if scrubRes.StatusCode != http.StatusOK || !scrubOut.OK || scrubOut.Result.Corrupted != 1 {
+		t.Fatalf("expected scrub to detect 1 corrupted file, status=%d out=%+v", scrubRes.StatusCode, scrubOut)
+	}
+
+	// 4. Login brute-force limiter blocks on 9th wrong password with HTTP 429.
+	anonClient := &http.Client{}
+	for i := 0; i < 8; i++ {
+		badRes, _ := anonClient.Post(entryTS.URL+"/api/login", "application/json", strings.NewReader(`{"username":"nobody","password":"bad"}`))
+		badRes.Body.Close()
+		if badRes.StatusCode == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d hit 429 too early", i+1)
+		}
+	}
+	blockedRes, _ := anonClient.Post(entryTS.URL+"/api/login", "application/json", strings.NewReader(`{"username":"nobody","password":"bad"}`))
+	blockedRes.Body.Close()
+	if blockedRes.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 Too Many Requests on 9th attempt, got %d", blockedRes.StatusCode)
+	}
+
+	// 5. Audit log contains login_failed, login_blocked, and integrity_scrub events.
+	auditRes, _ := adminClient.Get(entryTS.URL + "/api/admin/audit?limit=50")
+	var auditOut struct {
+		Entries []struct {
+			Action string `json:"action"`
+		} `json:"entries"`
+	}
+	_ = json.NewDecoder(auditRes.Body).Decode(&auditOut)
+	auditRes.Body.Close()
+	if auditRes.StatusCode != http.StatusOK || len(auditOut.Entries) == 0 {
+		t.Fatalf("expected non-empty audit log, status=%d", auditRes.StatusCode)
+	}
+	seenActions := map[string]bool{}
+	for _, e := range auditOut.Entries {
+		seenActions[e.Action] = true
+	}
+	for _, want := range []string{"integrity_scrub", "login_failed", "login_blocked"} {
+		if !seenActions[want] {
+			t.Fatalf("expected audit action %q in %+v", want, auditOut.Entries)
+		}
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
 	"lfh/internal/preview"
+	"lfh/internal/security"
 	"lfh/internal/storage"
 	"lfh/internal/updater"
 	"lfh/internal/version"
@@ -52,6 +53,8 @@ type Server struct {
 	cluster      *cluster.Manager
 	events       *EventHub
 	updater      *updater.Manager
+	limiter      *security.LoginLimiter
+	audit        *security.AuditLogger
 	webFS        fs.FS
 	port         string
 	portSwitcher func(newPort string) error
@@ -62,11 +65,17 @@ func New(authMgr *auth.Manager, store *storage.Store, clusterMgr *cluster.Manage
 	if err != nil {
 		return nil, err
 	}
+	auditLog, err := security.NewAuditLogger(store.DataDir())
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		auth:    authMgr,
 		store:   store,
 		cluster: clusterMgr,
 		events:  NewEventHub(),
+		limiter: security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
+		audit:   auditLog,
 		webFS:   sub,
 		port:    port,
 	}, nil
@@ -410,11 +419,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/update/config", s.requireAdmin(s.handleSaveUpdateConfig))
 	mux.HandleFunc("POST /api/admin/update/check", s.requireAdmin(s.handleCheckUpdate))
 	mux.HandleFunc("POST /api/admin/update/apply", s.requireAdmin(s.handleApplyUpdate))
+	mux.HandleFunc("GET /api/admin/audit", s.requireAdmin(s.handleAdminAudit))
+	mux.HandleFunc("POST /api/admin/integrity/scrub", s.requireAdmin(s.handleAdminIntegrityScrub))
+	mux.HandleFunc("GET /api/admin/integrity/status", s.requireAdmin(s.handleAdminIntegrityStatus))
 
 	mux.HandleFunc("GET /api/files", s.requireAuth(s.handleListFiles))
 	mux.HandleFunc("GET /api/summary", s.requireAuth(s.handleSummary))
 	mux.HandleFunc("GET /api/events", s.requireAuth(s.handleEvents))
 	mux.HandleFunc("POST /api/upload", s.requireAuth(s.handleUpload))
+	mux.HandleFunc("POST /api/uploads/init", s.requireAuth(s.handleUploadInit))
+	mux.HandleFunc("PUT /api/uploads/{uploadID}/chunk/{index}", s.requireAuth(s.handleUploadChunk))
+	mux.HandleFunc("POST /api/uploads/{uploadID}/complete", s.requireAuth(s.handleUploadComplete))
+	mux.HandleFunc("DELETE /api/uploads/{uploadID}", s.requireAuth(s.handleUploadCancel))
 	mux.HandleFunc("POST /api/files/create-txt", s.requireAuth(s.handleCreateTxtFile))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.handleDownload))
 	mux.HandleFunc("GET /api/files/{id}/raw", s.requireAuth(s.handleRaw))
@@ -1555,7 +1571,24 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) logAudit(r *http.Request, actor, action, target, status, detail string) {
+	if s.audit != nil {
+		s.audit.Log(actor, action, target, security.ClientIP(r), status, detail)
+	}
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ip := security.ClientIP(r)
+	if allowed, retry := s.limiter.Allow(ip); !allowed {
+		sec := max(1, int(retry.Seconds()))
+		s.logAudit(r, "-", "login_blocked", ip, "denied", fmt.Sprintf("锁定剩余 %d 秒", sec))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":           fmt.Sprintf("登录失败次数过多，请在 %d 秒后重试", sec),
+			"retry_after_sec": sec,
+		})
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -1566,6 +1599,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	u, status, err := s.auth.AuthenticateWithReason(req.Username, req.Password)
 	if err != nil {
+		s.limiter.RecordFailure(ip)
+		s.logAudit(r, req.Username, "login_failed", req.Username, "denied", err.Error())
 		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1573,6 +1608,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "签发会话失败"})
 		return
 	}
+	s.limiter.Reset(ip)
+	s.logAudit(r, u.Username, "login_success", u.Username, "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
@@ -1932,6 +1969,7 @@ func (s *Server) handleAdminClusterRemoveNode(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "cluster_evict", peerName, "ok", nodeID)
 	s.events.Publish(FileChangeEvent{
 		Kind:     "cluster_sync",
 		NodeName: peerName,
@@ -1965,6 +2003,7 @@ func (s *Server) handleAdminClusterPromote(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "cluster_promote", targetNode.NodeName, "ok", newEntryURL)
 	s.events.Publish(FileChangeEvent{
 		Kind:     "entry_switched",
 		NodeName: targetNode.NodeName,
@@ -1988,6 +2027,7 @@ func (s *Server) handleAdminClusterLeave(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "退出/解散集群失败: " + err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "cluster_dissolve", s.cluster.NodeName(), "ok", fmt.Sprintf("detached=%d", detached))
 	s.events.Publish(FileChangeEvent{
 		Kind:     "cluster_sync",
 		NodeName: s.cluster.NodeName(),
@@ -2370,6 +2410,7 @@ func (s *Server) handleAdminClusterClipboard(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "cluster_clipboard", updated.NodeName, "ok", fmt.Sprintf("enabled=%v", req.Enabled))
 	s.events.Publish(FileChangeEvent{
 		Kind:     "cluster_sync",
 		NodeName: updated.NodeName,
@@ -2401,6 +2442,7 @@ func (s *Server) handleAdminImportLocal(w http.ResponseWriter, r *http.Request, 
 	if len(files) > 0 {
 		s.publishRecordChange("upload", u.Username, files, req.AllowedUsers)
 	}
+	s.logAudit(r, u.Username, "zerocopy_import", req.SourcePath, "ok", fmt.Sprintf("files=%d hardlink=%d ref=%d", summary.TotalImported, summary.HardlinkCount, summary.RefCount))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"files":   s.sanitizeRecordsForUser(files, u),
@@ -2431,6 +2473,7 @@ func (s *Server) handleAdminAddMount(w http.ResponseWriter, r *http.Request, u a
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "mount_add", req.DirPath, "ok", fmt.Sprintf("alias=%s added=%d", entry.Alias, added))
 	s.events.Publish(FileChangeEvent{
 		Kind:     "cluster_sync",
 		Uploader: u.Username,
@@ -2453,6 +2496,7 @@ func (s *Server) handleAdminRemoveMount(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "mount_remove", mountID, "ok", fmt.Sprintf("node=%s removed=%d", nodeID, removed))
 	s.events.Publish(FileChangeEvent{
 		Kind:     "cluster_sync",
 		Uploader: u.Username,
@@ -2497,6 +2541,45 @@ func (s *Server) SyncLocalZeroCopy() {
 			NodeName: s.cluster.NodeName(),
 		})
 	}
+}
+
+func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	entries := s.audit.List(limit)
+	if entries == nil {
+		entries = []security.AuditEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+	})
+}
+
+func (s *Server) handleAdminIntegrityScrub(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	res := s.store.ScrubIntegrity(0)
+	s.cluster.TriggerHeartbeat()
+	status := "ok"
+	if res.Corrupted > 0 || res.Missing > 0 {
+		status = "error"
+	}
+	s.logAudit(r, u.Username, "integrity_scrub", "all", status,
+		fmt.Sprintf("checked=%d ok=%d corrupted=%d missing=%d backfilled=%d", res.Checked, res.OK, res.Corrupted, res.Missing, res.Backfilled))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"result":          res,
+		"corrupted_count": s.store.CorruptedCount(),
+	})
+}
+
+func (s *Server) handleAdminIntegrityStatus(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"last_result":     s.store.LastScrubResult(),
+		"corrupted_count": s.store.CorruptedCount(),
+	})
 }
 
 func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
@@ -2957,6 +3040,233 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": s.sanitizeRecordsForUser(uploaded, u)})
 }
 
+func (s *Server) resolveUploadTargetPref(filename, folderPath, requestedPref string, size int64, role string) string {
+	pref := strings.TrimSpace(requestedPref)
+	if pref == "" || role != "admin" {
+		pref = "auto"
+	}
+	if pref == "auto" {
+		cleanBase := filepath.Base(strings.TrimSpace(filename))
+		for _, existing := range s.cluster.AllClusterFiles() {
+			if existing.NodeOnline && existing.NodeID != "" &&
+				strings.EqualFold(existing.Name, cleanBase) &&
+				existing.FolderPath == folderPath {
+				if _, err := s.cluster.SelectUploadTarget(existing.NodeID, size); err == nil {
+					return existing.NodeID
+				}
+				break
+			}
+		}
+	}
+	return pref
+}
+
+func (s *Server) dispatchUploadStream(
+	u auth.PublicUser,
+	filename, folderPath, versionNote string,
+	size int64,
+	targetPref string,
+	allowedUsers []string,
+	dev storage.DeviceInfo,
+	r io.Reader,
+) (storage.FileRecord, int, string) {
+	effectivePref := s.resolveUploadTargetPref(filename, folderPath, targetPref, size, u.Role)
+	target, err := s.cluster.SelectUploadTarget(effectivePref, size)
+	if err != nil {
+		return storage.FileRecord{}, http.StatusInsufficientStorage, err.Error()
+	}
+	if target.IsSelf {
+		if capErr := s.cluster.CanAcceptLocal(size); capErr != nil {
+			return storage.FileRecord{}, http.StatusInsufficientStorage, capErr.Error()
+		}
+		rec, saveErr := s.store.SaveUploadWithVersionNote(filename, folderPath, versionNote, u.Username, allowedUsers, dev, r)
+		if saveErr != nil {
+			return storage.FileRecord{}, http.StatusInternalServerError, "保存文件失败: " + saveErr.Error()
+		}
+		rec.NodeID = s.cluster.NodeID()
+		rec.NodeName = s.cluster.NodeName()
+		rec.NodeOS = runtime.GOOS
+		rec.NodeOnline = true
+		return rec, http.StatusCreated, ""
+	}
+	rec, proxyErr := s.cluster.ProxyUpload(target, filename, folderPath, r, u.Username, allowedUsers, dev)
+	if proxyErr != nil {
+		return storage.FileRecord{}, http.StatusBadGateway, proxyErr.Error()
+	}
+	return rec, http.StatusCreated, ""
+}
+
+func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		Name         string   `json:"name"`
+		FolderPath   string   `json:"folder_path"`
+		FileSize     int64    `json:"file_size"`
+		ChunkSize    int64    `json:"chunk_size"`
+		FileSHA256   string   `json:"file_sha256"`
+		TargetNode   string   `json:"target_node"`
+		AllowedUsers []string `json:"allowed_users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件名不能为空"})
+		return
+	}
+	if err := s.auth.CheckUploadAllowed(name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	allowedUsers, userErr := s.auth.ValidateExistingUsers(req.AllowedUsers)
+	if userErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
+		return
+	}
+	folderPath := storage.SanitizeFolderPath(req.FolderPath)
+	dev := extractDeviceInfo(r)
+	targetPref := strings.TrimSpace(req.TargetNode)
+	if targetPref == "" || u.Role != "admin" {
+		targetPref = "auto"
+	}
+
+	// Instant upload (deduplicated copy) if an intact local file already matches file_sha256.
+	if cleanSHA := strings.TrimSpace(req.FileSHA256); cleanSHA != "" {
+		if matchRec, matchPath, ok := s.store.FindBySHA256(cleanSHA); ok && matchRec.Size == req.FileSize {
+			if f, openErr := os.Open(matchPath); openErr == nil {
+				rec, statusCode, errMsg := s.dispatchUploadStream(u, name, folderPath, "SHA-256 秒传", req.FileSize, targetPref, allowedUsers, dev, f)
+				_ = f.Close()
+				if statusCode == http.StatusCreated {
+					s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, allowedUsers)
+					writeJSON(w, http.StatusCreated, map[string]any{
+						"instant": true,
+						"file":    s.sanitizeRecordForUser(rec, u),
+					})
+					return
+				}
+				_ = errMsg
+			}
+		}
+	}
+
+	sess, resumed, err := s.store.InitChunkUpload(storage.ChunkUploadInit{
+		Name:         name,
+		FolderPath:   folderPath,
+		FileSize:     req.FileSize,
+		ChunkSize:    req.ChunkSize,
+		FileSHA256:   req.FileSHA256,
+		TargetNode:   targetPref,
+		Uploader:     u.Username,
+		AllowedUsers: allowedUsers,
+		Dev:          dev,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instant":         false,
+		"upload_id":       sess.UploadID,
+		"chunk_size":      sess.ChunkSize,
+		"total_chunks":    sess.TotalChunks,
+		"uploaded_chunks": sess.UploadedChunks,
+		"resumed":         resumed,
+	})
+}
+
+func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	uploadID := r.PathValue("uploadID")
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil || index < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的分片索引"})
+		return
+	}
+	sess, err := s.store.GetUploadSession(uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if sess.Uploader != u.Username && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该上传会话"})
+		return
+	}
+	expectedSHA := strings.TrimSpace(r.Header.Get("X-Chunk-SHA256"))
+	n, err := s.store.SaveUploadChunk(uploadID, index, expectedSHA, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"index": index,
+		"size":  n,
+	})
+}
+
+func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	uploadID := r.PathValue("uploadID")
+	sess, err := s.store.GetUploadSession(uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if sess.Uploader != u.Username && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该上传会话"})
+		return
+	}
+
+	var req struct {
+		VersionNote string `json:"version_note"`
+		TargetNode  string `json:"target_node"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req)
+
+	sess, mergedPath, _, err := s.store.AssembleChunkUpload(uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	f, err := os.Open(mergedPath)
+	if err != nil {
+		_ = os.Remove(mergedPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取合并临时文件失败"})
+		return
+	}
+	targetPref := sess.TargetNode
+	if strings.TrimSpace(req.TargetNode) != "" && u.Role == "admin" {
+		targetPref = strings.TrimSpace(req.TargetNode)
+	}
+	rec, statusCode, errMsg := s.dispatchUploadStream(u, sess.Name, sess.FolderPath, req.VersionNote, sess.FileSize, targetPref, sess.AllowedUsers, sess.Dev, f)
+	_ = f.Close()
+	if statusCode != http.StatusCreated {
+		_ = os.Remove(mergedPath)
+		writeJSON(w, statusCode, map[string]string{"error": errMsg})
+		return
+	}
+	s.store.CleanupUploadSession(uploadID)
+	s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, sess.AllowedUsers)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ok":   true,
+		"file": s.sanitizeRecordForUser(rec, u),
+	})
+}
+
+func (s *Server) handleUploadCancel(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	uploadID := r.PathValue("uploadID")
+	sess, err := s.store.GetUploadSession(uploadID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if sess.Uploader != u.Username && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该上传会话"})
+		return
+	}
+	s.store.CleanupUploadSession(uploadID)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) handleCreateTxtFile(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	var req struct {
 		Name         string   `json:"name"`
@@ -3203,6 +3513,7 @@ func (s *Server) handleUpdateFileAccess(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "file_access", rec.Name, "ok", strings.Join(cleanUsers, ","))
 	s.events.Publish(FileChangeEvent{
 		Kind:     "access",
 		Uploader: u.Username,
@@ -3331,6 +3642,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.Pub
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		s.logAudit(r, u.Username, "file_delete", rec.Name, "ok", s.cluster.NodeName())
 		s.events.Publish(FileChangeEvent{
 			Kind:         "delete",
 			Uploader:     rec.Uploader,
@@ -3347,6 +3659,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.Pub
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "file_delete", rec.Name, "ok", rec.NodeName)
 	s.events.Publish(FileChangeEvent{
 		Kind:         "delete",
 		Uploader:     rec.Uploader,
@@ -3904,41 +4217,45 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string, includePath boo
 	}
 
 	const maxMetaHashBytes int64 = 256 * 1024 * 1024
-	var shaHex string
+	shaHex := strings.TrimSpace(rec.SHA256)
 	shaSkipped := false
-	if rec.Size > maxMetaHashBytes {
-		shaSkipped = true
-	} else {
-		f, err := os.Open(fp)
-		if err != nil {
-			if isExternalSourceMissingErr(rec, err) {
-				writeJSON(w, http.StatusGone, map[string]string{"error": "源文件已移动或删除，外部引用已失效"})
+	if shaHex == "" {
+		if rec.Size > maxMetaHashBytes {
+			shaSkipped = true
+		} else {
+			f, err := os.Open(fp)
+			if err != nil {
+				if isExternalSourceMissingErr(rec, err) {
+					writeJSON(w, http.StatusGone, map[string]string{"error": "源文件已移动或删除，外部引用已失效"})
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取本地文件失败"})
 				return
 			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取本地文件失败"})
-			return
+			h := sha256.New()
+			_, copyErr := io.Copy(h, f)
+			_ = f.Close()
+			if copyErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "计算 SHA-256 失败"})
+				return
+			}
+			shaHex = hex.EncodeToString(h.Sum(nil))
+			s.store.SetRecordSHA256(id, shaHex)
 		}
-		h := sha256.New()
-		_, copyErr := io.Copy(h, f)
-		_ = f.Close()
-		if copyErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "计算 SHA-256 失败"})
-			return
-		}
-		shaHex = hex.EncodeToString(h.Sum(nil))
 	}
 
 	isArch := preview.IsArchiveName(rec.Name)
 	canPrev := isArch || preview.CanPreviewExt(rec.Ext)
 	resp := map[string]any{
-		"file":           rec,
-		"content_type":   ct,
-		"sha256":         shaHex,
-		"sha256_skipped": shaSkipped,
-		"can_preview":    canPrev,
-		"is_archive":     isArch,
-		"storage_mode":   storageMode,
-		"source_missing": rec.SourceMissing,
+		"file":             rec,
+		"content_type":     ct,
+		"sha256":           shaHex,
+		"sha256_skipped":   shaSkipped,
+		"can_preview":      canPrev,
+		"is_archive":       isArch,
+		"storage_mode":     storageMode,
+		"source_missing":   rec.SourceMissing,
+		"integrity_status": rec.IntegrityStatus,
 	}
 	if includePath {
 		resp["disk_path"] = fp

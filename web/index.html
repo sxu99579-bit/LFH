@@ -37,7 +37,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.12</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.13</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -115,7 +115,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.12</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.13</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
@@ -766,6 +766,37 @@
               <div id="invites-empty" class="empty-state hidden">暂无邀请码，请在上方创建一个。</div>
             </div>
           </div>
+
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">文件完整性巡检（Bit-Rot Scrubbing）</div>
+              <button id="btn-run-scrub" class="btn btn-primary btn-xs" type="button">立即全盘完整性巡检</button>
+            </div>
+            <div id="integrity-scrub-summary" class="scrub-summary-box">正在加载完整性巡检状态...</div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">安全审计日志</div>
+              <button id="btn-refresh-audit" class="btn btn-ghost btn-xs" type="button">刷新审计日志</button>
+            </div>
+            <div class="admin-table-wrap audit-table-wrap">
+              <table class="files-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>操作人</th>
+                    <th>动作</th>
+                    <th>目标</th>
+                    <th>IP</th>
+                    <th>状态</th>
+                    <th>详情</th>
+                  </tr>
+                </thead>
+                <tbody id="audit-log-tbody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
 
         <!-- Tab 3: 用户管理（管理员） -->
@@ -931,7 +962,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.12</strong>
+                  <strong id="upd-cur-version">V0.11.21.13</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>
@@ -1076,6 +1107,27 @@
       <div class="drop-overlay-title">松开鼠标，立即自动上传</div>
       <div class="drop-overlay-desc">支持多文件、整个文件夹（保留目录结构）与压缩包 · 同名文件自动版本控制</div>
     </div>
+  </div>
+
+  <!-- 悬浮传输队列抽屉（上传 / 下载 / 断点续传） -->
+  <button id="transfer-fab" class="transfer-fab hidden" type="button" title="打开上传与下载传输队列">
+    <span>传输队列</span>
+    <span id="transfer-fab-badge" class="transfer-fab-badge hidden">0</span>
+  </button>
+  <div id="transfer-drawer" class="transfer-drawer hidden">
+    <div class="transfer-drawer-head">
+      <div class="transfer-drawer-title">传输队列（断点续传）</div>
+      <div class="row-actions">
+        <button id="transfer-clear-done" class="btn btn-ghost btn-xs" type="button">清理已完成</button>
+        <button id="transfer-drawer-close" class="btn btn-ghost btn-xs" type="button">收起</button>
+      </div>
+    </div>
+    <div class="transfer-tabs">
+      <button type="button" class="transfer-tab active" data-transfer-tab="upload">上传队列 (<span id="transfer-count-upload">0</span>)</button>
+      <button type="button" class="transfer-tab" data-transfer-tab="download">下载队列 (<span id="transfer-count-download">0</span>)</button>
+      <button type="button" class="transfer-tab" data-transfer-tab="done">已完成 (<span id="transfer-count-done">0</span>)</button>
+    </div>
+    <div id="transfer-queue-list" class="transfer-list"></div>
   </div>
 
   <!-- Toast 通知容器 -->

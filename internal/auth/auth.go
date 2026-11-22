@@ -933,6 +933,7 @@ func (m *Manager) ClearCookie(w http.ResponseWriter) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 }
