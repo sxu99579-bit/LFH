@@ -1,0 +1,69 @@
+name: Comment Auto Moderation
+
+on:
+  issue_comment:
+    types: [created, edited]
+  discussion_comment:
+    types: [created, edited]
+
+permissions:
+  issues: write
+  discussions: write
+
+jobs:
+  moderate:
+    if: ${{ github.actor != github.repository_owner }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check and remove abusive or spam comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment || {};
+            const author = (comment.user && comment.user.login) || '';
+            if (!author || author === context.repo.owner || author.endsWith('[bot]')) {
+              core.info(`Skip moderation for owner or bot (${author}).`);
+              return;
+            }
+
+            const body = String(comment.body || '');
+            if (!body.trim()) return;
+
+            // Add custom blocked words or spam patterns below as needed.
+            const rules = [
+              {
+                category: 'spam_promo',
+                pattern: /(赌博|博彩|棋牌|时时彩|六合彩|威尼斯人|葡京|裸聊|约炮|色情|av网|代开发票|发票代开|刷单兼职|加微[信vV]?[:：\s]*[a-zA-Z0-9_-]{4,}|t\.me\/[a-zA-Z0-9_]{3,}|airdrop.*claim|crypto.*giveaway|buy\s+followers|cheap\s+traffic|online\s+casino|porn|sex\s+cam)/i,
+              },
+              {
+                category: 'severe_abuse',
+                pattern: /(nmsl|cnm|傻[逼比吊屄]|sb东西|死全家|操你妈|草泥马|去死吧|fuck\s+you|motherfucker|piece\s+of\s+shit|kill\s+yourself|kys\b)/i,
+              },
+            ];
+
+            const matched = rules.find((r) => r.pattern.test(body));
+            if (!matched) {
+              core.info(`Comment passed moderation (${context.eventName}).`);
+              return;
+            }
+
+            core.warning(`Matched rule [${matched.category}] by @${author}; deleting comment...`);
+
+            if (context.eventName === 'issue_comment') {
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+              });
+              core.info(`Deleted issue/PR comment #${comment.id}.`);
+            } else if (context.eventName === 'discussion_comment') {
+              await github.graphql(
+                `mutation($id: ID!) {
+                  deleteDiscussionComment(input: { id: $id }) {
+                    clientMutationId
+                  }
+                }`,
+                { id: comment.node_id }
+              );
+              core.info(`Deleted discussion comment ${comment.node_id}.`);
+            }
