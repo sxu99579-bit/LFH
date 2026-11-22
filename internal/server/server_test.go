@@ -3103,3 +3103,84 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 		t.Fatalf("expected workerBExe updated to V0.11.23.0, got %q", string(b))
 	}
 }
+
+func TestClusterBandwidthProbeAndPluginRecommendations(t *testing.T) {
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Entry-Master",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_, workerMgr, _, workerTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Worker-Fast",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_ = workerTS
+
+	if err := workerMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker join: %v", err)
+	}
+	if err := workerMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker heartbeat: %v", err)
+	}
+
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+
+	// 1. Trigger active LAN bandwidth probe across online cluster peers.
+	probeRes, err := adminClient.Post(entryTS.URL+"/api/admin/cluster/probe-bandwidth", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST probe-bandwidth: %v", err)
+	}
+	var probeOut struct {
+		OK      bool                           `json:"ok"`
+		Results []cluster.BandwidthProbeResult `json:"results"`
+		Pool    cluster.PoolSummary            `json:"pool"`
+	}
+	_ = json.NewDecoder(probeRes.Body).Decode(&probeOut)
+	probeRes.Body.Close()
+	if probeRes.StatusCode != http.StatusOK || !probeOut.OK {
+		t.Fatalf("expected 200 ok from probe-bandwidth, got status=%d out=%+v", probeRes.StatusCode, probeOut)
+	}
+	var workerResult *cluster.BandwidthProbeResult
+	for i := range probeOut.Results {
+		if probeOut.Results[i].NodeID == workerMgr.NodeID() {
+			workerResult = &probeOut.Results[i]
+			break
+		}
+	}
+	if workerResult == nil || !workerResult.OK || workerResult.BandwidthMbps <= 0 {
+		t.Fatalf("expected positive measured LAN bandwidth for worker peer, got %+v (all=%+v)", workerResult, probeOut.Results)
+	}
+	var workerNodePool *cluster.NodeStatus
+	for i := range probeOut.Pool.Nodes {
+		if probeOut.Pool.Nodes[i].NodeID == workerMgr.NodeID() {
+			workerNodePool = &probeOut.Pool.Nodes[i]
+			break
+		}
+	}
+	if workerNodePool == nil || workerNodePool.LANBandwidthMbps <= 0 {
+		t.Fatalf("expected PoolSummary node updated with lan_bandwidth_mbps > 0, got %+v", workerNodePool)
+	}
+
+	// 2. Verify /api/admin/plugins/marketplace returns smart hardware recommendations.
+	mktRes, err := adminClient.Get(entryTS.URL + "/api/admin/plugins/marketplace")
+	if err != nil {
+		t.Fatalf("GET marketplace: %v", err)
+	}
+	var mktOut struct {
+		Marketplace     []plugins.MarketplaceItem      `json:"marketplace"`
+		Recommendations []cluster.PluginRecommendation `json:"recommendations"`
+	}
+	_ = json.NewDecoder(mktRes.Body).Decode(&mktOut)
+	mktRes.Body.Close()
+	if mktRes.StatusCode != http.StatusOK || len(mktOut.Marketplace) < 3 || len(mktOut.Recommendations) != len(mktOut.Marketplace) {
+		t.Fatalf("expected marketplace & matching recommendations, status=%d mkt=%d rec=%d", mktRes.StatusCode, len(mktOut.Marketplace), len(mktOut.Recommendations))
+	}
+	for _, rec := range mktOut.Recommendations {
+		if rec.BestNodeID == "" || len(rec.NodeFits) != 2 || rec.BestReason == "" {
+			t.Fatalf("expected complete recommendation for plugin %s, got %+v", rec.PluginID, rec)
+		}
+	}
+}

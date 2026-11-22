@@ -37,7 +37,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.22.1</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.22.2</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -115,7 +115,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.22.1</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.22.2</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
@@ -375,6 +375,7 @@
             </div>
             <div class="page-panel-actions">
               <span class="live-sync-pill connected"><span class="live-dot"></span><span>3秒自动采样</span></span>
+              <button id="btn-probe-lan-bandwidth" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">探测内网带宽</button>
               <button id="btn-health-sync-versions" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">同步全部分节点版本</button>
               <button id="btn-health-open-cluster-settings" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">集群组网设置</button>
               <button id="btn-health-refresh" class="btn btn-primary btn-sm" type="button">立即刷新采样</button>
@@ -957,39 +958,49 @@
 
         <!-- Tab: 插件市场与分布式算力（管理员） -->
         <div class="settings-panel hidden" id="panel-plugins">
-          <div class="admin-card">
-            <div class="plugin-node-toolbar">
+          <div class="admin-section">
+            <div class="admin-section-head">
               <div>
-                <h4>分布式算力插件市场（Stage 4）</h4>
-                <p class="setting-hint">在任意节点按需安装与启用算力插件，全集群共享其处理能力，任务自动调度到空闲且数据本地化的节点执行。</p>
+                <div class="admin-section-title" style="margin-bottom:4px;">节点硬件性能评估与智能推荐</div>
+                <p class="setting-hint" style="margin:0;">实时分析集群在线节点的 CPU 核心、内存余量、独立 GPU 与内网带宽，自动给出插件最佳部署节点推荐。</p>
               </div>
               <div class="row-actions">
-                <select id="plugin-install-node" class="field-select" title="选择安装或管理插件的目标节点"></select>
-                <button class="btn-ghost" type="button" id="btn-refresh-plugins">刷新插件状态</button>
+                <select id="plugin-install-node" class="node-select" title="选择安装或管理插件的目标节点"></select>
+                <button class="btn btn-ghost btn-sm" type="button" id="btn-refresh-plugins">刷新硬件与插件状态</button>
+              </div>
+            </div>
+            <div id="plugins-hardware-overview" class="plugin-hw-grid"></div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-head">
+              <div>
+                <div class="admin-section-title" style="margin-bottom:4px;">分布式算力插件市场（Stage 4）</div>
+                <p class="setting-hint" style="margin:0;">按硬件匹配度智能推荐安装节点，也可切换到任意节点按需部署，全集群共享算力并本地化执行。</p>
               </div>
             </div>
             <div id="plugins-marketplace-list" class="plugin-market-grid"></div>
           </div>
 
-          <div class="admin-card">
-            <div class="admin-card-head">
+          <div class="admin-section">
+            <div class="admin-section-head">
               <div>
-                <h4>全集群算力能力矩阵</h4>
-                <p class="setting-hint">实时汇总所有在线节点注册的插件与当前并发负载，支持直接启停或卸载节点插件。</p>
+                <div class="admin-section-title" style="margin-bottom:4px;">全集群算力能力矩阵</div>
+                <p class="setting-hint" style="margin:0;">实时汇总所有在线节点注册的插件与当前并发负载，支持直接启停或卸载节点插件。</p>
               </div>
             </div>
             <div id="plugins-capabilities-list" class="plugin-cap-matrix"></div>
           </div>
 
-          <div class="admin-card">
-            <div class="admin-card-head">
+          <div class="admin-section">
+            <div class="admin-section-head">
               <div>
-                <h4>分布式算力任务记录</h4>
-                <p class="setting-hint">查看最近提交的插件任务、调度执行节点与生成结果文件。</p>
+                <div class="admin-section-title" style="margin-bottom:4px;">分布式算力任务记录</div>
+                <p class="setting-hint" style="margin:0;">查看最近提交的插件任务、调度执行节点与生成结果文件。</p>
               </div>
             </div>
             <div class="admin-table-wrap">
-              <table class="admin-table">
+              <table class="admin-table plugin-jobs-table">
                 <thead>
                   <tr>
                     <th>文件</th>
@@ -1022,7 +1033,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.22.1</strong>
+                  <strong id="upd-cur-version">V0.11.22.2</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>

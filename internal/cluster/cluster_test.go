@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"lfh/internal/plugins"
 	"lfh/internal/storage"
 )
 
@@ -629,5 +630,107 @@ func TestLegacyPeerPromoteAndEvictFallbackOn404(t *testing.T) {
 	disc := entryMgr.PassiveDiscoveredNodes()
 	if len(disc) != 1 || disc[0].NodeID != "legacy-peer" || disc[0].AlreadyInPool {
 		t.Fatalf("expected evicted legacy peer visible in discovered list as not in pool: %+v", disc)
+	}
+}
+
+func TestPluginHardwareRecommendations(t *testing.T) {
+	dir := t.TempDir()
+	st, err := storage.NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	mgr, err := NewManager(dir, st, Options{
+		Role:             RoleEntry,
+		NodeName:         "Entry-Host",
+		DiscoveryPort:    0,
+		DiscoveryPortSet: true,
+		SelfURL:          "http://127.0.0.1:8080",
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	pm, err := plugins.NewManager(dir)
+	if err != nil {
+		t.Fatalf("plugins NewManager: %v", err)
+	}
+	mgr.SetPluginManager(pm)
+
+	// Strained peer: 2 cores, 95% RAM used (~100 MB free), 90% CPU load, tiny free disk.
+	mgr.HandleHeartbeat(HeartbeatPayload{
+		Node: NodeStatus{
+			NodeID:         "node-strained",
+			NodeName:       "Weak-Node",
+			Role:           RoleWorker,
+			OS:             "linux",
+			Arch:           "amd64",
+			CPUCores:       2,
+			CPUPercent:     90,
+			MemTotalBytes:  2 * GB,
+			MemUsedBytes:   (19 * GB) / 10,
+			MemPercent:     95,
+			DiskTotalBytes: 20 * GB,
+			DiskFreeBytes:  300 * MB,
+			QuotaBytes:     10 * GB,
+			FreeBytes:      10 * GB,
+		},
+	})
+
+	// High-spec workstation peer with GPU acceleration and abundant free RAM.
+	mgr.HandleHeartbeat(HeartbeatPayload{
+		Node: NodeStatus{
+			NodeID:           "node-strong",
+			NodeName:         "GPU-Workstation",
+			Role:             RoleWorker,
+			OS:               "windows",
+			Arch:             "amd64",
+			CPUCores:         32,
+			CPUModel:         "AMD Ryzen 9 7950X",
+			CPUPercent:       8,
+			MemTotalBytes:    128 * GB,
+			MemUsedBytes:     16 * GB,
+			MemPercent:       12.5,
+			DiskTotalBytes:   1000 * GB,
+			DiskFreeBytes:    800 * GB,
+			GPUName:          "NVIDIA GeForce RTX 4090",
+			HasGPU:           true,
+			LANLinkMbps:      2500,
+			LANBandwidthMbps: 2150.5,
+			QuotaBytes:       100 * GB,
+			FreeBytes:        100 * GB,
+		},
+	})
+
+	recs := mgr.RecommendPlugins(pm.Marketplace())
+	if len(recs) < 3 {
+		t.Fatalf("expected recommendations for all marketplace plugins, got %+v", recs)
+	}
+	var ocrRec *PluginRecommendation
+	for i := range recs {
+		if recs[i].PluginID == plugins.PluginOCRVision {
+			ocrRec = &recs[i]
+			break
+		}
+	}
+	if ocrRec == nil {
+		t.Fatalf("missing recommendation for ocr-vision")
+	}
+	if ocrRec.BestNodeID != "node-strong" || ocrRec.BestLevel != "recommended" {
+		t.Fatalf("expected node-strong recommended for ocr-vision, got %+v", ocrRec)
+	}
+
+	var strainedFit, strongFit *NodePluginFit
+	for i := range ocrRec.NodeFits {
+		switch ocrRec.NodeFits[i].NodeID {
+		case "node-strained":
+			strainedFit = &ocrRec.NodeFits[i]
+		case "node-strong":
+			strongFit = &ocrRec.NodeFits[i]
+		}
+	}
+	if strainedFit == nil || strainedFit.Level != "limited" || strainedFit.CanInstall {
+		t.Fatalf("expected strained node marked limited/can_install=false, got %+v", strainedFit)
+	}
+	if strongFit == nil || strongFit.Level != "recommended" || strongFit.LANBandwidthMbps != 2150.5 {
+		t.Fatalf("expected strong node marked recommended with LAN speed, got %+v", strongFit)
 	}
 }

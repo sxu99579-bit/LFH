@@ -100,6 +100,10 @@ type Options struct {
 type hostMetrics struct {
 	CPUPercent     float64
 	CPUCores       int
+	CPUModel       string
+	GPUName        string
+	HasGPU         bool
+	LANLinkMbps    int64
 	MemPercent     float64
 	MemUsedBytes   int64
 	MemTotalBytes  int64
@@ -126,6 +130,12 @@ type NodeStatus struct {
 	Drives             []DriveInfo `json:"drives,omitempty"`
 	CPUPercent         float64     `json:"cpu_percent"`
 	CPUCores           int         `json:"cpu_cores,omitempty"`
+	CPUModel           string      `json:"cpu_model,omitempty"`
+	GPUName            string      `json:"gpu_name,omitempty"`
+	HasGPU             bool        `json:"has_gpu,omitempty"`
+	LANLinkMbps        int64       `json:"lan_link_mbps,omitempty"`
+	LANBandwidthMbps   float64     `json:"lan_bandwidth_mbps,omitempty"`
+	BandwidthProbedAt  *time.Time  `json:"bandwidth_probed_at,omitempty"`
 	MemPercent         float64     `json:"mem_percent"`
 	MemUsedBytes       int64       `json:"mem_used_bytes"`
 	MemTotalBytes      int64       `json:"mem_total_bytes"`
@@ -211,11 +221,12 @@ func newDirectClusterClient(timeout time.Duration) *http.Client {
 }
 
 type peerRecord struct {
-	status          NodeStatus
-	files           []storage.FileRecord
-	wasOnline       bool
-	lastProbed      time.Time
-	lastUpgradeSync time.Time
+	status             NodeStatus
+	files              []storage.FileRecord
+	wasOnline          bool
+	lastProbed         time.Time
+	lastUpgradeSync    time.Time
+	lastBandwidthProbe time.Time
 }
 
 type Manager struct {
@@ -640,6 +651,10 @@ func (m *Manager) SelfStatus() NodeStatus {
 		Drives:             drives,
 		CPUPercent:         hm.CPUPercent,
 		CPUCores:           hm.CPUCores,
+		CPUModel:           hm.CPUModel,
+		GPUName:            hm.GPUName,
+		HasGPU:             hm.HasGPU,
+		LANLinkMbps:        hm.LANLinkMbps,
 		MemPercent:         hm.MemPercent,
 		MemUsedBytes:       hm.MemUsedBytes,
 		MemTotalBytes:      hm.MemTotalBytes,
@@ -781,11 +796,27 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 	prev, exists := m.peers[n.NodeID]
 	var lastProbed time.Time
 	var lastUpgradeSync time.Time
+	var lastBandwidthProbe time.Time
 	if exists {
 		lastProbed = prev.lastProbed
 		lastUpgradeSync = prev.lastUpgradeSync
+		lastBandwidthProbe = prev.lastBandwidthProbe
 		if n.Version == "" {
 			n.Version = prev.status.Version
+		}
+		if n.LANBandwidthMbps <= 0 && prev.status.LANBandwidthMbps > 0 {
+			n.LANBandwidthMbps = prev.status.LANBandwidthMbps
+			n.BandwidthProbedAt = prev.status.BandwidthProbedAt
+		}
+		if n.CPUModel == "" {
+			n.CPUModel = prev.status.CPUModel
+		}
+		if n.GPUName == "" {
+			n.GPUName = prev.status.GPUName
+			n.HasGPU = prev.status.HasGPU
+		}
+		if n.LANLinkMbps <= 0 {
+			n.LANLinkMbps = prev.status.LANLinkMbps
 		}
 		if n.NetLatencyMs <= 0 {
 			n.NetLatencyMs = prev.status.NetLatencyMs
@@ -853,11 +884,12 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		}
 	}
 	m.peers[n.NodeID] = &peerRecord{
-		status:          n,
-		files:           files,
-		wasOnline:       true,
-		lastProbed:      lastProbed,
-		lastUpgradeSync: lastUpgradeSync,
+		status:             n,
+		files:              files,
+		wasOnline:          true,
+		lastProbed:         lastProbed,
+		lastUpgradeSync:    lastUpgradeSync,
+		lastBandwidthProbe: lastBandwidthProbe,
 	}
 	m.mu.Unlock()
 	if needProbe {
@@ -895,6 +927,8 @@ func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
 
 	var syncCb func(peer NodeStatus)
 	var peerSnap NodeStatus
+	var bwPeer NodeStatus
+	needBWProbe := false
 	m.mu.Lock()
 	if p, ok := m.peers[nodeID]; ok {
 		p.status.NetLatencyMs = rttMs
@@ -903,6 +937,11 @@ func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
 		}
 		if p.status.Version == "" && info.Version != "" {
 			p.status.Version = info.Version
+		}
+		if m.cfg.Role == RoleEntry && p.status.LANBandwidthMbps <= 0 && time.Since(p.lastBandwidthProbe) > 5*time.Minute && p.status.HTTPURL != "" {
+			p.lastBandwidthProbe = time.Now()
+			needBWProbe = true
+			bwPeer = p.status
 		}
 		autoSyncEnabled := m.cfg.AutoSyncWorkers == nil || *m.cfg.AutoSyncWorkers
 		if m.cfg.Role == RoleEntry &&
@@ -922,9 +961,119 @@ func (m *Manager) refreshPeerTelemetry(nodeID, httpURL string) {
 		}
 	}
 	m.mu.Unlock()
+	if needBWProbe {
+		go func(target NodeStatus) {
+			_, _, _ = m.ProbePeerBandwidth(target, 2<<20)
+		}(bwPeer)
+	}
 	if syncCb != nil {
 		go syncCb(peerSnap)
 	}
+}
+
+// BandwidthProbeResult reports LAN link speed and active measured HTTP throughput to a cluster node.
+type BandwidthProbeResult struct {
+	NodeID        string  `json:"node_id"`
+	NodeName      string  `json:"node_name"`
+	BandwidthMbps float64 `json:"bandwidth_mbps"`
+	LinkMbps      int64   `json:"link_mbps,omitempty"`
+	Bytes         int64   `json:"bytes"`
+	DurationMs    int64   `json:"duration_ms"`
+	OK            bool    `json:"ok"`
+	Error         string  `json:"error,omitempty"`
+}
+
+// ProbePeerBandwidth streams sizeBytes from a peer's /internal/cluster/speedtest endpoint to measure real LAN throughput in Mbps.
+func (m *Manager) ProbePeerBandwidth(peer NodeStatus, sizeBytes int64) (float64, int64, error) {
+	peerURL := strings.TrimRight(strings.TrimSpace(peer.HTTPURL), "/")
+	if peerURL == "" {
+		return 0, 0, errors.New("节点缺少有效 HTTP 地址")
+	}
+	if sizeBytes < 256*1024 {
+		sizeBytes = 256 * 1024
+	}
+	if sizeBytes > 16<<20 {
+		sizeBytes = 16 << 20
+	}
+	target := fmt.Sprintf("%s/internal/cluster/speedtest?bytes=%d", peerURL, sizeBytes)
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	t0 := time.Now()
+	resp, err := newDirectClusterClient(15 * time.Second).Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, 0, fmt.Errorf("测速端点返回 HTTP %d", resp.StatusCode)
+	}
+	n, copyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 32<<20))
+	if copyErr != nil {
+		return 0, 0, copyErr
+	}
+	elapsed := time.Since(t0)
+	if elapsed < 100*time.Microsecond {
+		elapsed = 100 * time.Microsecond
+	}
+	if n <= 0 {
+		return 0, 0, errors.New("测速响应体为空")
+	}
+	mbps := math.Round((float64(n)*8.0/(elapsed.Seconds()*1_000_000.0))*10) / 10
+	if math.IsNaN(mbps) || math.IsInf(mbps, 0) {
+		mbps = 0
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if p, ok := m.peers[peer.NodeID]; ok {
+		p.status.LANBandwidthMbps = mbps
+		p.status.BandwidthProbedAt = &now
+		p.lastBandwidthProbe = now
+	}
+	m.mu.Unlock()
+	return mbps, elapsed.Milliseconds(), nil
+}
+
+// ProbeClusterBandwidths measures real LAN throughput to every online peer node in the cluster.
+func (m *Manager) ProbeClusterBandwidths(sizeBytes int64) []BandwidthProbeResult {
+	if sizeBytes <= 0 {
+		sizeBytes = 4 << 20
+	}
+	pool := m.PoolSummaryForRole(true)
+	results := make([]BandwidthProbeResult, 0, len(pool.Nodes))
+	for _, n := range pool.Nodes {
+		if !n.Online {
+			continue
+		}
+		if n.IsSelf {
+			results = append(results, BandwidthProbeResult{
+				NodeID:        n.NodeID,
+				NodeName:      n.NodeName,
+				BandwidthMbps: n.LANBandwidthMbps,
+				LinkMbps:      n.LANLinkMbps,
+				OK:            true,
+			})
+			continue
+		}
+		mbps, durMs, err := m.ProbePeerBandwidth(n, sizeBytes)
+		res := BandwidthProbeResult{
+			NodeID:        n.NodeID,
+			NodeName:      n.NodeName,
+			BandwidthMbps: mbps,
+			LinkMbps:      n.LANLinkMbps,
+			Bytes:         sizeBytes,
+			DurationMs:    durMs,
+			OK:            err == nil,
+		}
+		if err != nil {
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+	return results
 }
 
 func (m *Manager) SetOnPeerChange(fn func(nodeName string, online bool)) {

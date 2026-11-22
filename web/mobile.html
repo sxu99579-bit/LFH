@@ -317,7 +317,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.22.1</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.22.2</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -384,7 +384,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.22.1</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.22.2</span></div>
           <div class="brand-sub">多维筛选与存储池总览</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
@@ -603,6 +603,7 @@
               </div>
             </div>
             <div class="row-actions">
+              <button id="btn-probe-lan-bandwidth" class="btn btn-ghost btn-xs admin-only-control hidden" type="button">测网速</button>
               <button id="btn-health-sync-versions" class="btn btn-ghost btn-xs admin-only-control hidden" type="button">同步版本</button>
               <button id="btn-health-open-cluster-settings" class="btn btn-ghost btn-xs admin-only-control hidden" type="button">组网</button>
               <button id="btn-health-refresh" class="btn btn-primary btn-xs" type="button">刷新</button>
@@ -1157,29 +1158,34 @@
         </div>
 
         <div class="settings-panel hidden" id="panel-plugins">
-          <div class="admin-card">
-            <div class="plugin-node-toolbar">
+          <div class="admin-section">
+            <div class="admin-section-head">
               <div>
-                <h4>分布式算力插件市场</h4>
-                <p class="setting-hint">在任意节点安装并启用插件，全集群共享算力并自动本地化调度。</p>
+                <div class="admin-section-title" style="margin-bottom:2px;">节点硬件性能评估与推荐</div>
+                <p class="setting-hint" style="margin:0;">分析节点 CPU、内存余量与 GPU，智能推荐最佳插件节点。</p>
               </div>
               <div class="row-actions">
-                <select id="plugin-install-node" class="field-select" title="选择目标节点"></select>
-                <button class="btn-ghost" type="button" id="btn-refresh-plugins">刷新</button>
+                <select id="plugin-install-node" class="node-select" title="选择目标节点"></select>
+                <button class="btn btn-ghost btn-xs" type="button" id="btn-refresh-plugins">刷新</button>
               </div>
             </div>
+            <div id="plugins-hardware-overview" class="plugin-hw-grid"></div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-title">分布式算力插件市场</div>
             <div id="plugins-marketplace-list" class="plugin-market-grid"></div>
           </div>
 
-          <div class="admin-card">
-            <h4>全集群算力能力矩阵</h4>
+          <div class="admin-section">
+            <div class="admin-section-title">全集群算力能力矩阵</div>
             <div id="plugins-capabilities-list" class="plugin-cap-matrix"></div>
           </div>
 
-          <div class="admin-card">
-            <h4>算力任务记录</h4>
+          <div class="admin-section">
+            <div class="admin-section-title">算力任务记录</div>
             <div class="admin-table-wrap">
-              <table class="admin-table">
+              <table class="admin-table plugin-jobs-table">
                 <thead>
                   <tr>
                     <th>文件</th>
@@ -1208,7 +1214,7 @@
             </div>
             <div class="update-status-card">
               <div class="update-meta-grid">
-                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.22.1</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.22.2</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>

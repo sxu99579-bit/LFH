@@ -208,9 +208,14 @@ func readProcMemInfo() (totalBytes, usedBytes int64, ok bool) {
 }
 
 func collectHostMetrics(storageDir string) hostMetrics {
+	hw := getCachedHostHardware()
 	hm := hostMetrics{
-		CPUCores:   runtime.NumCPU(),
-		CPUPercent: sampleUnixCPUPercent(),
+		CPUCores:    runtime.NumCPU(),
+		CPUPercent:  sampleUnixCPUPercent(),
+		CPUModel:    hw.CPUModel,
+		GPUName:     hw.GPUName,
+		HasGPU:      hw.HasGPU,
+		LANLinkMbps: hw.LANLinkMbps,
 	}
 	if total, used, ok := readProcMemInfo(); ok && total > 0 {
 		hm.MemTotalBytes = total

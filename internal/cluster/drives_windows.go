@@ -207,9 +207,14 @@ func queryWinDiskSpace(dir string) (total, free int64) {
 }
 
 func collectHostMetrics(storageDir string) hostMetrics {
+	hw := getCachedHostHardware()
 	hm := hostMetrics{
-		CPUCores:   runtime.NumCPU(),
-		CPUPercent: sampleWinCPUPercent(),
+		CPUCores:    runtime.NumCPU(),
+		CPUPercent:  sampleWinCPUPercent(),
+		CPUModel:    hw.CPUModel,
+		GPUName:     hw.GPUName,
+		HasGPU:      hw.HasGPU,
+		LANLinkMbps: hw.LANLinkMbps,
 	}
 
 	var ms winMemoryStatusEx

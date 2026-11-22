@@ -21,11 +21,12 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.22.1",
+  appVersion: "V0.11.22.2",
   localImportMode: "import",
   mounts: [],
   clusterCapabilities: [],
   marketplacePlugins: [],
+  pluginRecommendations: [],
   pluginJobs: [],
   activePluginRunFileId: "",
   availableReleases: [],
@@ -675,7 +676,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.22.1";
+  const ver = state.appVersion || "V0.11.22.2";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -3735,7 +3736,7 @@ function compareVersionsClient(a, b) {
 
 async function syncClusterNodeVersions(nodeID, nodeName) {
   const isSingle = Boolean(nodeID && nodeID !== "all");
-  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.22.1";
+  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.22.2";
   const label = isSingle ? `分节点「${nodeName || nodeID}」` : "所有在线分节点";
   try {
     const data = await api("/api/admin/cluster/upgrade-nodes", {
@@ -3778,6 +3779,9 @@ function switchWorkspacePage(page) {
   if ($("page-health")) $("page-health").classList.toggle("hidden", valid !== "health");
 
   const isAdmin = Boolean(state.user && state.user.role === "admin");
+  if ($("btn-probe-lan-bandwidth")) {
+    $("btn-probe-lan-bandwidth").classList.toggle("hidden", !isAdmin);
+  }
   if ($("btn-health-open-cluster-settings")) {
     $("btn-health-open-cluster-settings").classList.toggle("hidden", !isAdmin);
   }
@@ -4168,7 +4172,7 @@ function renderNodeHealthPage() {
       const wErr = Number(n.io_write_errors || 0);
       const totErr = Number(n.io_total_errors || rErr + wErr);
       const syncTime = n.last_sync_at || n.last_seen;
-      const entryVer = pool?.entry_version || state.appVersion || "V0.11.22.1";
+      const entryVer = pool?.entry_version || state.appVersion || "V0.11.22.2";
       const nodeVer = n.version || (n.is_self ? entryVer : "V0.11.21.4");
       const isBehind = !n.is_self && compareVersionsClient(nodeVer, entryVer) < 0;
       const isAdmin = Boolean(state.user && state.user.role === "admin");
@@ -4191,6 +4195,30 @@ function renderNodeHealthPage() {
         ? `<div class="plugin-card-tags" style="margin-top:6px;">${enabledPlugins.map((p) => `<span class="plugin-cap-pill" title="${escapeHtml((p.capabilities || []).join(", "))}">${escapeHtml(p.name || p.plugin_id)}${Number(p.busy_jobs || 0) > 0 ? ` (${Number(p.busy_jobs)}/${Number(p.max_concurrency || 1)})` : ""}</span>`).join("")}</div>`
         : "";
 
+      const hwLineParts = [];
+      if (n.cpu_model) hwLineParts.push(n.cpu_model);
+      else if (n.cpu_cores) hwLineParts.push(`${n.cpu_cores} 核处理器`);
+      if (n.gpu_name) hwLineParts.push(`GPU：${n.gpu_name}`);
+      const hwSubtitleHtml = hwLineParts.length > 0
+        ? `<div class="health-node-url">${escapeHtml(hwLineParts.join(" · "))}</div>`
+        : "";
+      const bwMbps = Number(n.lan_bandwidth_mbps || 0);
+      const linkMbps = Number(n.lan_link_mbps || 0);
+      const bwMainText = !n.online
+        ? "离线"
+        : bwMbps > 0
+        ? `${bwMbps.toFixed(1)} Mbps`
+        : linkMbps > 0
+        ? `${linkMbps} Mbps (链路)`
+        : n.is_self
+        ? "本机直连"
+        : "待测速";
+      const bwSubParts = [];
+      if (bwMbps > 0) bwSubParts.push(`约 ${(bwMbps / 8).toFixed(1)} MB/s`);
+      if (linkMbps > 0) bwSubParts.push(`物理网卡 ${linkMbps} Mbps`);
+      if (n.bandwidth_probed_at) bwSubParts.push(`测速 ${formatRelativeTime(n.bandwidth_probed_at)}`);
+      const bwSubText = bwSubParts.length > 0 ? bwSubParts.join(" · ") : (n.is_self ? "对端从节点测速后显示实测带宽" : "点击顶部「探测内网带宽」实测吞吐");
+
       return `
         <div class="health-node-card ${n.online ? "" : "offline"}">
           <div class="health-node-top">
@@ -4204,6 +4232,7 @@ function renderNodeHealthPage() {
                 <span class="clip-status-badge ${n.clipboard_enabled ? "on" : "off"}">超级剪贴板：${n.clipboard_enabled ? "已开启" : "已关闭"}</span>
               </div>
               <div class="health-node-url">${escapeHtml(n.http_url || "本机直连")} · ${escapeHtml(n.os || "-")}/${escapeHtml(n.arch || "-")} · 文件数 ${Number(n.file_count || 0)} 个</div>
+              ${hwSubtitleHtml}
               ${pluginPillsHtml}
             </div>
             <div class="row-actions" style="align-items:center;">
@@ -4274,6 +4303,12 @@ function renderNodeHealthPage() {
           </div>
 
           <div class="health-meta-grid">
+            <div class="health-meta-item health-speed-highlight">
+              <div class="health-meta-k">${ICON_NET_SVG}<span>内网带宽 / 网卡速率</span></div>
+              <div class="health-meta-v">${escapeHtml(bwMainText)}</div>
+              <div class="health-meta-sub">${escapeHtml(bwSubText)}</div>
+            </div>
+
             <div class="health-meta-item">
               <div class="health-meta-k">${ICON_NET_SVG}<span>网络延迟</span></div>
               <div class="health-meta-v">${n.online ? `${(netLat > 0 ? netLat : 0.3).toFixed(1)} ms` : "离线"}</div>
@@ -5060,6 +5095,7 @@ async function loadAdminPlugins() {
   try {
     const data = await api("/api/admin/plugins/marketplace");
     if (Array.isArray(data.marketplace)) state.marketplacePlugins = data.marketplace;
+    if (Array.isArray(data.recommendations)) state.pluginRecommendations = data.recommendations;
     if (Array.isArray(data.capabilities)) state.clusterCapabilities = data.capabilities;
     if (Array.isArray(data.nodes) && state.pool) {
       state.pool.nodes = data.nodes;
@@ -5107,6 +5143,65 @@ function syncPluginMutationState(data) {
     }
   }
   renderAdminPlugins();
+  loadAdminPlugins();
+}
+
+function renderPluginsHardwareOverview(nodes) {
+  const hwEl = $("plugins-hardware-overview");
+  if (!hwEl) return;
+  const onlineNodes = (nodes || []).filter((n) => n.online);
+  if (onlineNodes.length === 0) {
+    hwEl.innerHTML = `<div class="muted">暂无在线节点硬件数据</div>`;
+    return;
+  }
+  hwEl.innerHTML = onlineNodes.map((n) => {
+    const memTotal = Number(n.mem_total_bytes || 0);
+    const memUsed = Number(n.mem_used_bytes || 0);
+    const memFree = Math.max(0, memTotal - memUsed);
+    const memPct = Number(n.mem_percent || 0);
+    const cpuPct = Number(n.cpu_percent || 0);
+    const bwMbps = Number(n.lan_bandwidth_mbps || 0);
+    const linkMbps = Number(n.lan_link_mbps || 0);
+    const bwStr = bwMbps > 0
+      ? `实测 ${bwMbps.toFixed(0)} Mbps`
+      : linkMbps > 0
+      ? `网卡 ${linkMbps} Mbps`
+      : (n.is_self ? "本机" : "待测速");
+    let gradeLabel = "性能充裕";
+    let gradeCls = "status-ok";
+    if (memPct >= 92 || (memTotal > 0 && memFree < 768 * 1024 * 1024)) {
+      gradeLabel = "内存吃紧";
+      gradeCls = "status-off";
+    } else if (memPct >= 85 || cpuPct >= 80) {
+      gradeLabel = "负载偏高";
+      gradeCls = "status-warn";
+    }
+    const cpuDesc = n.cpu_model ? `${n.cpu_cores || "-"}核 (${n.cpu_model})` : `${n.cpu_cores || "-"}核处理器`;
+    const gpuDesc = n.gpu_name ? n.gpu_name : (n.has_gpu ? "独立 GPU" : "集成/无加速 GPU");
+    return `
+      <div class="plugin-hw-card">
+        <div class="plugin-hw-head">
+          <div class="plugin-hw-name">${escapeHtml(n.node_name)}${n.is_self ? " (主本机)" : ""}</div>
+          <span class="status-pill ${gradeCls}">${gradeLabel}</span>
+        </div>
+        <div class="plugin-hw-specs">
+          <div>CPU：${escapeHtml(cpuDesc)} · 占用 ${cpuPct.toFixed(0)}%</div>
+          <div>内存：可用 ${memTotal > 0 ? formatSize(memFree) : "-"} / 共 ${memTotal > 0 ? formatSize(memTotal) : "-"}（已用 ${memPct.toFixed(0)}%）</div>
+          <div>GPU：${escapeHtml(gpuDesc)}</div>
+        </div>
+        <div class="plugin-hw-bars">
+          <span>内网：${escapeHtml(bwStr)}</span>
+          <span>磁盘剩：${n.disk_free_bytes ? formatSize(n.disk_free_bytes) : "-"}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function formatFitLevelLabel(level) {
+  if (level === "recommended") return { text: "性能充裕 · 推荐安装", cls: "rec-good", pill: "status-ok" };
+  if (level === "compatible") return { text: "性能足够 · 可安装", cls: "rec-ok", pill: "status-ok" };
+  return { text: "性能吃紧 · 不建议", cls: "rec-warn", pill: "status-warn" };
 }
 
 function renderAdminPlugins() {
@@ -5115,6 +5210,8 @@ function renderAdminPlugins() {
   const capEl = $("plugins-capabilities-list");
   const nodes = Array.isArray(state.pool?.nodes) ? state.pool.nodes : [];
   const targetNodeId = getSelectedPluginTargetNodeId(nodes);
+
+  renderPluginsHardwareOverview(nodes);
 
   if (sel) {
     sel.innerHTML = nodes.length === 0
@@ -5138,6 +5235,11 @@ function renderAdminPlugins() {
         const pid = escapeHtml(item.id);
         const nid = escapeHtml(targetNodeId);
         const inst = (targetNode?.plugins || []).find((p) => p.plugin_id === item.id);
+        const rec = (state.pluginRecommendations || []).find((r) => r.plugin_id === item.id);
+        const selectedFit = (rec?.node_fits || []).find((f) => f.node_id === targetNodeId);
+        const bestMeta = formatFitLevelLabel(rec?.best_level || "compatible");
+        const bestInstalled = Boolean(rec?.best_node_id && (rec.node_fits || []).some((f) => f.node_id === rec.best_node_id && f.installed));
+
         const installedNodes = nodes
           .map((n) => {
             const p = (n.plugins || []).find((x) => x.plugin_id === item.id);
@@ -5152,11 +5254,34 @@ function renderAdminPlugins() {
           ? item.supported_exts.join(" ")
           : "*";
 
+        let recHtml = "";
+        if (rec && rec.best_node_name) {
+          const selNotice = selectedFit && rec.best_node_id && targetNodeId && rec.best_node_id !== targetNodeId
+            ? `<div style="margin-top:3px;color:var(--muted);">当前所选节点评估：${Number(selectedFit.score || 0)} 分 · ${selectedFit.level === "limited" ? "硬件余量紧张" : selectedFit.level === "recommended" ? "性能充裕" : "可稳定运行"}</div>`
+            : "";
+          const oneClickBestBtn = !bestInstalled && rec.best_node_id && rec.best_node_id !== targetNodeId
+            ? `<button type="button" class="btn btn-primary btn-xs" style="margin-top:6px;" data-plugin-act="install" data-node="${escapeHtml(rec.best_node_id)}" data-plugin="${pid}">一键安装到推荐节点 (${escapeHtml(rec.best_node_name)})</button>`
+            : "";
+          recHtml = `
+            <div class="plugin-rec-box ${bestMeta.cls}">
+              <div class="plugin-rec-head">
+                <strong>智能推荐：${escapeHtml(rec.best_node_name)}（${Number(rec.best_score || 0)} 分）</strong>
+                <span class="status-pill ${bestMeta.pill}">${bestMeta.text}</span>
+              </div>
+              <div class="muted">${escapeHtml(rec.best_reason || "")}</div>
+              ${selNotice}
+              ${oneClickBestBtn}
+            </div>
+          `;
+        }
+
         let actionBtns = "";
         if (!targetNodeId || !targetOnline) {
           actionBtns = `<button type="button" class="btn btn-ghost btn-xs" disabled>目标节点离线</button>`;
         } else if (!inst) {
-          actionBtns = `<button type="button" class="btn btn-primary btn-xs" data-plugin-act="install" data-node="${nid}" data-plugin="${pid}">安装到 ${escapeHtml(targetNode.node_name)}</button>`;
+          const isBestTarget = Boolean(rec?.best_node_id && rec.best_node_id === targetNodeId);
+          const btnClass = selectedFit && selectedFit.level === "limited" ? "btn btn-ghost btn-xs" : "btn btn-primary btn-xs";
+          actionBtns = `<button type="button" class="${btnClass}" data-plugin-act="install" data-node="${nid}" data-plugin="${pid}">${isBestTarget ? "安装到推荐节点" : "安装到"} ${escapeHtml(targetNode.node_name)}</button>`;
         } else {
           const nextEnabled = !inst.enabled;
           actionBtns = `
@@ -5180,6 +5305,7 @@ function renderAdminPlugins() {
               ${capBadges}
               <span class="cat-tag" title="支持扩展名">支持：${escapeHtml(extText)}</span>
             </div>
+            ${recHtml}
             <div class="muted" style="font-size:11px;">
               依赖：${escapeHtml(item.requirements || "内置零依赖")} · 集群分布：${escapeHtml(installedNodes.length > 0 ? installedNodes.join("，") : "尚未安装")}
             </div>
@@ -5413,7 +5539,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.22.1";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.22.2";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -5809,7 +5935,7 @@ function renderAdminCluster() {
     $("toggle-auto-sync-workers").checked = state.pool.auto_sync_workers !== false;
   }
 
-  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.22.1";
+  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.22.2";
   const tbody = $("cluster-nodes-tbody");
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
@@ -6709,6 +6835,33 @@ function bindEvents() {
       await loadCluster();
       renderNodeHealthPage();
       showToast("已刷新节点健康遥测状态", "success");
+    };
+  }
+  if ($("btn-probe-lan-bandwidth")) {
+    $("btn-probe-lan-bandwidth").onclick = async () => {
+      const btn = $("btn-probe-lan-bandwidth");
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "测速中...";
+      try {
+        const data = await api("/api/admin/cluster/probe-bandwidth", { method: "POST" });
+        if (data.pool) {
+          state.pool = data.pool;
+          renderNodeHealthPage();
+        }
+        const okPeers = (data.results || []).filter((r) => r.ok && r.bandwidth_mbps > 0);
+        if (okPeers.length > 0) {
+          const msg = okPeers.map((r) => `${r.node_name}: ${Number(r.bandwidth_mbps).toFixed(1)} Mbps`).join("，");
+          showToast(`内网测速完成（${msg}）`, "success");
+        } else {
+          showToast("内网带宽探测完成（跨节点测速将在存在在线对端时生效）", "info");
+        }
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+      }
     };
   }
   if ($("btn-health-open-cluster-settings")) {

@@ -402,6 +402,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
 	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
 	mux.HandleFunc("GET /internal/cluster/binary", s.requireClusterAuth(s.handleClusterGetBinary))
+	mux.HandleFunc("GET /internal/cluster/speedtest", s.requireClusterAuth(s.handleClusterSpeedtest))
 	mux.HandleFunc("POST /internal/cluster/upgrade-binary", s.requireClusterAuth(s.handleClusterUpgradeBinary))
 	mux.HandleFunc("POST /internal/cluster/upgrade", s.requireClusterAuth(s.handleClusterUpgrade))
 
@@ -428,6 +429,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/cluster/leave", s.requireAdmin(s.handleAdminClusterLeave))
 	mux.HandleFunc("POST /api/admin/cluster/upgrade-nodes", s.requireAdmin(s.handleAdminClusterUpgradeNodes))
 	mux.HandleFunc("POST /api/admin/cluster/reconcile-versions", s.requireAdmin(s.handleAdminClusterReconcileVersions))
+	mux.HandleFunc("POST /api/admin/cluster/probe-bandwidth", s.requireAdmin(s.handleAdminClusterProbeBandwidth))
 	mux.HandleFunc("DELETE /api/admin/cluster/nodes/{nodeID}", s.requireAdmin(s.handleAdminClusterRemoveNode))
 	mux.HandleFunc("POST /api/admin/cluster/quota", s.requireAdmin(s.handleAdminClusterQuota))
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
@@ -5359,16 +5361,62 @@ func (s *Server) handleListPluginJobs(w http.ResponseWriter, r *http.Request, u 
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }
 
+func (s *Server) handleClusterSpeedtest(w http.ResponseWriter, r *http.Request) {
+	sizeBytes := int64(4 << 20)
+	if raw := strings.TrimSpace(r.URL.Query().Get("bytes")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			sizeBytes = parsed
+		}
+	}
+	if sizeBytes < 256*1024 {
+		sizeBytes = 256 * 1024
+	}
+	if sizeBytes > 16<<20 {
+		sizeBytes = 16 << 20
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(sizeBytes, 10))
+	w.WriteHeader(http.StatusOK)
+	buf := bytes.Repeat([]byte{0x5A}, 64*1024)
+	rem := sizeBytes
+	for rem > 0 {
+		n := len(buf)
+		if int64(n) > rem {
+			n = int(rem)
+		}
+		if _, err := w.Write(buf[:n]); err != nil {
+			return
+		}
+		rem -= int64(n)
+	}
+}
+
+func (s *Server) handleAdminClusterProbeBandwidth(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	results := s.cluster.ProbeClusterBandwidths(4 << 20)
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		NodeName: s.cluster.NodeName(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"results": results,
+		"pool":    s.cluster.PoolSummaryForRole(true),
+	})
+}
+
 func (s *Server) handleAdminPluginMarketplace(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	pm, err := s.pluginMgr()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	marketplace := pm.Marketplace()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"marketplace":  pm.Marketplace(),
-		"capabilities": s.cluster.ClusterCapabilities(),
-		"nodes":        s.cluster.PoolSummaryForRole(true).Nodes,
+		"marketplace":     marketplace,
+		"recommendations": s.cluster.RecommendPlugins(marketplace),
+		"capabilities":    s.cluster.ClusterCapabilities(),
+		"nodes":           s.cluster.PoolSummaryForRole(true).Nodes,
 	})
 }
 
