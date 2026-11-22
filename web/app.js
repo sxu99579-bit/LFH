@@ -21,7 +21,7 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.12.0",
+  appVersion: "V0.11.22.0",
   localImportMode: "import",
   mounts: [],
   clusterCapabilities: [],
@@ -674,7 +674,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.12.0";
+  const ver = state.appVersion || "V0.11.22.0";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -3706,7 +3706,7 @@ function compareVersionsClient(a, b) {
 
 async function syncClusterNodeVersions(nodeID, nodeName) {
   const isSingle = Boolean(nodeID && nodeID !== "all");
-  const entryVer = state.pool?.entry_version || state.appVersion || "V0.12.0";
+  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.22.0";
   const label = isSingle ? `分节点「${nodeName || nodeID}」` : "所有在线分节点";
   try {
     const data = await api("/api/admin/cluster/upgrade-nodes", {
@@ -4139,7 +4139,7 @@ function renderNodeHealthPage() {
       const wErr = Number(n.io_write_errors || 0);
       const totErr = Number(n.io_total_errors || rErr + wErr);
       const syncTime = n.last_sync_at || n.last_seen;
-      const entryVer = pool?.entry_version || state.appVersion || "V0.12.0";
+      const entryVer = pool?.entry_version || state.appVersion || "V0.11.22.0";
       const nodeVer = n.version || (n.is_self ? entryVer : "V0.11.21.4");
       const isBehind = !n.is_self && compareVersionsClient(nodeVer, entryVer) < 0;
       const isAdmin = Boolean(state.user && state.user.role === "admin");
@@ -5382,7 +5382,7 @@ function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.12.0";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.22.0";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -5658,7 +5658,7 @@ function renderAdminCluster() {
     $("toggle-auto-sync-workers").checked = state.pool.auto_sync_workers !== false;
   }
 
-  const entryVer = state.pool.entry_version || state.appVersion || "V0.12.0";
+  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.22.0";
   const tbody = $("cluster-nodes-tbody");
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
