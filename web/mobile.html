@@ -317,7 +317,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.11</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.12</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -384,7 +384,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.11</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.12</span></div>
           <div class="brand-sub">多维筛选与存储池总览</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
@@ -511,6 +511,7 @@
               </button>
               <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">上传文件夹</button>
               <button id="btn-create-txt" class="btn btn-ghost btn-sm" type="button">新建 TXT</button>
+              <button id="btn-import-local" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">本机零拷贝导入</button>
             </div>
             <div id="upload-progress-wrap" class="progress-wrap hidden" style="width:100%;">
               <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
@@ -724,6 +725,51 @@
         <div class="editor-footer">
           <button id="create-txt-save-btn" class="btn btn-primary btn-block" type="button">创建并上传 .txt</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 本机零拷贝导入 / 目录挂载弹窗 -->
+  <div id="local-import-modal" class="modal hidden">
+    <div class="modal-backdrop" id="local-import-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title">本机零拷贝导入与目录挂载</div>
+        <div class="modal-header-actions">
+          <span class="ver-badge">仅管理员</span>
+          <button id="local-import-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="create-txt-field">
+          <span class="create-txt-label">目标执行节点</span>
+          <select id="local-import-node" class="search-input"></select>
+        </div>
+        <div class="create-txt-field">
+          <span class="create-txt-label">接入方式</span>
+          <div class="local-import-mode-grid">
+            <button type="button" class="local-import-mode-btn active" data-local-import-mode="import">
+              <div class="local-import-mode-title">零拷贝导入（文件 / 文件夹）</div>
+              <div class="local-import-mode-desc">同盘硬链接（防误删），跨盘外链引用</div>
+            </button>
+            <button type="button" class="local-import-mode-btn" data-local-import-mode="mount">
+              <div class="local-import-mode-title">挂载本机目录（虚拟共享库）</div>
+              <div class="local-import-mode-desc">不复制文件、不占配额，定时自动同步</div>
+            </button>
+          </div>
+        </div>
+        <div class="create-txt-field">
+          <label class="create-txt-label" for="local-import-path">主机绝对路径</label>
+          <input id="local-import-path" class="search-input" type="text" placeholder="例如：E:\Movies 或 /mnt/media" autocomplete="off" />
+        </div>
+        <div class="create-txt-field">
+          <label class="create-txt-label" for="local-import-folder" id="local-import-folder-label">目标虚拟目录（选填）</label>
+          <input id="local-import-folder" class="search-input" type="text" placeholder="留空自动使用目录名或根目录" autocomplete="off" />
+        </div>
+        <div class="local-import-hint-box" id="local-import-hint">
+          同分区创建硬链接（原文件移动/删除仍可读），跨分区创建外链引用并自动巡检源路径状态。
+        </div>
+        <button id="local-import-submit-btn" class="btn btn-primary btn-block" type="button">立即零拷贝导入</button>
       </div>
     </div>
   </div>
@@ -1033,6 +1079,18 @@
           </div>
 
           <div class="admin-section">
+            <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">本机目录零拷贝挂载</div>
+              <div class="row-actions">
+                <button id="btn-add-mount" class="btn btn-primary btn-xs" type="button">新增挂载</button>
+                <button id="btn-refresh-mounts" class="btn btn-ghost btn-xs" type="button">刷新</button>
+              </div>
+            </div>
+            <div class="switch-desc" style="margin-bottom:8px;">将节点已有文件夹挂载为只读共享库（不复制文件、不占配额）。</div>
+            <div id="cluster-mounts-list" class="mount-list"></div>
+          </div>
+
+          <div class="admin-section">
             <div class="admin-section-title">局域网节点探测与组网</div>
             <div id="discover-status-hint" class="switch-desc" style="margin-bottom:8px;">扫描或手动探测同局域网 LFH 节点</div>
             <div class="discover-toolbar">
@@ -1078,7 +1136,7 @@
             </div>
             <div class="update-status-card">
               <div class="update-meta-grid">
-                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.11</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.12</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>

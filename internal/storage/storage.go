@@ -30,6 +30,13 @@ const (
 	MethodOnlineEdit      = "online_edit"
 	MethodVersionUpload   = "version_upload"
 	MethodVersionRestore  = "version_restore"
+	MethodLocalImport     = "local_import"
+	MethodMountSync       = "mount_sync"
+
+	StorageModeCopy     = "copy"
+	StorageModeHardlink = "hardlink"
+	StorageModeRef      = "ref"
+	StorageModeMount    = "mount"
 )
 
 func DefaultUpdateMethod(method string, ver int) string {
@@ -75,8 +82,12 @@ type FileRecord struct {
 	DeviceIP     string        `json:"device_ip,omitempty"`
 	DeviceDetail string        `json:"device_detail,omitempty"`
 	AllowedUsers []string      `json:"allowed_users,omitempty"`
-	StorageDir   string        `json:"storage_dir,omitempty"`
-	Version      int           `json:"version"`
+	StorageDir    string        `json:"storage_dir,omitempty"`
+	StorageMode   string        `json:"storage_mode,omitempty"` // copy, hardlink, ref, mount
+	SourcePath    string        `json:"source_path,omitempty"`
+	SourceMissing bool          `json:"source_missing,omitempty"`
+	MountID       string        `json:"mount_id,omitempty"`
+	Version       int           `json:"version"`
 	VersionCount int           `json:"version_count"`
 	VersionNote  string        `json:"version_note,omitempty"`
 	UpdateMethod string        `json:"update_method,omitempty"`
@@ -114,7 +125,9 @@ type Store struct {
 	defaultUploadDir string
 	uploadDir        string
 	indexPath        string
+	mountsPath       string
 	records          map[string]FileRecord
+	mounts           map[string]MountEntry
 
 	readErrors         atomic.Int64
 	writeErrors        atomic.Int64
@@ -175,7 +188,9 @@ func NewStore(dataDir string) (*Store, error) {
 		defaultUploadDir: uploadDir,
 		uploadDir:        uploadDir,
 		indexPath:        filepath.Join(dataDir, "files.json"),
+		mountsPath:       filepath.Join(dataDir, "mounts.json"),
 		records:          make(map[string]FileRecord),
+		mounts:           make(map[string]MountEntry),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -191,6 +206,9 @@ func (s *Store) recordDirLocked(rec FileRecord) string {
 }
 
 func (s *Store) recordDiskPathLocked(rec FileRecord) string {
+	if (rec.StorageMode == StorageModeRef || rec.StorageMode == StorageModeMount) && strings.TrimSpace(rec.SourcePath) != "" {
+		return filepath.Clean(rec.SourcePath)
+	}
 	return filepath.Join(s.recordDirLocked(rec), rec.StoredName)
 }
 
@@ -292,46 +310,55 @@ func (s *Store) RecordDir(rec FileRecord) string {
 }
 
 func (s *Store) load() error {
+	s.loadMountsLocked()
 	raw, err := os.ReadFile(s.indexPath)
 	if err == nil {
 		var list []FileRecord
 		if err := json.Unmarshal(raw, &list); err == nil {
 			for _, rec := range list {
-				if _, statErr := os.Stat(s.recordDiskPathLocked(rec)); statErr == nil {
-					if rec.MonthKey == "" {
-						rec.MonthKey = rec.UploadedAt.Format("2006-01")
-					}
-					if rec.DateKey == "" {
-						rec.DateKey = rec.UploadedAt.Format("2006-01-02")
-					}
-					rec.Category = ClassifyExt(rec.Ext)
-					rec.AllowedUsers = NormalizeAllowedUsers(rec.AllowedUsers)
-					if rec.Version <= 0 {
-						rec.Version = 1
-					}
-					rec.UpdateMethod = DefaultUpdateMethod(rec.UpdateMethod, rec.Version)
-					if len(rec.Versions) > 0 {
-						validVers := make([]FileVersion, 0, len(rec.Versions))
-						for _, v := range rec.Versions {
-							if v.StoredName == "" {
-								continue
-							}
-							if _, vErr := os.Stat(s.versionDiskPathLocked(rec, v)); vErr == nil {
-								if v.Version <= 0 {
-									v.Version = 1
-								}
-								v.UpdateMethod = DefaultUpdateMethod(v.UpdateMethod, v.Version)
-								validVers = append(validVers, v)
-							}
-						}
-						sort.Slice(validVers, func(i, j int) bool {
-							return validVers[i].Version > validVers[j].Version
-						})
-						rec.Versions = validVers
-					}
-					rec.VersionCount = 1 + len(rec.Versions)
-					s.records[rec.ID] = rec
+				_, statErr := os.Stat(s.recordDiskPathLocked(rec))
+				isExternal := rec.StorageMode == StorageModeRef || rec.StorageMode == StorageModeMount
+				if statErr != nil && !isExternal {
+					continue
 				}
+				if isExternal {
+					rec.SourceMissing = statErr != nil
+				} else {
+					rec.SourceMissing = false
+				}
+				if rec.MonthKey == "" {
+					rec.MonthKey = rec.UploadedAt.Format("2006-01")
+				}
+				if rec.DateKey == "" {
+					rec.DateKey = rec.UploadedAt.Format("2006-01-02")
+				}
+				rec.Category = ClassifyExt(rec.Ext)
+				rec.AllowedUsers = NormalizeAllowedUsers(rec.AllowedUsers)
+				if rec.Version <= 0 {
+					rec.Version = 1
+				}
+				rec.UpdateMethod = DefaultUpdateMethod(rec.UpdateMethod, rec.Version)
+				if len(rec.Versions) > 0 {
+					validVers := make([]FileVersion, 0, len(rec.Versions))
+					for _, v := range rec.Versions {
+						if v.StoredName == "" {
+							continue
+						}
+						if _, vErr := os.Stat(s.versionDiskPathLocked(rec, v)); vErr == nil {
+							if v.Version <= 0 {
+								v.Version = 1
+							}
+							v.UpdateMethod = DefaultUpdateMethod(v.UpdateMethod, v.Version)
+							validVers = append(validVers, v)
+						}
+					}
+					sort.Slice(validVers, func(i, j int) bool {
+						return validVers[i].Version > validVers[j].Version
+					})
+					rec.Versions = validVers
+				}
+				rec.VersionCount = 1 + len(rec.Versions)
+				s.records[rec.ID] = rec
 			}
 		}
 	}
@@ -492,6 +519,9 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 	s.mu.Lock()
 	var existingID string
 	for id, cur := range s.records {
+		if cur.StorageMode == StorageModeMount {
+			continue
+		}
 		if strings.EqualFold(cur.Name, origName) && cur.FolderPath == folderPath {
 			existingID = id
 			break
@@ -511,29 +541,35 @@ func (s *Store) SaveUploadWithVersionNote(origName, folderPath, versionNote, upl
 				maxVer = v.Version
 			}
 		}
-		prevSnap := FileVersion{
-			Version:      curVer,
-			StoredName:   cur.StoredName,
-			Size:         cur.Size,
-			Uploader:     cur.Uploader,
-			UploadedAt:   cur.UploadedAt,
-			DeviceFP:     cur.DeviceFP,
-			DeviceName:   cur.DeviceName,
-			DeviceIP:     cur.DeviceIP,
-			DeviceDetail: cur.DeviceDetail,
-			StorageDir:   cur.StorageDir,
-			Note:         cur.VersionNote,
-			UpdateMethod: DefaultUpdateMethod(cur.UpdateMethod, curVer),
+		if cur.StoredName != "" {
+			prevSnap := FileVersion{
+				Version:      curVer,
+				StoredName:   cur.StoredName,
+				Size:         cur.Size,
+				Uploader:     cur.Uploader,
+				UploadedAt:   cur.UploadedAt,
+				DeviceFP:     cur.DeviceFP,
+				DeviceName:   cur.DeviceName,
+				DeviceIP:     cur.DeviceIP,
+				DeviceDetail: cur.DeviceDetail,
+				StorageDir:   cur.StorageDir,
+				Note:         cur.VersionNote,
+				UpdateMethod: DefaultUpdateMethod(cur.UpdateMethod, curVer),
+			}
+			cur.Versions = append([]FileVersion{prevSnap}, cur.Versions...)
+			sort.Slice(cur.Versions, func(i, j int) bool {
+				return cur.Versions[i].Version > cur.Versions[j].Version
+			})
 		}
-		cur.Versions = append([]FileVersion{prevSnap}, cur.Versions...)
-		sort.Slice(cur.Versions, func(i, j int) bool {
-			return cur.Versions[i].Version > cur.Versions[j].Version
-		})
 		cur.Version = maxVer + 1
 		cur.VersionCount = 1 + len(cur.Versions)
 		cur.VersionNote = cleanNote
 		cur.UpdateMethod = MethodUploadOverwrite
 		cur.StoredName = storedName
+		cur.StorageMode = StorageModeCopy
+		cur.SourcePath = ""
+		cur.SourceMissing = false
+		cur.MountID = ""
 		cur.Size = n
 		cur.Ext = ext
 		cur.Category = ClassifyExt(ext)
@@ -645,6 +681,10 @@ func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader st
 		_ = os.Remove(dstPath)
 		return FileRecord{}, errors.New("文件不存在")
 	}
+	if latest.StorageMode == StorageModeMount {
+		_ = os.Remove(dstPath)
+		return FileRecord{}, errors.New("本机挂载目录文件由源文件夹自动同步，请在原目录修改或下载后另存")
+	}
 	curVer := latest.Version
 	if curVer <= 0 {
 		curVer = 1
@@ -655,24 +695,26 @@ func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader st
 			maxVer = v.Version
 		}
 	}
-	prevSnap := FileVersion{
-		Version:      curVer,
-		StoredName:   latest.StoredName,
-		Size:         latest.Size,
-		Uploader:     latest.Uploader,
-		UploadedAt:   latest.UploadedAt,
-		DeviceFP:     latest.DeviceFP,
-		DeviceName:   latest.DeviceName,
-		DeviceIP:     latest.DeviceIP,
-		DeviceDetail: latest.DeviceDetail,
-		StorageDir:   latest.StorageDir,
-		Note:         latest.VersionNote,
-		UpdateMethod: DefaultUpdateMethod(latest.UpdateMethod, curVer),
+	if latest.StoredName != "" {
+		prevSnap := FileVersion{
+			Version:      curVer,
+			StoredName:   latest.StoredName,
+			Size:         latest.Size,
+			Uploader:     latest.Uploader,
+			UploadedAt:   latest.UploadedAt,
+			DeviceFP:     latest.DeviceFP,
+			DeviceName:   latest.DeviceName,
+			DeviceIP:     latest.DeviceIP,
+			DeviceDetail: latest.DeviceDetail,
+			StorageDir:   latest.StorageDir,
+			Note:         latest.VersionNote,
+			UpdateMethod: DefaultUpdateMethod(latest.UpdateMethod, curVer),
+		}
+		latest.Versions = append([]FileVersion{prevSnap}, latest.Versions...)
+		sort.Slice(latest.Versions, func(i, j int) bool {
+			return latest.Versions[i].Version > latest.Versions[j].Version
+		})
 	}
-	latest.Versions = append([]FileVersion{prevSnap}, latest.Versions...)
-	sort.Slice(latest.Versions, func(i, j int) bool {
-		return latest.Versions[i].Version > latest.Versions[j].Version
-	})
 	latest.Version = maxVer + 1
 	latest.VersionCount = 1 + len(latest.Versions)
 	latest.VersionNote = strings.TrimSpace(note)
@@ -681,6 +723,10 @@ func (s *Store) SaveNewVersionWithMethod(id, origName, note, method, uploader st
 	}
 	latest.UpdateMethod = strings.TrimSpace(method)
 	latest.StoredName = storedName
+	latest.StorageMode = StorageModeCopy
+	latest.SourcePath = ""
+	latest.SourceMissing = false
+	latest.MountID = ""
 	latest.Size = n
 	latest.Uploader = uploader
 	latest.UploadedAt = now
@@ -870,9 +916,14 @@ func (s *Store) DeleteVersion(id string, targetVer int) (FileRecord, error) {
 		})
 		nextActive := rec.Versions[0]
 		oldPath := s.recordDiskPathLocked(rec)
+		oldMode := rec.StorageMode
 		rec.Versions = rec.Versions[1:]
 		rec.Version = nextActive.Version
 		rec.StoredName = nextActive.StoredName
+		rec.StorageMode = StorageModeCopy
+		rec.SourcePath = ""
+		rec.SourceMissing = false
+		rec.MountID = ""
 		rec.Size = nextActive.Size
 		rec.Uploader = nextActive.Uploader
 		rec.UploadedAt = nextActive.UploadedAt
@@ -893,7 +944,9 @@ func (s *Store) DeleteVersion(id string, targetVer int) (FileRecord, error) {
 			s.RecordWriteError()
 			return FileRecord{}, err
 		}
-		_ = os.Remove(oldPath)
+		if oldMode != StorageModeRef && oldMode != StorageModeMount {
+			_ = os.Remove(oldPath)
+		}
 		return rec, nil
 	}
 
@@ -978,6 +1031,9 @@ func (s *Store) SetUploadDir(newDir string, migrateExisting bool) (int, error) {
 	if migrateExisting {
 		candidates = make([]FileRecord, 0, len(s.records))
 		for _, rec := range s.records {
+			if rec.StorageMode == StorageModeRef || rec.StorageMode == StorageModeMount {
+				continue
+			}
 			if s.recordDirLocked(rec) != cleanDir {
 				candidates = append(candidates, rec)
 			}
@@ -1082,7 +1138,12 @@ func (s *Store) Delete(id string) error {
 	if !ok {
 		return errors.New("文件不存在")
 	}
-	_ = os.Remove(s.recordDiskPathLocked(rec))
+	if rec.StorageMode == StorageModeMount {
+		return errors.New("该文件来自本机挂载目录，请通过移除对应挂载目录或在原文件夹中管理")
+	}
+	if rec.StorageMode != StorageModeRef {
+		_ = os.Remove(s.recordDiskPathLocked(rec))
+	}
 	for _, v := range rec.Versions {
 		_ = os.Remove(s.versionDiskPathLocked(rec, v))
 	}
@@ -1095,12 +1156,33 @@ func (s *Store) LocalStats() (int, int64) {
 	defer s.mu.RUnlock()
 	var total int64
 	for _, rec := range s.records {
-		total += rec.Size
+		if rec.StorageMode == "" || rec.StorageMode == StorageModeCopy {
+			total += rec.Size
+		}
 		for _, v := range rec.Versions {
 			total += v.Size
 		}
 	}
 	return len(s.records), total
+}
+
+func (s *Store) ZeroCopyStats() (hardlinkCount, refCount, mountCount int, savedBytes int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, rec := range s.records {
+		switch rec.StorageMode {
+		case StorageModeHardlink:
+			hardlinkCount++
+			savedBytes += rec.Size
+		case StorageModeRef:
+			refCount++
+			savedBytes += rec.Size
+		case StorageModeMount:
+			mountCount++
+			savedBytes += rec.Size
+		}
+	}
+	return hardlinkCount, refCount, mountCount, savedBytes
 }
 
 func (s *Store) AllRecords() []FileRecord {

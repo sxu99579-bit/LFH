@@ -2236,3 +2236,170 @@ func TestCreateTxtFileAndSuperClipboardControls(t *testing.T) {
 		t.Fatalf("expected auto-uploaded clipboard file in cluster, got %+v", files)
 	}
 }
+
+func TestZeroCopyLocalImportAndMountsClusterFlow(t *testing.T) {
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "ZC-Entry",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_, workerMgr, _, workerTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "ZC-Worker",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_ = workerTS
+
+	if err := workerMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker JoinEntryCluster: %v", err)
+	}
+	if err := workerMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker SendHeartbeatNow: %v", err)
+	}
+
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+	userClient := registerAndLoginTestUser(t, adminClient, entryTS.URL, "regular", "pass12345")
+
+	// 1. Non-admin users must receive 403 on zero-copy admin routes.
+	uImpRes, _ := userClient.Post(entryTS.URL+"/api/admin/files/import-local", "application/json", strings.NewReader(`{"source_path":"C:\\temp.txt"}`))
+	uImpRes.Body.Close()
+	if uImpRes.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin import-local, got %d", uImpRes.StatusCode)
+	}
+	uMntGet, _ := userClient.Get(entryTS.URL + "/api/admin/mounts")
+	uMntGet.Body.Close()
+	if uMntGet.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin GET mounts, got %d", uMntGet.StatusCode)
+	}
+
+	// 2. Local hardlink zero-copy import on Entry node survives source deletion & serves file + meta.
+	srcDir := t.TempDir()
+	localFile := filepath.Join(srcDir, "movie-notes.txt")
+	if err := os.WriteFile(localFile, []byte("zero-copy hardlink payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	impBody, _ := json.Marshal(map[string]any{
+		"node_id":     entryMgr.NodeID(),
+		"source_path": localFile,
+		"folder_path": "本地资料",
+	})
+	impRes, err := adminClient.Post(entryTS.URL+"/api/admin/files/import-local", "application/json", bytes.NewReader(impBody))
+	if err != nil {
+		t.Fatalf("POST admin import-local: %v", err)
+	}
+	var impOut struct {
+		OK      bool                  `json:"ok"`
+		Files   []storage.FileRecord  `json:"files"`
+		Summary storage.ImportSummary `json:"summary"`
+	}
+	_ = json.NewDecoder(impRes.Body).Decode(&impOut)
+	impRes.Body.Close()
+	if impRes.StatusCode != http.StatusOK || !impOut.OK || len(impOut.Files) != 1 || impOut.Files[0].StorageMode != storage.StorageModeHardlink {
+		t.Fatalf("unexpected import-local output: status=%d out=%+v", impRes.StatusCode, impOut)
+	}
+
+	// Delete source file -> LFH hardlink remains readable & downloadable.
+	_ = os.Remove(localFile)
+	dlRes, _ := adminClient.Get(entryTS.URL + "/api/files/" + impOut.Files[0].ID + "/download")
+	dlRaw, _ := io.ReadAll(dlRes.Body)
+	dlRes.Body.Close()
+	if dlRes.StatusCode != http.StatusOK || string(dlRaw) != "zero-copy hardlink payload" {
+		t.Fatalf("expected hardlinked file still readable, status=%d body=%q", dlRes.StatusCode, string(dlRaw))
+	}
+	metaRes, _ := adminClient.Get(entryTS.URL + "/api/files/" + impOut.Files[0].ID + "/meta")
+	var metaOut struct {
+		StorageMode string `json:"storage_mode"`
+		SourcePath  string `json:"source_path"`
+	}
+	_ = json.NewDecoder(metaRes.Body).Decode(&metaOut)
+	metaRes.Body.Close()
+	if metaOut.StorageMode != storage.StorageModeHardlink || metaOut.SourcePath != localFile {
+		t.Fatalf("unexpected file meta: %+v", metaOut)
+	}
+
+	// 3. Remote worker mount add -> list -> sync -> 410 Gone when source removed -> remove mount.
+	workerMountDir := t.TempDir()
+	mntFile1 := filepath.Join(workerMountDir, "track1.txt")
+	if err := os.WriteFile(mntFile1, []byte("worker-mount-v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	addMntBody, _ := json.Marshal(map[string]any{
+		"node_id":  workerMgr.NodeID(),
+		"dir_path": workerMountDir,
+		"alias":    "远程电影库",
+	})
+	addRes, err := adminClient.Post(entryTS.URL+"/api/admin/mounts", "application/json", bytes.NewReader(addMntBody))
+	if err != nil {
+		t.Fatalf("POST admin mounts: %v", err)
+	}
+	var addOut struct {
+		OK     bool                       `json:"ok"`
+		Mount  storage.MountEntry         `json:"mount"`
+		Added  int                        `json:"added"`
+		Mounts []cluster.ClusterMountView `json:"mounts"`
+	}
+	_ = json.NewDecoder(addRes.Body).Decode(&addOut)
+	addRes.Body.Close()
+	if addRes.StatusCode != http.StatusOK || !addOut.OK || addOut.Added != 1 || len(addOut.Mounts) != 1 {
+		t.Fatalf("unexpected add mount output: status=%d out=%+v", addRes.StatusCode, addOut)
+	}
+
+	// Add a second file to worker mount directory and trigger sync.
+	mntFile2 := filepath.Join(workerMountDir, "track2.txt")
+	if err := os.WriteFile(mntFile2, []byte("worker-mount-v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	syncReq, _ := http.NewRequest(http.MethodPost, entryTS.URL+"/api/admin/mounts/"+workerMgr.NodeID()+"/"+addOut.Mount.ID+"/sync", nil)
+	syncRes, err := adminClient.Do(syncReq)
+	if err != nil {
+		t.Fatalf("POST sync mount: %v", err)
+	}
+	var syncOut struct {
+		OK     bool                    `json:"ok"`
+		Result storage.MountSyncResult `json:"result"`
+	}
+	_ = json.NewDecoder(syncRes.Body).Decode(&syncOut)
+	syncRes.Body.Close()
+	if syncRes.StatusCode != http.StatusOK || !syncOut.OK || syncOut.Result.Added != 1 || syncOut.Result.FileCount != 2 {
+		t.Fatalf("unexpected mount sync result: status=%d out=%+v", syncRes.StatusCode, syncOut)
+	}
+
+	// Deleting track2.txt directly on disk while mounted returns 410 Gone on download.
+	var track2ID string
+	for _, f := range entryMgr.AllClusterFiles() {
+		if f.Name == "track2.txt" && f.MountID == addOut.Mount.ID {
+			track2ID = f.ID
+			break
+		}
+	}
+	if track2ID == "" {
+		t.Fatalf("expected track2.txt synced in cluster file list")
+	}
+	_ = os.Remove(mntFile2)
+	goneRes, _ := adminClient.Get(entryTS.URL + "/api/files/" + track2ID + "/download")
+	goneRes.Body.Close()
+	if goneRes.StatusCode != http.StatusGone {
+		t.Fatalf("expected 410 Gone when mounted external file missing on disk, got %d", goneRes.StatusCode)
+	}
+
+	// Removing mount cleans index without touching track1.txt on disk.
+	delReq, _ := http.NewRequest(http.MethodDelete, entryTS.URL+"/api/admin/mounts/"+workerMgr.NodeID()+"/"+addOut.Mount.ID, nil)
+	delRes, err := adminClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE mount: %v", err)
+	}
+	var delOut struct {
+		OK      bool `json:"ok"`
+		Removed int  `json:"removed"`
+	}
+	_ = json.NewDecoder(delRes.Body).Decode(&delOut)
+	delRes.Body.Close()
+	if delRes.StatusCode != http.StatusOK || !delOut.OK || delOut.Removed != 2 {
+		t.Fatalf("unexpected delete mount result: status=%d out=%+v", delRes.StatusCode, delOut)
+	}
+	if _, statErr := os.Stat(mntFile1); statErr != nil {
+		t.Fatalf("RemoveMount should never remove underlying file on disk: %v", statErr)
+	}
+}

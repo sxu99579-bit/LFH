@@ -351,6 +351,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/quota", s.requireClusterAuth(s.handleClusterSetQuota))
 	mux.HandleFunc("POST /internal/cluster/storage-dir", s.requireClusterAuth(s.handleClusterSetStorageDir))
 	mux.HandleFunc("POST /internal/cluster/clipboard", s.requireClusterAuth(s.handleClusterSetClipboard))
+	mux.HandleFunc("POST /internal/cluster/import-local", s.requireClusterAuth(s.handleClusterImportLocal))
+	mux.HandleFunc("GET /internal/cluster/mounts", s.requireClusterAuth(s.handleClusterListMounts))
+	mux.HandleFunc("POST /internal/cluster/mounts", s.requireClusterAuth(s.handleClusterAddMount))
+	mux.HandleFunc("DELETE /internal/cluster/mounts/{id}", s.requireClusterAuth(s.handleClusterRemoveMount))
+	mux.HandleFunc("POST /internal/cluster/mounts/{id}/sync", s.requireClusterAuth(s.handleClusterSyncMount))
 	mux.HandleFunc("POST /internal/cluster/promote", s.requireClusterAuth(s.handleClusterPromote))
 	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
 	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
@@ -385,6 +390,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
 	mux.HandleFunc("POST /api/admin/cluster/clipboard", s.requireAdmin(s.handleAdminClusterClipboard))
 	mux.HandleFunc("POST /api/admin/cluster/endpoint", s.requireAdmin(s.handleAdminClusterEndpoint))
+	mux.HandleFunc("POST /api/admin/files/import-local", s.requireAdmin(s.handleAdminImportLocal))
+	mux.HandleFunc("GET /api/admin/mounts", s.requireAdmin(s.handleAdminListMounts))
+	mux.HandleFunc("POST /api/admin/mounts", s.requireAdmin(s.handleAdminAddMount))
+	mux.HandleFunc("DELETE /api/admin/mounts/{nodeID}/{mountID}", s.requireAdmin(s.handleAdminRemoveMount))
+	mux.HandleFunc("POST /api/admin/mounts/{nodeID}/{mountID}/sync", s.requireAdmin(s.handleAdminSyncMount))
 	mux.HandleFunc("GET /api/admin/settings", s.requireAdmin(s.handleGetAdminSettings))
 	mux.HandleFunc("POST /api/admin/settings", s.requireAdmin(s.handleUpdateAdminSettings))
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.handleListUsers))
@@ -904,6 +914,139 @@ func (s *Server) handleClusterSetClipboard(w http.ResponseWriter, r *http.Reques
 	}
 	s.cluster.TriggerHeartbeat()
 	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) localFilesForMount(mountID string) []storage.FileRecord {
+	all := s.store.AllRecords()
+	out := make([]storage.FileRecord, 0)
+	selfID := s.cluster.NodeID()
+	selfName := s.cluster.NodeName()
+	for _, rec := range all {
+		if rec.MountID == mountID {
+			rec.NodeID = selfID
+			rec.NodeName = selfName
+			rec.NodeOS = runtime.GOOS
+			rec.NodeOnline = true
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+func (s *Server) handleClusterImportLocal(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourcePath   string   `json:"source_path"`
+		FolderPath   string   `json:"folder_path"`
+		Uploader     string   `json:"uploader"`
+		AllowedUsers []string `json:"allowed_users"`
+		DeviceFP     string   `json:"device_fp"`
+		DeviceName   string   `json:"device_name"`
+		DeviceIP     string   `json:"device_ip"`
+		DeviceDetail string   `json:"device_detail"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	uploader := strings.TrimSpace(req.Uploader)
+	if uploader == "" {
+		uploader = "admin"
+	}
+	dev := storage.DeviceInfo{
+		FP:     req.DeviceFP,
+		Name:   req.DeviceName,
+		IP:     req.DeviceIP,
+		Detail: req.DeviceDetail,
+	}
+	recs, summary, err := s.store.ImportLocalPath(req.SourcePath, req.FolderPath, uploader, req.AllowedUsers, dev)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	selfID := s.cluster.NodeID()
+	selfName := s.cluster.NodeName()
+	for i := range recs {
+		recs[i].NodeID = selfID
+		recs[i].NodeName = selfName
+		recs[i].NodeOS = runtime.GOOS
+		recs[i].NodeOnline = true
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"files":   recs,
+		"summary": summary,
+	})
+}
+
+func (s *Server) handleClusterListMounts(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mounts": s.store.ListMounts(),
+	})
+}
+
+func (s *Server) handleClusterAddMount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DirPath      string   `json:"dir_path"`
+		Alias        string   `json:"alias"`
+		AddedBy      string   `json:"added_by"`
+		AllowedUsers []string `json:"allowed_users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	entry, added, err := s.store.AddMount(req.DirPath, req.Alias, req.AddedBy, req.AllowedUsers)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	files := s.localFilesForMount(entry.ID)
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"mount": entry,
+		"added": added,
+		"files": files,
+	})
+}
+
+func (s *Server) handleClusterRemoveMount(w http.ResponseWriter, r *http.Request) {
+	mountID := r.PathValue("id")
+	removed, err := s.store.RemoveMount(mountID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"removed": removed,
+	})
+}
+
+func (s *Server) handleClusterSyncMount(w http.ResponseWriter, r *http.Request) {
+	mountID := r.PathValue("id")
+	res, err := s.store.SyncMount(mountID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	var mount storage.MountEntry
+	for _, entry := range s.store.ListMounts() {
+		if entry.ID == mountID {
+			mount = entry
+			break
+		}
+	}
+	files := s.localFilesForMount(mountID)
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"mount":  mount,
+		"result": res,
+		"files":  files,
+	})
 }
 
 func (s *Server) handleClusterUpdateAccess(w http.ResponseWriter, r *http.Request) {
@@ -2238,6 +2381,124 @@ func (s *Server) handleAdminClusterClipboard(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func (s *Server) handleAdminImportLocal(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID       string   `json:"node_id"`
+		SourcePath   string   `json:"source_path"`
+		FolderPath   string   `json:"folder_path"`
+		AllowedUsers []string `json:"allowed_users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	dev := extractDeviceInfo(r)
+	files, summary, err := s.cluster.ProxyImportLocal(req.NodeID, req.SourcePath, req.FolderPath, u.Username, req.AllowedUsers, dev)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(files) > 0 {
+		s.publishRecordChange("upload", u.Username, files, req.AllowedUsers)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"files":   s.sanitizeRecordsForUser(files, u),
+		"summary": summary,
+		"pool":    s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminListMounts(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mounts": s.cluster.ListAllMounts(),
+	})
+}
+
+func (s *Server) handleAdminAddMount(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID       string   `json:"node_id"`
+		DirPath      string   `json:"dir_path"`
+		Alias        string   `json:"alias"`
+		AllowedUsers []string `json:"allowed_users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	entry, added, err := s.cluster.AddNodeMount(req.NodeID, req.DirPath, req.Alias, u.Username, req.AllowedUsers)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		Uploader: u.Username,
+		Count:    added,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"mount":  entry,
+		"added":  added,
+		"mounts": s.cluster.ListAllMounts(),
+		"pool":   s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminRemoveMount(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	nodeID := r.PathValue("nodeID")
+	mountID := r.PathValue("mountID")
+	removed, err := s.cluster.RemoveNodeMount(nodeID, mountID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		Uploader: u.Username,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"removed": removed,
+		"mounts":  s.cluster.ListAllMounts(),
+		"pool":    s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminSyncMount(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	nodeID := r.PathValue("nodeID")
+	mountID := r.PathValue("mountID")
+	entry, res, err := s.cluster.SyncNodeMount(nodeID, mountID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.events.Publish(FileChangeEvent{
+		Kind:     "cluster_sync",
+		Uploader: u.Username,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"mount":  entry,
+		"result": res,
+		"mounts": s.cluster.ListAllMounts(),
+		"pool":   s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+// SyncLocalZeroCopy refreshes local mounted directories and external path reference status.
+func (s *Server) SyncLocalZeroCopy() {
+	mountChanged, _, _, _ := s.store.SyncAllMounts()
+	refChanged := s.store.RefreshRefStatus()
+	if mountChanged || refChanged {
+		s.cluster.TriggerHeartbeat()
+		s.events.Publish(FileChangeEvent{
+			Kind:     "cluster_sync",
+			NodeName: s.cluster.NodeName(),
+		})
+	}
+}
+
 func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	var req struct {
 		ExposeIP    string    `json:"expose_ip"`
@@ -2507,6 +2768,7 @@ func parseAllowedUsersForm(vals []string) []string {
 func (s *Server) sanitizeRecordForUser(rec storage.FileRecord, u auth.PublicUser) storage.FileRecord {
 	if u.Role != "admin" {
 		rec.StorageDir = ""
+		rec.SourcePath = ""
 		if len(rec.Versions) > 0 {
 			cleanVers := make([]storage.FileVersion, len(rec.Versions))
 			for i, v := range rec.Versions {
@@ -3456,6 +3718,13 @@ func (dw *downloadCountWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func isExternalSourceMissingErr(rec storage.FileRecord, err error) bool {
+	if err == nil || !os.IsNotExist(err) {
+		return false
+	}
+	return rec.StorageMode == storage.StorageModeRef || rec.StorageMode == storage.StorageModeMount
+}
+
 func (s *Server) serveFileAttachment(w http.ResponseWriter, r *http.Request, id string) {
 	rec, fp, ok := s.store.Get(id)
 	if !ok {
@@ -3465,6 +3734,10 @@ func (s *Server) serveFileAttachment(w http.ResponseWriter, r *http.Request, id 
 	f, err := os.Open(fp)
 	if err != nil {
 		s.store.RecordReadError()
+		if isExternalSourceMissingErr(rec, err) {
+			http.Error(w, "源文件已移动或删除，外部引用已失效", http.StatusGone)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -3518,6 +3791,10 @@ func (s *Server) serveFileRaw(w http.ResponseWriter, r *http.Request, id string)
 	f, err := os.Open(fp)
 	if err != nil {
 		s.store.RecordReadError()
+		if isExternalSourceMissingErr(rec, err) {
+			http.Error(w, "源文件已移动或删除，外部引用已失效", http.StatusGone)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -3540,6 +3817,11 @@ func (s *Server) serveFilePreview(w http.ResponseWriter, id string) {
 	rec, fp, ok := s.store.Get(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+		return
+	}
+	if _, statErr := os.Stat(fp); isExternalSourceMissingErr(rec, statErr) {
+		s.store.RecordReadError()
+		writeJSON(w, http.StatusGone, map[string]string{"error": "源文件已移动或删除，外部引用已失效"})
 		return
 	}
 
@@ -3603,6 +3885,17 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string, includePath boo
 		rec.StorageDir = filepath.Dir(fp)
 	} else {
 		rec.StorageDir = ""
+		rec.SourcePath = ""
+	}
+	storageMode := rec.StorageMode
+	if storageMode == "" {
+		storageMode = storage.StorageModeCopy
+	}
+
+	if _, statErr := os.Stat(fp); isExternalSourceMissingErr(rec, statErr) {
+		s.store.RecordReadError()
+		writeJSON(w, http.StatusGone, map[string]string{"error": "源文件已移动或删除，外部引用已失效"})
+		return
 	}
 
 	ct := detectContentType(rec.Ext)
@@ -3618,6 +3911,10 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string, includePath boo
 	} else {
 		f, err := os.Open(fp)
 		if err != nil {
+			if isExternalSourceMissingErr(rec, err) {
+				writeJSON(w, http.StatusGone, map[string]string{"error": "源文件已移动或删除，外部引用已失效"})
+				return
+			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取本地文件失败"})
 			return
 		}
@@ -3640,10 +3937,15 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string, includePath boo
 		"sha256_skipped": shaSkipped,
 		"can_preview":    canPrev,
 		"is_archive":     isArch,
+		"storage_mode":   storageMode,
+		"source_missing": rec.SourceMissing,
 	}
 	if includePath {
 		resp["disk_path"] = fp
 		resp["storage_dir"] = filepath.Dir(fp)
+		if rec.SourcePath != "" {
+			resp["source_path"] = rec.SourcePath
+		}
 	}
 	if isArch {
 		if archRes, err := preview.InspectArchive(fp, rec.Name); err == nil {

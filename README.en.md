@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.11</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.12</code>
 </p>
 
 ---
@@ -19,6 +19,10 @@
 Ships as a single binary with zero database setup required—ready for both Docker containers and native local deployment.
 
 ## Key Features
+
+- **Zero-Copy Local Import & Virtual Directory Mounts**:
+  - Administrators can index existing local files/folders on any online node by host path without duplicating bytes: **same-volume imports create OS hard links (`os.Link`)** (zero extra disk usage, surviving source rename/move/deletion), while **cross-volume imports fall back to read-only external references** with background missing-source detection;
+  - Mount large existing host directories (e.g., `D:\Movies`, `/mnt/media`) directly as auto-synced read-only virtual libraries with zero disk duplication, zero upload quota consumption, and non-destructive unmounting.
 
 - **Heterogeneous LAN Clustering & Web-Based Discovery / Join (`entry` / `worker`)**:
   - Combines passive UDP broadcast discovery (`53319/udp`) with **active LAN subnet scanning** and **manual IP:port probing** right inside **Settings -> Cluster & Entry**;

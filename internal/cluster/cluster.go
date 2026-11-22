@@ -16,6 +16,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -139,6 +140,9 @@ type NodeStatus struct {
 	IOReadErrors       int64       `json:"io_read_errors"`
 	IOWriteErrors      int64       `json:"io_write_errors"`
 	IOTotalErrors      int64       `json:"io_total_errors"`
+	ZeroCopyCount      int         `json:"zero_copy_count,omitempty"`
+	ZeroCopyBytes      int64       `json:"zero_copy_bytes,omitempty"`
+	MountCount         int         `json:"mount_count,omitempty"`
 	ClipboardEnabled   bool        `json:"clipboard_enabled"`
 	Online             bool        `json:"online"`
 	IsSelf             bool        `json:"is_self"`
@@ -589,6 +593,9 @@ func (m *Manager) SelfStatus() NodeStatus {
 	}
 	rErr, wErr := m.store.IOStats()
 	upBps, downBps, totalUp, totalDown := m.store.TransferStats()
+	hlCnt, refCnt, mntFileCnt, zcBytes := m.store.ZeroCopyStats()
+	zcCount := hlCnt + refCnt + mntFileCnt
+	mountEntries := len(m.store.ListMounts())
 	netLat := 0.2
 	if cfg.Role == RoleWorker && hbLat > 0 {
 		netLat = hbLat
@@ -628,6 +635,9 @@ func (m *Manager) SelfStatus() NodeStatus {
 		IOReadErrors:       rErr,
 		IOWriteErrors:      wErr,
 		IOTotalErrors:      rErr + wErr,
+		ZeroCopyCount:      zcCount,
+		ZeroCopyBytes:      zcBytes,
+		MountCount:         mountEntries,
 		ClipboardEnabled:   cfg.ClipboardEnabled,
 		Online:             true,
 		IsSelf:             true,
@@ -796,6 +806,8 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		prev.status.UsedBytes != n.UsedBytes ||
 		prev.status.FileCount != n.FileCount ||
 		prev.status.StorageDir != n.StorageDir ||
+		prev.status.ZeroCopyCount != n.ZeroCopyCount ||
+		prev.status.MountCount != n.MountCount ||
 		prev.status.ClipboardEnabled != n.ClipboardEnabled ||
 		len(prev.files) != len(files)
 	if !changed {
@@ -804,6 +816,9 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 				prev.files[i].Version != files[i].Version ||
 				prev.files[i].VersionCount != files[i].VersionCount ||
 				prev.files[i].StorageDir != files[i].StorageDir ||
+				prev.files[i].StorageMode != files[i].StorageMode ||
+				prev.files[i].SourceMissing != files[i].SourceMissing ||
+				prev.files[i].Size != files[i].Size ||
 				!equalStringSlice(prev.files[i].AllowedUsers, files[i].AllowedUsers) {
 				changed = true
 				break
@@ -1285,6 +1300,10 @@ func (m *Manager) LocateFile(fileID string) (storage.FileRecord, NodeStatus, boo
 	return storage.FileRecord{}, NodeStatus{}, false
 }
 
+func isQuotaCountedRecord(rec storage.FileRecord) bool {
+	return rec.StorageMode == "" || rec.StorageMode == storage.StorageModeCopy
+}
+
 func (m *Manager) AddPeerFile(nodeID string, rec storage.FileRecord) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1298,7 +1317,12 @@ func (m *Manager) AddPeerFile(nodeID string, rec storage.FileRecord) {
 	rec.NodeOnline = true
 	for i, existing := range p.files {
 		if existing.ID == rec.ID {
-			p.status.UsedBytes = max(0, p.status.UsedBytes-existing.Size) + rec.Size
+			if isQuotaCountedRecord(existing) {
+				p.status.UsedBytes = max(0, p.status.UsedBytes-existing.Size)
+			}
+			if isQuotaCountedRecord(rec) {
+				p.status.UsedBytes += rec.Size
+			}
 			p.status.FreeBytes = max(0, p.status.QuotaBytes-p.status.UsedBytes)
 			p.files[i] = rec
 			return
@@ -1306,11 +1330,13 @@ func (m *Manager) AddPeerFile(nodeID string, rec storage.FileRecord) {
 	}
 	p.files = append([]storage.FileRecord{rec}, p.files...)
 	p.status.FileCount++
-	p.status.UsedBytes += rec.Size
-	p.status.FreeBytes = p.status.QuotaBytes - p.status.UsedBytes
-	if p.status.FreeBytes < 0 {
-		p.status.FreeBytes = 0
+	if isQuotaCountedRecord(rec) {
+		p.status.UsedBytes += rec.Size
+	} else {
+		p.status.ZeroCopyCount++
+		p.status.ZeroCopyBytes += rec.Size
 	}
+	p.status.FreeBytes = max(0, p.status.QuotaBytes-p.status.UsedBytes)
 }
 
 func (m *Manager) RemovePeerFile(nodeID, fileID string) {
@@ -1324,11 +1350,37 @@ func (m *Manager) RemovePeerFile(nodeID, fileID string) {
 		if f.ID == fileID {
 			p.files = append(p.files[:i], p.files[i+1:]...)
 			p.status.FileCount = max(0, p.status.FileCount-1)
-			p.status.UsedBytes = max(0, p.status.UsedBytes-f.Size)
+			if isQuotaCountedRecord(f) {
+				p.status.UsedBytes = max(0, p.status.UsedBytes-f.Size)
+			} else {
+				p.status.ZeroCopyCount = max(0, p.status.ZeroCopyCount-1)
+				p.status.ZeroCopyBytes = max(0, p.status.ZeroCopyBytes-f.Size)
+			}
 			p.status.FreeBytes = max(0, p.status.QuotaBytes-p.status.UsedBytes)
 			break
 		}
 	}
+}
+
+func (m *Manager) RemovePeerMountFiles(nodeID, mountID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.peers[nodeID]
+	if !ok {
+		return
+	}
+	kept := make([]storage.FileRecord, 0, len(p.files))
+	for _, f := range p.files {
+		if f.MountID == mountID {
+			p.status.FileCount = max(0, p.status.FileCount-1)
+			p.status.ZeroCopyCount = max(0, p.status.ZeroCopyCount-1)
+			p.status.ZeroCopyBytes = max(0, p.status.ZeroCopyBytes-f.Size)
+			continue
+		}
+		kept = append(kept, f)
+	}
+	p.files = kept
+	p.status.MountCount = max(0, p.status.MountCount-1)
 }
 
 func (m *Manager) SelectUploadTarget(preferredNodeID string, fileSize int64) (NodeStatus, error) {
@@ -1893,6 +1945,280 @@ func (m *Manager) UpdateNodeClipboardEnabled(nodeID string, enabled bool) (NodeS
 	}
 	m.mu.Unlock()
 	return updated, nil
+}
+
+// ClusterMountView annotates a host MountEntry with owning node metadata.
+type ClusterMountView struct {
+	storage.MountEntry
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	IsSelf   bool   `json:"is_self"`
+}
+
+func (m *Manager) resolveOnlinePeer(nodeID string) (NodeStatus, error) {
+	m.mu.RLock()
+	p, ok := m.peers[nodeID]
+	var peer NodeStatus
+	if ok {
+		peer = p.status
+		peer.Online = time.Since(peer.LastSeen) <= PeerTimeout
+	}
+	m.mu.RUnlock()
+	if !ok {
+		return NodeStatus{}, errors.New("节点不存在")
+	}
+	if !peer.Online || strings.TrimSpace(peer.HTTPURL) == "" {
+		return NodeStatus{}, fmt.Errorf("节点 %s 当前离线", peer.NodeName)
+	}
+	return peer, nil
+}
+
+func (m *Manager) doSignedPeerJSON(peer NodeStatus, method, endpoint string, reqBody any, dst any) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		raw, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(raw)
+	}
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + endpoint
+	req, err := http.NewRequest(method, targetURL, bodyReader)
+	if err != nil {
+		return err
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("请求节点 %s 失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return errors.New(errBody.Error)
+		}
+		return fmt.Errorf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode)
+	}
+	if dst != nil && len(body) > 0 {
+		return json.Unmarshal(body, dst)
+	}
+	return nil
+}
+
+func (m *Manager) replacePeerMountFiles(nodeID, mountID string, mountFiles []storage.FileRecord) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.peers[nodeID]
+	if !ok {
+		return
+	}
+	kept := make([]storage.FileRecord, 0, len(p.files)+len(mountFiles))
+	var oldMountBytes int64
+	oldMountCnt := 0
+	for _, f := range p.files {
+		if f.MountID == mountID {
+			oldMountCnt++
+			oldMountBytes += f.Size
+			continue
+		}
+		kept = append(kept, f)
+	}
+	var newMountBytes int64
+	for i := range mountFiles {
+		rec := mountFiles[i]
+		rec.NodeID = p.status.NodeID
+		rec.NodeName = p.status.NodeName
+		rec.NodeOS = p.status.OS
+		rec.NodeOnline = true
+		newMountBytes += rec.Size
+		kept = append(kept, rec)
+	}
+	p.files = kept
+	p.status.FileCount = len(kept)
+	p.status.ZeroCopyCount = max(0, p.status.ZeroCopyCount-oldMountCnt) + len(mountFiles)
+	p.status.ZeroCopyBytes = max(0, p.status.ZeroCopyBytes-oldMountBytes) + newMountBytes
+}
+
+func (m *Manager) annotateSelfRecords(recs []storage.FileRecord) []storage.FileRecord {
+	selfID := m.NodeID()
+	selfName := m.NodeName()
+	for i := range recs {
+		recs[i].NodeID = selfID
+		recs[i].NodeName = selfName
+		recs[i].NodeOS = runtime.GOOS
+		recs[i].NodeOnline = true
+	}
+	return recs
+}
+
+func (m *Manager) ProxyImportLocal(nodeID, srcPath, folderPath, uploader string, allowedUsers []string, dev storage.DeviceInfo) ([]storage.FileRecord, storage.ImportSummary, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		recs, summary, err := m.store.ImportLocalPath(srcPath, folderPath, uploader, allowedUsers, dev)
+		return m.annotateSelfRecords(recs), summary, err
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return nil, storage.ImportSummary{}, err
+	}
+	var resp struct {
+		Files   []storage.FileRecord  `json:"files"`
+		Summary storage.ImportSummary `json:"summary"`
+	}
+	reqBody := map[string]any{
+		"source_path":   srcPath,
+		"folder_path":   folderPath,
+		"uploader":      uploader,
+		"allowed_users": allowedUsers,
+		"device_fp":     dev.FP,
+		"device_name":   dev.Name,
+		"device_ip":     dev.IP,
+		"device_detail": dev.Detail,
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/import-local", reqBody, &resp); err != nil {
+		return nil, storage.ImportSummary{}, err
+	}
+	for i := range resp.Files {
+		resp.Files[i].NodeID = peer.NodeID
+		resp.Files[i].NodeName = peer.NodeName
+		resp.Files[i].NodeOS = peer.OS
+		resp.Files[i].NodeOnline = true
+		m.AddPeerFile(peer.NodeID, resp.Files[i])
+	}
+	return resp.Files, resp.Summary, nil
+}
+
+func (m *Manager) ListAllMounts() []ClusterMountView {
+	selfID := m.NodeID()
+	selfName := m.NodeName()
+	local := m.store.ListMounts()
+	out := make([]ClusterMountView, 0, len(local))
+	for _, entry := range local {
+		out = append(out, ClusterMountView{
+			MountEntry: entry,
+			NodeID:     selfID,
+			NodeName:   selfName,
+			IsSelf:     true,
+		})
+	}
+
+	m.mu.RLock()
+	peers := make([]NodeStatus, 0, len(m.peers))
+	for _, p := range m.peers {
+		if time.Since(p.status.LastSeen) <= PeerTimeout && strings.TrimSpace(p.status.HTTPURL) != "" {
+			peers = append(peers, p.status)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, peer := range peers {
+		var resp struct {
+			Mounts []storage.MountEntry `json:"mounts"`
+		}
+		if err := m.doSignedPeerJSON(peer, http.MethodGet, "/internal/cluster/mounts", nil, &resp); err != nil {
+			continue
+		}
+		for _, entry := range resp.Mounts {
+			out = append(out, ClusterMountView{
+				MountEntry: entry,
+				NodeID:     peer.NodeID,
+				NodeName:   peer.NodeName,
+				IsSelf:     false,
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsSelf != out[j].IsSelf {
+			return out[i].IsSelf
+		}
+		if out[i].NodeName != out[j].NodeName {
+			return out[i].NodeName < out[j].NodeName
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out
+}
+
+func (m *Manager) AddNodeMount(nodeID, dirPath, alias, addedBy string, allowedUsers []string) (storage.MountEntry, int, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		return m.store.AddMount(dirPath, alias, addedBy, allowedUsers)
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return storage.MountEntry{}, 0, err
+	}
+	var resp struct {
+		Mount storage.MountEntry   `json:"mount"`
+		Added int                  `json:"added"`
+		Files []storage.FileRecord `json:"files,omitempty"`
+	}
+	reqBody := map[string]any{
+		"dir_path":      dirPath,
+		"alias":         alias,
+		"added_by":      addedBy,
+		"allowed_users": allowedUsers,
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/mounts", reqBody, &resp); err != nil {
+		return storage.MountEntry{}, 0, err
+	}
+	m.replacePeerMountFiles(peer.NodeID, resp.Mount.ID, resp.Files)
+	return resp.Mount, resp.Added, nil
+}
+
+func (m *Manager) RemoveNodeMount(nodeID, mountID string) (int, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		return m.store.RemoveMount(mountID)
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Removed int `json:"removed"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodDelete, "/internal/cluster/mounts/"+url.PathEscape(mountID), nil, &resp); err != nil {
+		return 0, err
+	}
+	m.RemovePeerMountFiles(peer.NodeID, mountID)
+	return resp.Removed, nil
+}
+
+func (m *Manager) SyncNodeMount(nodeID, mountID string) (storage.MountEntry, storage.MountSyncResult, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		res, err := m.store.SyncMount(mountID)
+		if err != nil {
+			return storage.MountEntry{}, res, err
+		}
+		for _, entry := range m.store.ListMounts() {
+			if entry.ID == mountID {
+				return entry, res, nil
+			}
+		}
+		return storage.MountEntry{ID: mountID}, res, nil
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return storage.MountEntry{}, storage.MountSyncResult{}, err
+	}
+	var resp struct {
+		Mount  storage.MountEntry      `json:"mount"`
+		Result storage.MountSyncResult `json:"result"`
+		Files  []storage.FileRecord    `json:"files,omitempty"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/mounts/"+url.PathEscape(mountID)+"/sync", nil, &resp); err != nil {
+		return storage.MountEntry{}, storage.MountSyncResult{}, err
+	}
+	m.replacePeerMountFiles(peer.NodeID, mountID, resp.Files)
+	return resp.Mount, resp.Result, nil
 }
 
 func (m *Manager) SetLocalStorageDir(newDir string, migrateExisting bool) (NodeStatus, int, error) {

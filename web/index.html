@@ -37,7 +37,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">HETEROGENEOUS LAN STORAGE CLUSTER</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.11</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.12</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -115,7 +115,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.11</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.12</span></div>
           <div class="brand-sub">分布式存储与汇总中心</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs mobile-only" type="button" aria-label="关闭侧栏">
@@ -275,6 +275,7 @@
                 <button id="btn-pick-files" class="btn btn-primary btn-sm" type="button">选择文件</button>
                 <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">选择文件夹</button>
                 <button id="btn-create-txt" class="btn btn-ghost btn-sm" type="button">新建 TXT</button>
+                <button id="btn-import-local" class="btn btn-ghost btn-sm admin-only-control hidden" type="button">本机零拷贝导入</button>
               </div>
             </div>
           </section>
@@ -473,6 +474,53 @@
         <textarea id="create-txt-content" class="editor-textarea create-txt-textarea" spellcheck="false" placeholder="在此直接输入 .txt 文本内容..."></textarea>
         <div class="editor-footer">
           <button id="create-txt-save-btn" class="btn btn-primary btn-sm" type="button">创建并上传 .txt (Ctrl+S)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 本机零拷贝导入 / 目录挂载弹窗 -->
+  <div id="local-import-modal" class="modal hidden">
+    <div class="modal-backdrop" id="local-import-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div class="modal-title">本机零拷贝导入与目录挂载</div>
+        <div class="modal-header-actions">
+          <span class="ver-badge">仅管理员可用</span>
+          <button id="local-import-close" class="btn btn-ghost btn-xs" type="button">取消</button>
+        </div>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="create-txt-field">
+          <span class="create-txt-label">目标执行节点</span>
+          <select id="local-import-node" class="search-input"></select>
+        </div>
+        <div class="create-txt-field">
+          <span class="create-txt-label">接入方式</span>
+          <div class="local-import-mode-grid">
+            <button type="button" class="local-import-mode-btn active" data-local-import-mode="import">
+              <div class="local-import-mode-title">零拷贝导入（文件 / 文件夹）</div>
+              <div class="local-import-mode-desc">同盘创建硬链接（防误删/防移动），跨盘自动转为只读外链引用</div>
+            </button>
+            <button type="button" class="local-import-mode-btn" data-local-import-mode="mount">
+              <div class="local-import-mode-title">挂载本机目录（虚拟共享库）</div>
+              <div class="local-import-mode-desc">直接映射已有海量目录，不复制文件、不占配额，定时自动同步</div>
+            </button>
+          </div>
+        </div>
+        <div class="create-txt-field">
+          <label class="create-txt-label" for="local-import-path">主机绝对路径</label>
+          <input id="local-import-path" class="search-input" type="text" placeholder="例如：E:\Movies 或 /mnt/media/archive.iso" autocomplete="off" />
+        </div>
+        <div class="create-txt-field">
+          <label class="create-txt-label" for="local-import-folder" id="local-import-folder-label">目标虚拟目录（选填）</label>
+          <input id="local-import-folder" class="search-input" type="text" placeholder="留空自动使用目录名或保存于根目录" autocomplete="off" />
+        </div>
+        <div class="local-import-hint-box" id="local-import-hint">
+          同磁盘分区将自动创建 OS 硬链接（0 额外磁盘占用，且原文件重命名/移动/删除后 LFH 仍完整可读）；跨磁盘分区将转为外链引用并自动巡检源路径状态。
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px;">
+          <button id="local-import-submit-btn" class="btn btn-primary btn-sm" type="button">立即零拷贝导入</button>
         </div>
       </div>
     </div>
@@ -818,6 +866,18 @@
 
           <div class="admin-section">
             <div class="admin-section-head">
+              <div class="admin-section-title" style="margin-bottom:0;">本机目录零拷贝挂载管理</div>
+              <div class="row-actions">
+                <button id="btn-add-mount" class="btn btn-primary btn-xs" type="button">新增挂载目录</button>
+                <button id="btn-refresh-mounts" class="btn btn-ghost btn-xs" type="button">刷新挂载列表</button>
+              </div>
+            </div>
+            <div class="switch-desc" style="margin-bottom:8px;">直接将各节点已有文件夹挂载为只读共享库（0 复制、不占配额、自动同步文件增删改，移除挂载时完整保留原文件）。</div>
+            <div id="cluster-mounts-list" class="mount-list"></div>
+          </div>
+
+          <div class="admin-section">
+            <div class="admin-section-head">
               <div class="admin-section-title" style="margin-bottom:0;">局域网节点主动探测与手动组网</div>
               <span id="discover-status-hint" class="switch-desc">可主动扫描同局域网 LFH 实例，或直接输入对方 IP:端口 进行探测并纳管</span>
             </div>
@@ -871,7 +931,7 @@
               <div class="update-meta-grid">
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">当前版本</span>
-                  <strong id="upd-cur-version">V0.11.21.11</strong>
+                  <strong id="upd-cur-version">V0.11.21.12</strong>
                 </div>
                 <div class="device-summary-row">
                   <span class="device-summary-lbl">最新版本</span>

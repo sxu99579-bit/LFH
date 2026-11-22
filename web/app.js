@@ -21,7 +21,9 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.11",
+  appVersion: "V0.11.21.12",
+  localImportMode: "import",
+  mounts: [],
   updateStatus: null,
   discoveredNodes: [],
   adoptAuthMode: "admin",
@@ -665,7 +667,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.11";
+  const ver = state.appVersion || "V0.11.21.12";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -1013,6 +1015,7 @@ function startLiveSync() {
       const modal = $("settings-modal");
       if (modal && !modal.classList.contains("hidden") && state.settingsTab === "cluster") {
         loadPassiveDiscovered();
+        loadAdminMounts();
       }
       return;
     }
@@ -1568,6 +1571,10 @@ function formatUpdateMethodLabel(method, ver = 1) {
       return "手动上传新版本";
     case "version_restore":
       return "历史版本回滚";
+    case "local_import":
+      return "本机零拷贝导入";
+    case "mount_sync":
+      return "目录挂载同步";
     case "initial_upload":
     default:
       return "初始上传";
@@ -1581,35 +1588,55 @@ function formatUpdateMethodBadge(method, ver = 1) {
   return `<span class="update-method-pill ${cls}">${escapeHtml(label)}</span>`;
 }
 
+function formatStorageModeBadge(rec) {
+  const mode = String(rec?.storage_mode || "").trim();
+  const badges = [];
+  if (mode === "hardlink") {
+    badges.push(`<span class="zc-badge zc-hardlink" title="同盘 OS 硬链接（零拷贝、原文件重命名/删除后仍可读）">硬链接</span>`);
+  } else if (mode === "ref") {
+    badges.push(`<span class="zc-badge zc-ref" title="跨盘零拷贝引用（直接读取原路径）">外链引用</span>`);
+  } else if (mode === "mount") {
+    badges.push(`<span class="zc-badge zc-mount" title="本机目录零拷贝挂载（随原目录自动同步）">目录挂载</span>`);
+  }
+  if (rec?.source_missing) {
+    badges.push(`<span class="zc-badge zc-missing" title="原始路径上的源文件已移动或删除，外部引用失效">源文件已失效</span>`);
+  }
+  return badges.join("");
+}
+
 function buildRecordMeta(rec) {
   const ext = (rec?.ext || "").toLowerCase().replace(/^\./, "");
   const online = rec.node_online !== false;
   const isArch = isArchiveRec(rec);
   const isImg = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"].includes(ext);
+  const isMountRec = rec.storage_mode === "mount";
   const canPrev = canPreview(rec);
-  const canEdit = isEditableTextRec(rec);
+  const canEdit = isEditableTextRec(rec) && !isMountRec;
   const previewLabel = isArch ? "在线解压查看" : "在线打开";
   const previewBtn = canPrev
-    ? `<button class="btn btn-primary btn-xs" data-action="preview" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"}>${previewLabel}</button>`
+    ? `<button class="btn btn-primary btn-xs" data-action="preview" data-id="${rec.id}" ${online && !rec.source_missing ? "" : "disabled title='节点离线或源文件缺失'"}>${previewLabel}</button>`
     : "";
   const editBtn = canEdit
-    ? `<button class="btn btn-ghost btn-xs" type="button" data-action="edit" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"} title="在线文本编辑并保存为新版本">编辑</button>`
+    ? `<button class="btn btn-ghost btn-xs" type="button" data-action="edit" data-id="${rec.id}" ${online && !rec.source_missing ? "" : "disabled title='节点离线或源文件缺失'"} title="在线文本编辑并保存为新版本">编辑</button>`
     : "";
   const verNum = Number(rec.version || 1);
   const verCnt = Number(rec.version_count || (Array.isArray(rec.versions) ? rec.versions.length + 1 : 1));
   const methodLabel = formatUpdateMethodLabel(rec.update_method, verNum);
   const showMethodInChip = verCnt > 1 || rec.update_method === "online_edit" || rec.update_method === "version_restore";
   const verBadgeHtml = `<button type="button" class="ver-chip ${verCnt > 1 ? "multi" : ""}" data-action="versions" data-id="${rec.id}" title="当前 v${verNum} · 更新方式：${escapeHtml(methodLabel)} · 更新用户：${escapeHtml(rec.uploader || "-")} · 点击查看版本历史">${ICON_VERSION_BRANCH_SVG}<span>v${verNum}${verCnt > 1 ? ` · ${verCnt}版` : ""}${showMethodInChip ? ` · ${escapeHtml(methodLabel)}` : ""}</span></button>`;
+  const storageBadgeHtml = formatStorageModeBadge(rec);
   const verBtn = `<button class="btn btn-ghost btn-xs" type="button" data-action="versions" data-id="${rec.id}" title="文件版本历史控制">版本${verCnt > 1 ? `(${verCnt})` : ""}</button>`;
   const propsBtn = `<button class="btn btn-ghost btn-xs" type="button" data-action="props" data-id="${rec.id}">属性</button>`;
-  const dlHtml = online
-    ? `<a class="btn btn-ghost btn-xs" href="/api/files/${rec.id}/download">下载</a>`
-    : `<button class="btn btn-ghost btn-xs" type="button" disabled title="节点离线">离线</button>`;
+  const dlHtml = !online
+    ? `<button class="btn btn-ghost btn-xs" type="button" disabled title="节点离线">离线</button>`
+    : rec.source_missing
+    ? `<button class="btn btn-ghost btn-xs" type="button" disabled title="源文件已移动或删除">失效</button>`
+    : `<a class="btn btn-ghost btn-xs" href="/api/files/${rec.id}/download">下载</a>`;
   const canDel = state.user && (state.user.role === "admin" || state.user.username === rec.uploader);
-  const accessBtn = canDel
+  const accessBtn = canDel && !isMountRec
     ? `<button class="btn btn-ghost btn-xs" type="button" data-action="access" data-id="${rec.id}" title="指定哪些用户可见与下载">${Array.isArray(rec.allowed_users) && rec.allowed_users.length > 0 ? "权限*" : "权限"}</button>`
     : "";
-  const delBtn = canDel
+  const delBtn = canDel && !isMountRec
     ? `<button class="btn btn-danger btn-xs" data-action="delete" data-id="${rec.id}" ${online ? "" : "disabled title='节点离线'"}>删除</button>`
     : "";
 
@@ -1653,6 +1680,7 @@ function buildRecordMeta(rec) {
     previewBtn,
     editBtn,
     verBadgeHtml,
+    storageBadgeHtml,
     verBtn,
     propsBtn,
     accessBtn,
@@ -1702,6 +1730,7 @@ function renderFilesTable() {
             <span class="win-file-icon-sm">${getWinFileIconSvg(rec, 22)}</span>
             <span class="file-main-name">${escapeHtml(rec.name)}</span>
             ${meta.verBadgeHtml}
+            ${meta.storageBadgeHtml}
           </div>
           ${meta.folderHtml}
           ${meta.accessBadgeHtml}
@@ -1775,6 +1804,7 @@ function renderFilesGrid() {
         </div>
         ${meta.folderHtml}
         ${meta.accessBadgeHtml}
+        ${meta.storageBadgeHtml ? `<div class="file-card-meta">${meta.storageBadgeHtml}</div>` : ""}
         <div class="file-card-meta">
           <span>${formatSize(rec.size)}</span>
           <span>·</span>
@@ -3659,6 +3689,12 @@ function renderNodeHealthPage() {
               <div class="health-meta-v" style="color:${totErr > 0 ? "var(--danger-text)" : "var(--success-text)"}">${totErr} 次错误</div>
               <div class="health-meta-sub">读错误 ${rErr} 次 · 写错误 ${wErr} 次</div>
             </div>
+            ${Number(n.zero_copy_count || 0) > 0 || Number(n.mount_count || 0) > 0 ? `
+            <div class="health-meta-item">
+              <div class="health-meta-k">${ICON_SERVER_SVG}<span>零拷贝节省</span></div>
+              <div class="health-meta-v">${formatSize(n.zero_copy_bytes || 0)}</div>
+              <div class="health-meta-sub">零拷贝索引 ${Number(n.zero_copy_count || 0)} 个文件 · 挂载目录 ${Number(n.mount_count || 0)} 个</div>
+            </div>` : ""}
           </div>
         </div>
       `;
@@ -3853,8 +3889,21 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
     : "";
 
   const physicalPath = (meta && meta.disk_path) || fileRec.storage_dir || "";
+  const sourcePathVal = (meta && meta.source_path) || fileRec.source_path || "";
+  const rawMode = (meta && meta.storage_mode) || fileRec.storage_mode || "copy";
+  const storageModeText =
+    rawMode === "hardlink"
+      ? "同盘硬链接（零拷贝·防误删）"
+      : rawMode === "ref"
+      ? "跨盘零拷贝引用"
+      : rawMode === "mount"
+      ? "本机目录零拷贝挂载"
+      : "普通副本";
+  const isMissingSrc = Boolean((meta && meta.source_missing) || fileRec.source_missing);
+  const storageModeHtml = `${escapeHtml(storageModeText)}${isMissingSrc ? ` <span class="zc-badge zc-missing">源文件已失效</span>` : ""}`;
   const adminPathRow = isAdmin
-    ? `<div class="props-row"><div class="props-key">物理存储位置</div><div class="props-val props-mono">${physicalPath ? `<span>${escapeHtml(physicalPath)}</span> <button type="button" class="btn btn-ghost btn-xs" id="props-copy-path">复制路径</button>` : `<span style="color:var(--muted)">获取中...</span>`}</div></div>`
+    ? `<div class="props-row"><div class="props-key">物理存储位置</div><div class="props-val props-mono">${physicalPath ? `<span>${escapeHtml(physicalPath)}</span> <button type="button" class="btn btn-ghost btn-xs" id="props-copy-path">复制路径</button>` : `<span style="color:var(--muted)">获取中...</span>`}</div></div>
+       ${sourcePathVal ? `<div class="props-row"><div class="props-key">源文件路径</div><div class="props-val props-mono">${escapeHtml(sourcePathVal)}</div></div>` : ""}`
     : "";
 
   let mimeText = "识别中...";
@@ -3915,6 +3964,7 @@ function buildPropsBodyHtml(fileRec, meta, metaError) {
     <div class="props-group">
       <div class="props-group-title">存储节点与设备指纹</div>
       <div class="props-row"><div class="props-key">所在节点</div><div class="props-val">${escapeHtml(nodeLabel)}</div></div>
+      <div class="props-row"><div class="props-key">存储方式</div><div class="props-val">${storageModeHtml}</div></div>
       ${adminPathRow}
       <div class="props-row"><div class="props-key">设备名称</div><div class="props-val">${escapeHtml(fileRec.device_name || "未知设备")}</div></div>
       <div class="props-row"><div class="props-key">设备指纹</div><div class="props-val props-mono">${escapeHtml(fileRec.device_fp || "未记录")}</div></div>
@@ -4023,7 +4073,195 @@ function switchSettingsTab(tab) {
   }
   if (tab === "cluster" && state.user && state.user.role === "admin") {
     loadPassiveDiscovered();
+    loadAdminMounts();
   }
+}
+
+function setLocalImportMode(mode) {
+  const m = mode === "mount" ? "mount" : "import";
+  state.localImportMode = m;
+  document.querySelectorAll("[data-local-import-mode]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.localImportMode === m);
+  });
+  const folderLabel = $("local-import-folder-label");
+  const folderInput = $("local-import-folder");
+  const pathInput = $("local-import-path");
+  const hintBox = $("local-import-hint");
+  const submitBtn = $("local-import-submit-btn");
+  if (m === "mount") {
+    if (folderLabel) folderLabel.textContent = "挂载共享别名（选填）";
+    if (folderInput) folderInput.placeholder = "例如：影音库（留空自动使用目录名）";
+    if (pathInput) pathInput.placeholder = "例如：E:\\Movies 或 /mnt/media";
+    if (hintBox) {
+      hintBox.textContent = "挂载目录不复制文件、不占用 LFH 上传配额；后台每 15 秒自动同步目录文件增删改，移除挂载时严格保留磁盘原文件。";
+    }
+    if (submitBtn) submitBtn.textContent = "确认挂载目录";
+  } else {
+    if (folderLabel) folderLabel.textContent = "目标虚拟目录（选填）";
+    if (folderInput) folderInput.placeholder = "留空自动使用目录名或保存于根目录";
+    if (pathInput) pathInput.placeholder = "例如：E:\\Movies\\demo.mp4 或 /mnt/data";
+    if (hintBox) {
+      hintBox.textContent = "同磁盘分区将自动创建 OS 硬链接（0 额外磁盘占用，且原文件重命名/移动/删除后 LFH 仍完整可读）；跨磁盘分区将转为外链引用并自动巡检源路径状态。";
+    }
+    if (submitBtn) submitBtn.textContent = "立即零拷贝导入";
+  }
+}
+
+function openLocalImportModal(defaultMode = "import") {
+  const modal = $("local-import-modal");
+  if (!modal) return;
+  const sel = $("local-import-node");
+  if (sel) {
+    const nodes = (state.pool && Array.isArray(state.pool.nodes) ? state.pool.nodes : []).filter((n) => n.online);
+    if (nodes.length > 0) {
+      sel.innerHTML = nodes
+        .map((n) => {
+          const roleTag = n.role === "entry" ? "主节点" : "从节点";
+          return `<option value="${escapeHtml(n.node_id)}">${escapeHtml(n.node_name)} (${roleTag} · ${escapeHtml(n.os || "")})</option>`;
+        })
+        .join("");
+      const selfNode = nodes.find((n) => n.is_self) || nodes[0];
+      if (selfNode) sel.value = selfNode.node_id;
+    } else {
+      sel.innerHTML = `<option value="">当前主节点</option>`;
+    }
+  }
+  if ($("local-import-path")) $("local-import-path").value = "";
+  if ($("local-import-folder")) $("local-import-folder").value = "";
+  setLocalImportMode(defaultMode);
+  modal.classList.remove("hidden");
+  setTimeout(() => {
+    $("local-import-path")?.focus();
+  }, 20);
+}
+
+function closeLocalImportModal() {
+  if ($("local-import-modal")) $("local-import-modal").classList.add("hidden");
+}
+
+async function submitLocalImport() {
+  const mode = state.localImportMode === "mount" ? "mount" : "import";
+  const nodeID = ($("local-import-node")?.value || "").trim();
+  const pathVal = ($("local-import-path")?.value || "").trim();
+  const folderVal = ($("local-import-folder")?.value || "").trim();
+  if (!pathVal) {
+    showToast(mode === "mount" ? "请输入要挂载的本机目录绝对路径" : "请输入要零拷贝导入的文件或目录绝对路径", "error");
+    $("local-import-path")?.focus();
+    return;
+  }
+
+  const btn = $("local-import-submit-btn");
+  const origText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = mode === "mount" ? "正在扫描并挂载..." : "正在零拷贝导入...";
+  }
+  state.isUploadingSelf = true;
+  try {
+    if (mode === "mount") {
+      const data = await api("/api/admin/mounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node_id: nodeID,
+          dir_path: pathVal,
+          alias: folderVal,
+          allowed_users: Array.isArray(state.uploadAllowedUsers) ? state.uploadAllowedUsers : [],
+        }),
+      });
+      if (Array.isArray(data.mounts)) {
+        state.mounts = data.mounts;
+        renderAdminMounts();
+      }
+      if (data.pool) state.pool = data.pool;
+      const added = Number(data.added || 0);
+      showToast(`已挂载目录「${data.mount?.alias || pathVal}」（新增 ${added} 个文件索引，0 磁盘拷贝）`, "success");
+      closeLocalImportModal();
+      await refreshAll();
+    } else {
+      const data = await api("/api/admin/files/import-local", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node_id: nodeID,
+          source_path: pathVal,
+          folder_path: folderVal,
+          allowed_users: Array.isArray(state.uploadAllowedUsers) ? state.uploadAllowedUsers : [],
+        }),
+      });
+      if (data.pool) state.pool = data.pool;
+      const sm = data.summary || {};
+      showToast(
+        `零拷贝导入完成：共 ${Number(sm.total_imported || 0)} 个文件（硬链接 ${Number(sm.hardlink_count || 0)}，外链引用 ${Number(sm.ref_count || 0)}）`,
+        "success"
+      );
+      closeLocalImportModal();
+      await refreshAll();
+    }
+  } catch (err) {
+    showToast(err.message || "操作失败", "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+    setTimeout(() => {
+      state.isUploadingSelf = false;
+    }, 600);
+  }
+}
+
+async function loadAdminMounts() {
+  const wrap = $("cluster-mounts-list");
+  if (!wrap || !state.user || state.user.role !== "admin") return;
+  try {
+    const data = await api("/api/admin/mounts");
+    state.mounts = Array.isArray(data.mounts) ? data.mounts : [];
+    renderAdminMounts();
+  } catch (err) {
+    wrap.innerHTML = `<div style="color:var(--danger);font-size:12.5px;">加载挂载列表失败：${escapeHtml(err.message || "未知错误")}</div>`;
+  }
+}
+
+function renderAdminMounts() {
+  const wrap = $("cluster-mounts-list");
+  if (!wrap) return;
+  const list = Array.isArray(state.mounts) ? state.mounts : [];
+  if (list.length === 0) {
+    wrap.innerHTML = `<div style="color:var(--muted);font-size:12.5px;padding:6px 0;">暂未配置本机挂载目录。点击「新增挂载目录」可将主机已有文件夹直接共享至文件中心（不复制文件、不占用配额）。</div>`;
+    return;
+  }
+  wrap.innerHTML = list
+    .map((m) => {
+      const ok = m.status !== "missing";
+      const pill = ok
+        ? `<span class="status-pill status-ok">正常同步</span>`
+        : `<span class="status-pill status-off">目录不可访问</span>`;
+      const syncTxt = m.last_sync_at ? formatRelativeTime(m.last_sync_at) : "未扫描";
+      return `
+        <div class="mount-card">
+          <div class="mount-card-head">
+            <div class="mount-card-title">
+              <span class="zc-badge zc-mount">挂载</span>
+              <span>${escapeHtml(m.alias || "未命名目录")}</span>
+              <span class="cat-tag">${escapeHtml(m.node_name || m.node_id || "本机")}${m.is_self ? "（本机）" : ""}</span>
+              ${pill}
+            </div>
+            <div class="row-actions">
+              <button type="button" class="btn btn-ghost btn-xs" data-sync-mount="${escapeHtml(m.id)}" data-mount-node="${escapeHtml(m.node_id)}">立即扫描</button>
+              <button type="button" class="btn btn-danger btn-xs" data-del-mount="${escapeHtml(m.id)}" data-mount-node="${escapeHtml(m.node_id)}" data-mount-alias="${escapeHtml(m.alias || m.dir_path)}">移除挂载</button>
+            </div>
+          </div>
+          <div class="mount-card-meta">
+            <span>路径：<code>${escapeHtml(m.dir_path)}</code></span>
+            <span>文件：${Number(m.file_count || 0)} 个 (${formatSize(m.total_bytes || 0)})</span>
+            <span>上次同步：${escapeHtml(syncTxt)}</span>
+          </div>
+          ${m.last_error ? `<div style="color:var(--danger);font-size:11.5px;">异常信息：${escapeHtml(m.last_error)}</div>` : ""}
+        </div>
+      `;
+    })
+    .join("");
 }
 
 async function openSettingsModal(defaultTab = "general") {
@@ -4065,6 +4303,7 @@ async function refreshAdminData() {
 
     renderAdminCluster();
     loadPassiveDiscovered();
+    loadAdminMounts();
     renderInvitesTable(invData.invites || []);
     renderUsersTable(usersData.users || []);
     if (updateData && updateData.status) {
@@ -4756,6 +4995,7 @@ function bindEvents() {
     };
   }
   if ($("btn-create-txt")) $("btn-create-txt").onclick = openCreateTxtModal;
+  if ($("btn-import-local")) $("btn-import-local").onclick = () => openLocalImportModal("import");
 
   // Highlight dropzone bar visually (actual drop handled once at window level to support full-screen auto-upload)
   const dz = $("dropzone");
@@ -5002,6 +5242,20 @@ function bindEvents() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         saveCreateTxtFile();
+      }
+    };
+  }
+  if ($("local-import-close")) $("local-import-close").onclick = closeLocalImportModal;
+  if ($("local-import-backdrop")) $("local-import-backdrop").onclick = closeLocalImportModal;
+  if ($("local-import-submit-btn")) $("local-import-submit-btn").onclick = submitLocalImport;
+  document.querySelectorAll("[data-local-import-mode]").forEach((btn) => {
+    btn.onclick = () => setLocalImportMode(btn.dataset.localImportMode);
+  });
+  if ($("local-import-path")) {
+    $("local-import-path").onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitLocalImport();
       }
     };
   }
@@ -5862,6 +6116,68 @@ function bindEvents() {
   }
   if ($("btn-save-update-config")) {
     $("btn-save-update-config").onclick = saveUpdateConfig;
+  }
+
+  if ($("btn-add-mount")) {
+    $("btn-add-mount").onclick = () => openLocalImportModal("mount");
+  }
+  if ($("btn-refresh-mounts")) {
+    $("btn-refresh-mounts").onclick = loadAdminMounts;
+  }
+  if ($("cluster-mounts-list")) {
+    $("cluster-mounts-list").onclick = async (e) => {
+      const syncBtn = e.target.closest("[data-sync-mount]");
+      if (syncBtn) {
+        const mountID = syncBtn.dataset.syncMount;
+        const nodeID = syncBtn.dataset.mountNode || "";
+        const origText = syncBtn.textContent;
+        syncBtn.disabled = true;
+        syncBtn.textContent = "扫描中...";
+        try {
+          const data = await api(`/api/admin/mounts/${encodeURIComponent(nodeID)}/${encodeURIComponent(mountID)}/sync`, {
+            method: "POST",
+          });
+          if (Array.isArray(data.mounts)) {
+            state.mounts = data.mounts;
+            renderAdminMounts();
+          }
+          if (data.pool) state.pool = data.pool;
+          const r = data.result || {};
+          showToast(`扫描完成：新增 ${Number(r.added || 0)}，更新 ${Number(r.updated || 0)}，移除 ${Number(r.removed || 0)}`, "success");
+          await refreshAll();
+        } catch (err) {
+          showToast(err.message || "扫描挂载目录失败", "error");
+        } finally {
+          syncBtn.disabled = false;
+          syncBtn.textContent = origText;
+        }
+        return;
+      }
+
+      const delBtn = e.target.closest("[data-del-mount]");
+      if (delBtn) {
+        const mountID = delBtn.dataset.delMount;
+        const nodeID = delBtn.dataset.mountNode || "";
+        const alias = delBtn.dataset.mountAlias || mountID;
+        if (!confirm(`确定移除挂载目录「${alias}」吗？\n\n仅取消 LFH 共享索引，磁盘上的原始文件将 100% 完整保留。`)) return;
+        delBtn.disabled = true;
+        try {
+          const data = await api(`/api/admin/mounts/${encodeURIComponent(nodeID)}/${encodeURIComponent(mountID)}`, {
+            method: "DELETE",
+          });
+          if (Array.isArray(data.mounts)) {
+            state.mounts = data.mounts;
+            renderAdminMounts();
+          }
+          if (data.pool) state.pool = data.pool;
+          showToast(`已移除挂载「${alias}」（清理 ${Number(data.removed || 0)} 条索引，原文件已保留）`, "success");
+          await refreshAll();
+        } catch (err) {
+          delBtn.disabled = false;
+          showToast(err.message || "移除挂载失败", "error");
+        }
+      }
+    };
   }
 
   // Password form inside Settings -> General

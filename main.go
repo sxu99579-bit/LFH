@@ -375,6 +375,19 @@ func main() {
 	)
 	updaterMgr.Start(ctx)
 
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				srv.SyncLocalZeroCopy()
+			}
+		}
+	}()
+
 	st := clusterMgr.SelfStatus()
 	fmt.Printf("%s %s 已启动:\n", version.AppName, version.Version)
 	fmt.Printf("  节点角色: %s (%s)\n", st.Role, st.NodeName)
