@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.2</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.3</code>
 </p>
 
 ---
@@ -162,7 +162,8 @@ All backend packages use pure Go stdlib with embedded frontend static assets (`/
 │   ├── storage/                # File store, device fingerprinting & query facets
 │   ├── updater/                # GitHub Release check, verification & live swap
 │   └── version/                # App name, release tag & default repo
-├── web/                        # Dependency-free frontend (HTML, CSS, JS, logo.png)
+├── frontend/                   # React 19 + TypeScript + Vite + Tailwind v4 frontend source (inspired by shadcn-admin)
+├── web/                        # Compiled frontend bundle embedded via Go (index.html, mobile.html, assets)
 ├── Dockerfile                  # Multi-stage Alpine container build
 ├── docker-compose.yml          # Ready-to-run Compose definition
 ├── cluster-config.example.json # Sanitized cluster node config template
@@ -181,4 +182,5 @@ Released under the [**MIT License**](./LICENSE) — free to use, modify, redistr
 
 ## Acknowledgements
 
-Special thanks to **Google Antigravity** and **Gemini** for their assistance throughout architecture design, distributed LAN clustering iteration, UI polish, and engineering delivery.
+- Special thanks to [**satnaing/shadcn-admin**](https://github.com/satnaing/shadcn-admin) (MIT License) and [**shadcn/ui**](https://ui.shadcn.com/) for the open-source admin UI architecture and design system that inspired LFH's desktop and mobile workspaces.
+- Thanks to **Google Antigravity** and **Gemini** for assistance throughout architecture design, distributed LAN clustering iteration, UI polish, and engineering delivery.

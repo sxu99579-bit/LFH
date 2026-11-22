@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN" data-layout="desktop">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="lfh-entry" content="index.html" />
+    <title>LFH - 分布式局域网文件与算力平台</title>
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('lan_filehub_theme') || 'dark';
+          var isDark = t !== 'light';
+          document.documentElement.classList.toggle('dark', isDark);
+          document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+        } catch (e) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body class="bg-background text-foreground antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

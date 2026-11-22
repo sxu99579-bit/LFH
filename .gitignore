@@ -16,3 +16,6 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# Frontend dependencies
+frontend/node_modules/

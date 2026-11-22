@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.2</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.22.3</code>
 </p>
 
 ---
@@ -162,7 +162,8 @@ go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
 │   ├── storage/                # 本地文件写入、设备指纹追踪与聚合索引
 │   ├── updater/                # GitHub Release 检查、校验与零停机替换升级
 │   └── version/                # 应用标识与版本信息
-├── web/                        # 无构建依赖原生前端（HTML / CSS / JS + 图标）
+├── frontend/                   # React 19 + TypeScript + Vite + Tailwind v4 前端源码（参考 shadcn-admin 风格）
+├── web/                        # 预构建前端产物（内嵌至 Go 单文件：index.html / mobile.html / assets）
 ├── Dockerfile                  # 多阶段生产容器镜像构建文件
 ├── docker-compose.yml          # 容器编排示例配置
 ├── cluster-config.example.json # 节点配置模板（已过滤敏感配置）
@@ -181,4 +182,5 @@ go test -count=1 ./...
 
 ## 开发致谢
 
-在此特别感谢 **Google Antigravity** 与 **Gemini** 在本项目架构设计、分布式组网方案演进、界面细节打磨及工程自动化构建过程中提供的重要支持与协助。
+- 感谢 [**satnaing/shadcn-admin**](https://github.com/satnaing/shadcn-admin)（MIT License）及 [**shadcn/ui**](https://ui.shadcn.com/) 提供的优秀开源后台 UI 架构与设计规范，本项目的桌面端与移动端工作台界面灵感及设计令牌均致敬并参考了该开源项目。
+- 感谢 **Google Antigravity** 与 **Gemini** 在本项目架构设计、分布式组网方案演进、界面细节打磨及工程自动化构建过程中提供的重要支持与协助。
