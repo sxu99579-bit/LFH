@@ -12,6 +12,7 @@ import {
   Search,
   Server,
   ShieldCheck,
+  Smartphone,
   Terminal,
   Trash2,
   UserCheck,
@@ -139,6 +140,27 @@ export function SettingsPage({
   const [logQuery, setLogQuery] = useState('')
   const [logsAutoRefresh, setLogsAutoRefresh] = useState(true)
   const [auditQuery, setAuditQuery] = useState('')
+
+  // Personal API Token & iOS Shortcuts state
+  const [apiToken, setApiToken] = useState('')
+  const [shortcutBaseUrl, setShortcutBaseUrl] = useState('')
+
+  useEffect(() => {
+    void api
+      .getToken()
+      .then((res) => setApiToken(res.token || ''))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!shortcutBaseUrl) {
+      const def =
+        info?.entry_addrs?.[0]?.url ||
+        info?.entry_url ||
+        (typeof window !== 'undefined' ? window.location.origin : '')
+      if (def) setShortcutBaseUrl(def)
+    }
+  }, [info, shortcutBaseUrl])
 
   const pool = cluster?.pool || info?.pool || null
   const nodes = pool?.nodes || []
@@ -629,6 +651,126 @@ export function SettingsPage({
                   {changingPwd ? '保存中...' : '更新密码'}
                 </Button>
               </form>
+            </CardContent>
+          </Card>
+
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Smartphone className="h-4 w-4 text-primary" />
+                <span>iPhone 快捷指令 (Shortcuts) 一键上传 &amp; 主屏幕应用</span>
+              </CardTitle>
+              <CardDescription>
+                无需填写任何请求头或表单字段，生成专属令牌链接后在 iPhone 自带「快捷指令」配两步即可从微信/QQ/相册一键直传
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 text-xs">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <label className="font-medium">个人访问令牌 (API Token)</label>
+                  <div className="flex flex-wrap gap-2">
+                    <Input
+                      readOnly
+                      value={apiToken}
+                      placeholder="尚未生成，点击右侧生成专属令牌"
+                      className="flex-1 min-w-[180px] font-mono text-xs"
+                    />
+                    <Button
+                      size="sm"
+                      disabled={busyAction === 'token'}
+                      onClick={async () => {
+                        setBusyAction('token')
+                        try {
+                          const res = await api.regenerateToken()
+                          setApiToken(res.token || '')
+                          toast('已生成新的个人访问令牌', 'success')
+                        } catch (err) {
+                          toast(err instanceof Error ? err.message : '生成令牌失败', 'error')
+                        } finally {
+                          setBusyAction('')
+                        }
+                      }}
+                    >
+                      {apiToken ? '重置令牌' : '生成令牌'}
+                    </Button>
+                    {apiToken && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive"
+                        onClick={async () => {
+                          if (!window.confirm('确定吊销当前令牌？吊销后 iPhone 快捷指令需更换新令牌。')) return
+                          await api.revokeToken()
+                          setApiToken('')
+                          toast('已吊销个人令牌', 'success')
+                        }}
+                      >
+                        吊销
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-medium">选择入口网络地址（局域网或 Tailscale）</label>
+                  <Select
+                    value={shortcutBaseUrl}
+                    onChange={(e) => setShortcutBaseUrl(e.target.value)}
+                    className="w-full h-9 text-xs"
+                  >
+                    {(info?.entry_addrs && info.entry_addrs.length > 0
+                      ? info.entry_addrs.map((a) => ({ label: `${a.tag ? `${a.tag} · ` : ''}${a.url}`, url: a.url }))
+                      : [{ label: info?.entry_url || window.location.origin, url: info?.entry_url || window.location.origin }]
+                    ).map((opt) => (
+                      <option key={opt.url} value={opt.url}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+
+              {apiToken && shortcutBaseUrl && (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {[
+                    {
+                      label: '微信 / QQ / 相册通用上传专属 URL',
+                      url: `${shortcutBaseUrl.replace(/\/$/, '')}/api/shortcut/upload?token=${encodeURIComponent(apiToken)}`,
+                    },
+                    {
+                      label: '一键同步到「超级剪贴板」专属 URL',
+                      url: `${shortcutBaseUrl.replace(/\/$/, '')}/api/shortcut/upload?folder=${encodeURIComponent('超级剪贴板')}&token=${encodeURIComponent(apiToken)}`,
+                    },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{item.label}</span>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(item.url)
+                            toast(`已复制：${item.label}`, 'success')
+                          }}
+                        >
+                          <Copy className="h-3 w-3" />
+                          <span>复制链接</span>
+                        </Button>
+                      </div>
+                      <div className="truncate font-mono text-[11px] text-muted-foreground select-all">
+                        {item.url}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-1 text-[11px] text-muted-foreground leading-relaxed">
+                <div className="font-semibold text-foreground">iPhone 极简配置（仅需 2 步，无需填任何 Header）：</div>
+                <div>1. 打开 iPhone「快捷指令」App 新建指令，底部点 i 打开「在共享表单中显示」。</div>
+                <div>2. 添加「重复每一项(快捷指令输入)」-&gt; 循环内添加「获取 URL 内容」-&gt; URL 粘贴上方复制的专属链接 -&gt; 方法选 <code className="font-mono text-foreground">POST</code> -&gt; 请求体选 <code className="font-mono text-foreground">文件</code> 并绑定「重复项目」即可。</div>
+                <div>3. Safari 打开当前页面点底部分享 -&gt;「添加到主屏幕」，即可全屏启动 PWA 手机端应用。</div>
+              </div>
             </CardContent>
           </Card>
         </div>

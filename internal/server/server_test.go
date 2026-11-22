@@ -3237,3 +3237,79 @@ func TestAdminSystemLogsAndClear(t *testing.T) {
 		t.Fatalf("expected logs cleared cleanly, got len=%d total=%d", len(afterEntries), afterTotal)
 	}
 }
+
+func TestPersonalTokenAndIOSShortcutUpload(t *testing.T) {
+	srv, _, _, ts := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Shortcut-Entry",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	adminClient := loginTestAdmin(t, srv, ts.URL)
+
+	// 1. Generate Personal API Token via POST /api/token.
+	tokRes, err := adminClient.Post(ts.URL+"/api/token", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/token: %v", err)
+	}
+	var tokOut struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(tokRes.Body).Decode(&tokOut)
+	tokRes.Body.Close()
+	if tokRes.StatusCode != http.StatusOK || !strings.HasPrefix(tokOut.Token, "lfh_tok_") {
+		t.Fatalf("expected personal token generated, status=%d out=%+v", tokRes.StatusCode, tokOut)
+	}
+
+	// 2. Upload raw PNG payload using only query token (no cookie, no headers, no multipart).
+	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R'}
+	rawRes, err := http.Post(ts.URL+"/api/shortcut/upload?token="+url.QueryEscape(tokOut.Token), "application/octet-stream", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("POST raw /api/shortcut/upload: %v", err)
+	}
+	var upOut struct {
+		OK   bool               `json:"ok"`
+		File storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(rawRes.Body).Decode(&upOut)
+	rawRes.Body.Close()
+	if rawRes.StatusCode != http.StatusCreated || !upOut.OK || filepath.Ext(upOut.File.Name) != ".png" {
+		t.Fatalf("unexpected raw shortcut upload response: status=%d out=%+v", rawRes.StatusCode, upOut)
+	}
+
+	// 3. Upload clipboard text with folder=超级剪贴板.
+	clipRes, err := http.Post(
+		ts.URL+"/api/shortcut/upload?folder="+url.QueryEscape("超级剪贴板")+"&token="+url.QueryEscape(tokOut.Token),
+		"text/plain; charset=utf-8",
+		strings.NewReader("https://github.com/sxu99579-bit/LFH"),
+	)
+	if err != nil {
+		t.Fatalf("POST clipboard /api/shortcut/upload: %v", err)
+	}
+	var clipOut struct {
+		OK   bool               `json:"ok"`
+		File storage.FileRecord `json:"file"`
+	}
+	_ = json.NewDecoder(clipRes.Body).Decode(&clipOut)
+	clipRes.Body.Close()
+	if clipRes.StatusCode != http.StatusCreated || clipOut.File.FolderPath != "超级剪贴板" || filepath.Ext(clipOut.File.Name) != ".txt" {
+		t.Fatalf("unexpected clipboard shortcut upload: status=%d out=%+v", clipRes.StatusCode, clipOut)
+	}
+
+	// 4. Revoke token -> subsequent request must return 401.
+	delReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/token", nil)
+	delRes, err := adminClient.Do(delReq)
+	if err != nil || delRes.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE /api/token failed: err=%v status=%d", err, delRes.StatusCode)
+	}
+	delRes.Body.Close()
+
+	unauthRes, err := http.Post(ts.URL+"/api/shortcut/upload?token="+url.QueryEscape(tokOut.Token), "text/plain", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("POST revoked shortcut: %v", err)
+	}
+	unauthRes.Body.Close()
+	if unauthRes.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after revoking token, got %d", unauthRes.StatusCode)
+	}
+}

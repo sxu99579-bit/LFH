@@ -1,0 +1,21 @@
+{
+  "name": "LFH - 分布式局域网文件中心",
+  "short_name": "LFH",
+  "description": "轻量分布式局域网文件与算力平台",
+  "start_url": "/?view=mobile",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "/logo-icon-dark.png",
+      "sizes": "256x256",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

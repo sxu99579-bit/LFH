@@ -442,3 +442,58 @@ func TestExportAndImportSnapshot(t *testing.T) {
 		t.Fatalf("expected InviteRequired=false persisted after reload")
 	}
 }
+
+func TestPersonalAPITokenLifecycleAndAuth(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := NewManagerWithOptions(dir, InitOptions{AdminUser: "iosadmin", AdminPass: "pass1234"})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions: %v", err)
+	}
+	if got := mgr.GetAPIToken("iosadmin"); got != "" {
+		t.Fatalf("expected empty initial token, got %q", got)
+	}
+
+	tok, err := mgr.RegenerateAPIToken("iosadmin")
+	if err != nil || !strings.HasPrefix(tok, "lfh_tok_") {
+		t.Fatalf("RegenerateAPIToken failed: err=%v tok=%q", err, tok)
+	}
+
+	// Authenticate via Authorization: Bearer, X-API-Token, and ?token=.
+	for _, mkReq := range []func() *http.Request{
+		func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "/api/shortcut/upload", nil)
+			r.Header.Set("Authorization", "Bearer "+tok)
+			return r
+		},
+		func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "/api/shortcut/upload", nil)
+			r.Header.Set("X-API-Token", tok)
+			return r
+		},
+		func() *http.Request {
+			return httptest.NewRequest(http.MethodPost, "/api/shortcut/upload?token="+tok, nil)
+		},
+	} {
+		if u, ok := mgr.CurrentUser(mkReq()); !ok || u.Username != "iosadmin" {
+			t.Fatalf("expected iosadmin authenticated via token, got ok=%v user=%+v", ok, u)
+		}
+	}
+
+	// Token persists across reload.
+	reloaded, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("reload NewManager: %v", err)
+	}
+	if got := reloaded.GetAPIToken("iosadmin"); got != tok {
+		t.Fatalf("expected persisted token %q, got %q", tok, got)
+	}
+
+	// Revoke invalidates token immediately.
+	if err := reloaded.RevokeAPIToken("iosadmin"); err != nil {
+		t.Fatalf("RevokeAPIToken: %v", err)
+	}
+	reqRevoked := httptest.NewRequest(http.MethodPost, "/api/shortcut/upload?token="+tok, nil)
+	if _, ok := reloaded.CurrentUser(reqRevoked); ok {
+		t.Fatalf("expected revoked token to fail authentication")
+	}
+}

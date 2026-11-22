@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -37,6 +38,7 @@ type User struct {
 	Username     string    `json:"username"`
 	PasswordHash string    `json:"password_hash"`
 	Salt         string    `json:"salt"`
+	APIToken     string    `json:"api_token,omitempty"`
 	Role         string    `json:"role"`   // "admin" or "user"
 	Status       string    `json:"status"` // "active", "pending", "banned"
 	CreatedAt    time.Time `json:"created_at"`
@@ -944,38 +946,111 @@ func (m *Manager) sign(data string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (m *Manager) CurrentUser(r *http.Request) (PublicUser, bool) {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil || c.Value == "" {
-		return PublicUser{}, false
+func extractRequestToken(r *http.Request) string {
+	if authz := strings.TrimSpace(r.Header.Get("Authorization")); authz != "" {
+		if len(authz) > 7 && strings.EqualFold(authz[:7], "Bearer ") {
+			return strings.TrimSpace(authz[7:])
+		}
+		return authz
 	}
-	parts := strings.Split(c.Value, ".")
-	if len(parts) != 2 {
-		return PublicUser{}, false
+	if tok := strings.TrimSpace(r.Header.Get("X-API-Token")); tok != "" {
+		return tok
 	}
-	expectedSig := m.sign(parts[0])
-	if !hmac.Equal([]byte(parts[1]), []byte(expectedSig)) {
-		return PublicUser{}, false
+	if q := r.URL.Query(); q != nil {
+		if tok := strings.TrimSpace(q.Get("token")); tok != "" {
+			return tok
+		}
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return PublicUser{}, false
+	return ""
+}
+
+func (m *Manager) GetAPIToken(username string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	u, ok := m.users[username]
+	if !ok {
+		return ""
 	}
-	var payload sessionPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return PublicUser{}, false
+	return u.APIToken
+}
+
+func (m *Manager) RegenerateAPIToken(username string) (string, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
 	}
-	if time.Now().Unix() > payload.Exp {
+	tok := "lfh_tok_" + hex.EncodeToString(raw)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[username]
+	if !ok {
+		return "", errors.New("用户不存在")
+	}
+	u.APIToken = tok
+	m.users[username] = u
+	if err := m.saveLocked(); err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+func (m *Manager) RevokeAPIToken(username string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[username]
+	if !ok {
+		return errors.New("用户不存在")
+	}
+	u.APIToken = ""
+	m.users[username] = u
+	return m.saveLocked()
+}
+
+func (m *Manager) AuthenticateToken(token string) (PublicUser, bool) {
+	clean := strings.TrimSpace(token)
+	if clean == "" {
 		return PublicUser{}, false
 	}
 	m.mu.RLock()
-	u, ok := m.users[payload.Username]
-	m.mu.RUnlock()
-	if !ok {
-		return PublicUser{}, false
+	defer m.mu.RUnlock()
+	for _, u := range m.users {
+		if u.APIToken == "" {
+			continue
+		}
+		if len(u.APIToken) == len(clean) && subtle.ConstantTimeCompare([]byte(u.APIToken), []byte(clean)) == 1 {
+			if u.Status != "" && u.Status != StatusActive {
+				return PublicUser{}, false
+			}
+			return toPublicUser(u), true
+		}
 	}
-	if u.Status != "" && u.Status != StatusActive {
-		return PublicUser{}, false
+	return PublicUser{}, false
+}
+
+func (m *Manager) CurrentUser(r *http.Request) (PublicUser, bool) {
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		parts := strings.Split(c.Value, ".")
+		if len(parts) == 2 {
+			expectedSig := m.sign(parts[0])
+			if hmac.Equal([]byte(parts[1]), []byte(expectedSig)) {
+				if raw, decErr := base64.RawURLEncoding.DecodeString(parts[0]); decErr == nil {
+					var payload sessionPayload
+					if err := json.Unmarshal(raw, &payload); err == nil && time.Now().Unix() <= payload.Exp {
+						m.mu.RLock()
+						u, ok := m.users[payload.Username]
+						m.mu.RUnlock()
+						if ok && (u.Status == "" || u.Status == StatusActive) {
+							return toPublicUser(u), true
+						}
+					}
+				}
+			}
+		}
 	}
-	return toPublicUser(u), true
+
+	if tok := extractRequestToken(r); tok != "" {
+		return m.AuthenticateToken(tok)
+	}
+	return PublicUser{}, false
 }

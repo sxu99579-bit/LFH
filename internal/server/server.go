@@ -418,6 +418,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("POST /api/password", s.requireAuth(s.handleChangePassword))
+	mux.HandleFunc("GET /api/token", s.requireAuth(s.handleGetToken))
+	mux.HandleFunc("POST /api/token", s.requireAuth(s.handleRegenerateToken))
+	mux.HandleFunc("DELETE /api/token", s.requireAuth(s.handleRevokeToken))
 
 	mux.HandleFunc("GET /api/cluster", s.requireAuth(s.handleGetCluster))
 	mux.HandleFunc("GET /api/users/selectable", s.requireAuth(s.handleListSelectableUsers))
@@ -474,6 +477,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/summary", s.requireAuth(s.handleSummary))
 	mux.HandleFunc("GET /api/events", s.requireAuth(s.handleEvents))
 	mux.HandleFunc("POST /api/upload", s.requireAuth(s.handleUpload))
+	mux.HandleFunc("POST /api/shortcut/upload", s.requireAuth(s.handleShortcutUpload))
 	mux.HandleFunc("POST /api/uploads/init", s.requireAuth(s.handleUploadInit))
 	mux.HandleFunc("PUT /api/uploads/{uploadID}/chunk/{index}", s.requireAuth(s.handleUploadChunk))
 	mux.HandleFunc("POST /api/uploads/{uploadID}/complete", s.requireAuth(s.handleUploadComplete))
@@ -3605,6 +3609,183 @@ func (s *Server) dispatchUploadStream(
 		return storage.FileRecord{}, http.StatusBadGateway, proxyErr.Error()
 	}
 	return rec, http.StatusCreated, ""
+}
+
+func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": s.auth.GetAPIToken(u.Username),
+	})
+}
+
+func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	tok, err := s.auth.RegenerateAPIToken(u.Username)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.logAudit(r, u.Username, "api_token_regenerate", u.Username, "ok", "generated personal api token")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": tok,
+	})
+}
+
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	if err := s.auth.RevokeAPIToken(u.Username); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.logAudit(r, u.Username, "api_token_revoke", u.Username, "ok", "revoked personal api token")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+	})
+}
+
+func inferShortcutExt(contentType string, head []byte) string {
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if ct == "" || ct == "application/octet-stream" {
+		if len(head) > 0 {
+			ct = strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(head), ";")[0]))
+		}
+	}
+	switch ct {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/heic", "image/heif":
+		return ".heic"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/mp4", "audio/x-m4a":
+		return ".m4a"
+	case "application/pdf":
+		return ".pdf"
+	case "application/zip", "application/x-zip-compressed":
+		return ".zip"
+	case "application/json":
+		return ".json"
+	case "text/plain", "application/x-www-form-urlencoded":
+		return ".txt"
+	}
+	if exts, err := mime.ExtensionsByType(ct); err == nil && len(exts) > 0 {
+		return exts[0]
+	}
+	return ".bin"
+}
+
+func extractShortcutDeviceInfo(r *http.Request) storage.DeviceInfo {
+	clientIP := resolveClientIP(r)
+	fp := truncateRunes(decodeHeaderValue(r.Header.Get("X-Device-FP")), 64)
+	name := truncateRunes(decodeHeaderValue(r.Header.Get("X-Device-Name")), 80)
+	detail := truncateRunes(decodeHeaderValue(r.Header.Get("X-Device-Detail")), 160)
+	if name == "" {
+		derived := deriveDeviceName(r.UserAgent())
+		if derived == "" || derived == "桌面端" || derived == "Browser" {
+			name = "iPhone · 快捷指令"
+		} else {
+			name = derived
+		}
+	}
+	if fp == "" {
+		sum := sha256.Sum256([]byte("shortcut|" + clientIP + "|" + r.UserAgent()))
+		fp = "FP-" + strings.ToUpper(hex.EncodeToString(sum[:])[:10])
+	}
+	if detail == "" {
+		detail = "iOS Shortcuts Upload"
+	}
+	return storage.DeviceInfo{
+		FP:     fp,
+		Name:   name,
+		IP:     clientIP,
+		Detail: detail,
+	}
+}
+
+func (s *Server) handleShortcutUpload(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	ctHeader := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.HasPrefix(ctHeader, "multipart/form-data") {
+		s.handleUpload(w, r, u)
+		return
+	}
+
+	dev := extractShortcutDeviceInfo(r)
+	q := r.URL.Query()
+	folderPath := storage.SanitizeFolderPath(q.Get("folder"))
+	rawName := strings.TrimSpace(q.Get("name"))
+	if rawName == "" {
+		rawName = decodeHeaderValue(r.Header.Get("X-Filename"))
+	}
+	if rawName == "" {
+		if cd := strings.TrimSpace(r.Header.Get("Content-Disposition")); cd != "" {
+			if _, params, err := mime.ParseMediaType(cd); err == nil && params["filename"] != "" {
+				rawName = params["filename"]
+			}
+		}
+	}
+
+	tmp, err := os.CreateTemp("", "lfh-shortcut-*")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建临时上传文件失败"})
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	defer tmp.Close()
+
+	sz, err := io.Copy(tmp, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取上传内容失败: " + err.Error()})
+		return
+	}
+	if sz <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未收到任何文件内容"})
+		return
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "重置读取位置失败"})
+		return
+	}
+
+	head := make([]byte, 512)
+	hn, _ := tmp.Read(head)
+	_, _ = tmp.Seek(0, io.SeekStart)
+
+	ext := inferShortcutExt(ctHeader, head[:hn])
+	cleanBase := filepath.Base(rawName)
+	if rawName == "" || cleanBase == "" || cleanBase == "." || cleanBase == ".." || cleanBase == string(filepath.Separator) {
+		prefix := "iPhone-"
+		if folderPath == "超级剪贴板" {
+			prefix = "剪贴板-"
+		}
+		cleanBase = prefix + time.Now().Format("20060102-150405") + ext
+	} else if filepath.Ext(cleanBase) == "" {
+		cleanBase += ext
+	}
+
+	if err := s.auth.CheckUploadAllowed(cleanBase); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	rec, code, msg := s.dispatchUploadStream(u, cleanBase, folderPath, "快捷指令上传", sz, "auto", nil, dev, tmp)
+	if code != http.StatusCreated {
+		writeJSON(w, code, map[string]string{"error": msg})
+		return
+	}
+	s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, nil)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ok":      true,
+		"file":    s.sanitizeRecordForUser(rec, u),
+		"message": "已上传: " + rec.Name,
+	})
 }
 
 func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {

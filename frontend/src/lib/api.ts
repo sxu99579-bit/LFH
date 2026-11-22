@@ -73,6 +73,9 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ old_password, new_password }),
     }),
+  getToken: () => apiFetch<{ token: string }>('/api/token'),
+  regenerateToken: () => apiFetch<{ token: string }>('/api/token', { method: 'POST' }),
+  revokeToken: () => apiFetch<{ ok: boolean }>('/api/token', { method: 'DELETE' }),
 
   getCluster: () => apiFetch<ClusterResponse>('/api/cluster'),
   getSummary: (params?: URLSearchParams) =>
