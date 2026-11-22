@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"lfh/internal/auth"
 	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
+	"lfh/internal/plugins"
 	"lfh/internal/preview"
 	"lfh/internal/security"
 	"lfh/internal/storage"
@@ -55,6 +57,10 @@ type Server struct {
 	updater      *updater.Manager
 	limiter      *security.LoginLimiter
 	audit        *security.AuditLogger
+	plugins      *plugins.Manager
+	jobsMu       sync.RWMutex
+	jobs         []plugins.PluginJob
+	jobsPath     string
 	webFS        fs.FS
 	port         string
 	portSwitcher func(newPort string) error
@@ -69,16 +75,36 @@ func New(authMgr *auth.Manager, store *storage.Store, clusterMgr *cluster.Manage
 	if err != nil {
 		return nil, err
 	}
-	return &Server{
-		auth:    authMgr,
-		store:   store,
-		cluster: clusterMgr,
-		events:  NewEventHub(),
-		limiter: security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
-		audit:   auditLog,
-		webFS:   sub,
-		port:    port,
-	}, nil
+	pm, err := plugins.NewManager(store.DataDir())
+	if err != nil {
+		return nil, err
+	}
+	if clusterMgr != nil {
+		clusterMgr.SetPluginManager(pm)
+	}
+	srv := &Server{
+		auth:     authMgr,
+		store:    store,
+		cluster:  clusterMgr,
+		events:   NewEventHub(),
+		limiter:  security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
+		audit:    auditLog,
+		plugins:  pm,
+		jobsPath: filepath.Join(store.DataDir(), "plugin-jobs.json"),
+		webFS:    sub,
+		port:     port,
+	}
+	srv.loadPluginJobs()
+	return srv, nil
+}
+
+func (s *Server) SetPluginManager(pm *plugins.Manager) {
+	s.mu.Lock()
+	s.plugins = pm
+	s.mu.Unlock()
+	if s.cluster != nil {
+		s.cluster.SetPluginManager(pm)
+	}
 }
 
 func (s *Server) SetUpdater(u *updater.Manager) {
@@ -365,6 +391,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/mounts", s.requireClusterAuth(s.handleClusterAddMount))
 	mux.HandleFunc("DELETE /internal/cluster/mounts/{id}", s.requireClusterAuth(s.handleClusterRemoveMount))
 	mux.HandleFunc("POST /internal/cluster/mounts/{id}/sync", s.requireClusterAuth(s.handleClusterSyncMount))
+	mux.HandleFunc("POST /internal/cluster/plugins/install", s.requireClusterAuth(s.handleClusterPluginInstall))
+	mux.HandleFunc("POST /internal/cluster/plugins/toggle", s.requireClusterAuth(s.handleClusterPluginToggle))
+	mux.HandleFunc("DELETE /internal/cluster/plugins/{id}", s.requireClusterAuth(s.handleClusterPluginUninstall))
+	mux.HandleFunc("POST /internal/cluster/plugins/execute", s.requireClusterAuth(s.handleClusterPluginExecute))
 	mux.HandleFunc("POST /internal/cluster/promote", s.requireClusterAuth(s.handleClusterPromote))
 	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
 	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
@@ -422,6 +452,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/audit", s.requireAdmin(s.handleAdminAudit))
 	mux.HandleFunc("POST /api/admin/integrity/scrub", s.requireAdmin(s.handleAdminIntegrityScrub))
 	mux.HandleFunc("GET /api/admin/integrity/status", s.requireAdmin(s.handleAdminIntegrityStatus))
+	mux.HandleFunc("GET /api/admin/plugins/marketplace", s.requireAdmin(s.handleAdminPluginMarketplace))
+	mux.HandleFunc("POST /api/admin/plugins/install", s.requireAdmin(s.handleAdminPluginInstall))
+	mux.HandleFunc("POST /api/admin/plugins/toggle", s.requireAdmin(s.handleAdminPluginToggle))
+	mux.HandleFunc("DELETE /api/admin/plugins/{nodeID}/{pluginID}", s.requireAdmin(s.handleAdminPluginUninstall))
+	mux.HandleFunc("GET /api/plugins/capabilities", s.requireAuth(s.handlePluginCapabilities))
+	mux.HandleFunc("GET /api/plugins/jobs", s.requireAuth(s.handleListPluginJobs))
+	mux.HandleFunc("POST /api/plugins/jobs", s.requireAuth(s.handleRunPluginJob))
 
 	mux.HandleFunc("GET /api/files", s.requireAuth(s.handleListFiles))
 	mux.HandleFunc("GET /api/summary", s.requireAuth(s.handleSummary))
@@ -4654,4 +4691,467 @@ func classifyCandidate(ifaceName string, ip4 net.IP) (int, string) {
 	}
 
 	return 50, "网络地址"
+}
+
+// ==================== Distributed Plugin Runtime & Marketplace Handlers ====================
+
+func (s *Server) pluginMgr() (*plugins.Manager, error) {
+	s.mu.RLock()
+	pm := s.plugins
+	s.mu.RUnlock()
+	if pm == nil {
+		return nil, errors.New("当前节点未启用插件运行时")
+	}
+	return pm, nil
+}
+
+func (s *Server) loadPluginJobs() {
+	if s.jobsPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.jobsPath)
+	if err != nil {
+		return
+	}
+	var list []plugins.PluginJob
+	if json.Unmarshal(raw, &list) == nil {
+		if len(list) > 200 {
+			list = list[:200]
+		}
+		s.jobsMu.Lock()
+		s.jobs = list
+		s.jobsMu.Unlock()
+	}
+}
+
+func (s *Server) recordPluginJob(job plugins.PluginJob) {
+	s.jobsMu.Lock()
+	s.jobs = append([]plugins.PluginJob{job}, s.jobs...)
+	if len(s.jobs) > 200 {
+		s.jobs = s.jobs[:200]
+	}
+	raw, err := json.MarshalIndent(s.jobs, "", "  ")
+	s.jobsMu.Unlock()
+	if err == nil && s.jobsPath != "" {
+		_ = os.WriteFile(s.jobsPath, raw, 0644)
+	}
+}
+
+func (s *Server) handleClusterPluginInstall(w http.ResponseWriter, r *http.Request) {
+	pm, err := s.pluginMgr()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var req struct {
+		PluginID string `json:"plugin_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	mf, err := pm.InstallFromMarketplace(req.PluginID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"manifest": mf,
+		"plugins":  pm.Capabilities(),
+	})
+}
+
+func (s *Server) handleClusterPluginToggle(w http.ResponseWriter, r *http.Request) {
+	pm, err := s.pluginMgr()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var req struct {
+		PluginID string `json:"plugin_id"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	mf, err := pm.SetEnabled(req.PluginID, req.Enabled)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"manifest": mf,
+		"plugins":  pm.Capabilities(),
+	})
+}
+
+func (s *Server) handleClusterPluginUninstall(w http.ResponseWriter, r *http.Request) {
+	pm, err := s.pluginMgr()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	pluginID := r.PathValue("id")
+	if err := pm.Uninstall(pluginID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"plugins": pm.Capabilities(),
+	})
+}
+
+func (s *Server) handleClusterPluginExecute(w http.ResponseWriter, r *http.Request) {
+	pm, err := s.pluginMgr()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析插件任务表单失败: " + err.Error()})
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+
+	fh, err := func() (*multipart.FileHeader, error) {
+		fhs := r.MultipartForm.File["file"]
+		if len(fhs) == 0 {
+			return nil, errors.New("未收到待处理文件")
+		}
+		return fhs[0], nil
+	}()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	workDir, err := os.MkdirTemp("", "lfh-plugin-exec-*")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer os.RemoveAll(workDir)
+
+	inDir := filepath.Join(workDir, "input")
+	outDir := filepath.Join(workDir, "output")
+	_ = os.MkdirAll(inDir, 0755)
+	_ = os.MkdirAll(outDir, 0755)
+
+	cleanName := filepath.Base(strings.TrimSpace(fh.Filename))
+	if cleanName == "" || cleanName == "." || cleanName == ".." {
+		cleanName = "input.bin"
+	}
+	inPath := filepath.Join(inDir, cleanName)
+	srcFile, err := fh.Open()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	dstFile, err := os.Create(inPath)
+	if err != nil {
+		_ = srcFile.Close()
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	_, copyErr := io.Copy(dstFile, srcFile)
+	_ = srcFile.Close()
+	_ = dstFile.Close()
+	if copyErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": copyErr.Error()})
+		return
+	}
+
+	res, _, execErr := pm.Execute(r.Context(), plugins.ExecRequest{
+		PluginID:   r.FormValue("plugin_id"),
+		Capability: r.FormValue("capability"),
+		FileName:   cleanName,
+		InputPath:  inPath,
+		WorkDir:    outDir,
+	})
+	if execErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": execErr.Error()})
+		return
+	}
+	outBytes, err := os.ReadFile(res.OutputPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取插件产物失败: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"output_name":   res.OutputName,
+		"output_base64": base64.StdEncoding.EncodeToString(outBytes),
+		"summary":       res.Summary,
+	})
+}
+
+func (s *Server) handlePluginCapabilities(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"capabilities": s.cluster.ClusterCapabilities(),
+	})
+}
+
+func (s *Server) handleListPluginJobs(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	s.jobsMu.RLock()
+	all := make([]plugins.PluginJob, len(s.jobs))
+	copy(all, s.jobs)
+	s.jobsMu.RUnlock()
+
+	out := make([]plugins.PluginJob, 0, len(all))
+	for _, j := range all {
+		if u.Role == "admin" || j.CreatedBy == u.Username {
+			out = append(out, j)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
+}
+
+func (s *Server) handleAdminPluginMarketplace(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	pm, err := s.pluginMgr()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"marketplace":  pm.Marketplace(),
+		"capabilities": s.cluster.ClusterCapabilities(),
+		"nodes":        s.cluster.PoolSummaryForRole(true).Nodes,
+	})
+}
+
+func (s *Server) handleAdminPluginInstall(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID   string `json:"node_id"`
+		PluginID string `json:"plugin_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	mf, err := s.cluster.InstallNodePlugin(req.NodeID, req.PluginID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	s.logAudit(r, u.Username, "plugin_install", req.PluginID, "ok", "node="+req.NodeID)
+	s.events.Publish(FileChangeEvent{Kind: "cluster_sync", Uploader: u.Username})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"manifest":     mf,
+		"capabilities": s.cluster.ClusterCapabilities(),
+		"pool":         s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminPluginToggle(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		NodeID   string `json:"node_id"`
+		PluginID string `json:"plugin_id"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	mf, err := s.cluster.ToggleNodePlugin(req.NodeID, req.PluginID, req.Enabled)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	s.logAudit(r, u.Username, "plugin_toggle", req.PluginID, "ok", fmt.Sprintf("node=%s enabled=%v", req.NodeID, req.Enabled))
+	s.events.Publish(FileChangeEvent{Kind: "cluster_sync", Uploader: u.Username})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"manifest":     mf,
+		"capabilities": s.cluster.ClusterCapabilities(),
+		"pool":         s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleAdminPluginUninstall(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	nodeID := r.PathValue("nodeID")
+	pluginID := r.PathValue("pluginID")
+	if err := s.cluster.UninstallNodePlugin(nodeID, pluginID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.cluster.TriggerHeartbeat()
+	s.logAudit(r, u.Username, "plugin_uninstall", pluginID, "ok", "node="+nodeID)
+	s.events.Publish(FileChangeEvent{Kind: "cluster_sync", Uploader: u.Username})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"capabilities": s.cluster.ClusterCapabilities(),
+		"pool":         s.cluster.PoolSummaryForRole(true),
+	})
+}
+
+func (s *Server) handleRunPluginJob(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	var req struct {
+		FileID     string `json:"file_id"`
+		Capability string `json:"capability"`
+		PluginID   string `json:"plugin_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	rec, localPath, peer, isLocal, status, errMsg := s.findAccessibleFile(req.FileID, u)
+	if status != http.StatusOK {
+		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if rec.SourceMissing {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "源文件已移动或删除，无法执行插件任务"})
+		return
+	}
+
+	sourceNodeID := rec.NodeID
+	if sourceNodeID == "" && isLocal {
+		sourceNodeID = s.cluster.NodeID()
+	}
+	computeNode, capSummary, err := s.cluster.SelectComputeNode(req.Capability, req.PluginID, sourceNodeID)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	if !plugins.MatchExtension(capSummary.SupportedExts, rec.Name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("插件 %s 不支持处理当前格式 %s", capSummary.Name, rec.Ext)})
+		return
+	}
+
+	started := time.Now()
+	srcInputPath := localPath
+	var cleanupTemp func()
+	if !isLocal {
+		tmpPath, cleanFn, fetchErr := s.cluster.FetchPeerFileToTemp(peer, rec.ID)
+		if fetchErr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": fetchErr.Error()})
+			return
+		}
+		srcInputPath = tmpPath
+		cleanupTemp = cleanFn
+	}
+	if cleanupTemp != nil {
+		defer cleanupTemp()
+	}
+
+	var (
+		outBytes []byte
+		outName  string
+		summary  string
+		execErr  error
+	)
+
+	if computeNode.IsSelf {
+		pm, pmErr := s.pluginMgr()
+		if pmErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": pmErr.Error()})
+			return
+		}
+		workDir, mkErr := os.MkdirTemp("", "lfh-local-plug-*")
+		if mkErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": mkErr.Error()})
+			return
+		}
+		defer os.RemoveAll(workDir)
+		res, _, pErr := pm.Execute(r.Context(), plugins.ExecRequest{
+			PluginID:   capSummary.PluginID,
+			Capability: req.Capability,
+			FileName:   rec.Name,
+			InputPath:  srcInputPath,
+			WorkDir:    workDir,
+		})
+		execErr = pErr
+		if execErr == nil {
+			outName = res.OutputName
+			summary = res.Summary
+			outBytes, execErr = os.ReadFile(res.OutputPath)
+		}
+	} else {
+		inF, openErr := os.Open(srcInputPath)
+		if openErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": openErr.Error()})
+			return
+		}
+		outBytes, outName, summary, execErr = s.cluster.ExecuteRemotePlugin(computeNode, req.Capability, capSummary.PluginID, rec.Name, inF)
+		_ = inF.Close()
+	}
+
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s|%s|%d", u.Username, rec.ID, started.UnixNano()))
+	jobID := "job-" + hex.EncodeToString(sum[:6])
+	capUsed := req.Capability
+	if capUsed == "" && len(capSummary.Capabilities) > 0 {
+		capUsed = capSummary.Capabilities[0]
+	}
+
+	if execErr != nil {
+		job := plugins.PluginJob{
+			ID:              jobID,
+			PluginID:        capSummary.PluginID,
+			Capability:      capUsed,
+			SourceFileID:    rec.ID,
+			SourceFileName:  rec.Name,
+			SourceNodeID:    sourceNodeID,
+			ComputeNodeID:   computeNode.NodeID,
+			ComputeNodeName: computeNode.NodeName,
+			Status:          "error",
+			Error:           execErr.Error(),
+			DurationMs:      time.Since(started).Milliseconds(),
+			CreatedBy:       u.Username,
+			CreatedAt:       started,
+		}
+		s.recordPluginJob(job)
+		s.logAudit(r, u.Username, "plugin_run", rec.Name, "error", execErr.Error())
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": execErr.Error(), "job": job})
+		return
+	}
+
+	dev := extractDeviceInfo(r)
+	outFolder := "插件产物/" + capSummary.PluginID
+	note := fmt.Sprintf("由节点 %s 通过 %s (%s) 生成", computeNode.NodeName, capSummary.Name, capUsed)
+	outRec, upStatus, upErr := s.dispatchUploadStream(u, outName, outFolder, note, int64(len(outBytes)), computeNode.NodeID, rec.AllowedUsers, dev, bytes.NewReader(outBytes))
+	if upStatus != http.StatusCreated {
+		writeJSON(w, upStatus, map[string]string{"error": upErr})
+		return
+	}
+
+	job := plugins.PluginJob{
+		ID:              jobID,
+		PluginID:        capSummary.PluginID,
+		Capability:      capUsed,
+		SourceFileID:    rec.ID,
+		SourceFileName:  rec.Name,
+		SourceNodeID:    sourceNodeID,
+		ComputeNodeID:   computeNode.NodeID,
+		ComputeNodeName: computeNode.NodeName,
+		OutputFileID:    outRec.ID,
+		OutputFileName:  outRec.Name,
+		Status:          "done",
+		Summary:         summary,
+		DurationMs:      time.Since(started).Milliseconds(),
+		CreatedBy:       u.Username,
+		CreatedAt:       started,
+	}
+	s.recordPluginJob(job)
+	s.logAudit(r, u.Username, "plugin_run", rec.Name, "ok", fmt.Sprintf("%s @ %s -> %s", capSummary.PluginID, computeNode.NodeName, outRec.Name))
+	s.publishRecordChange("upload", u.Username, []storage.FileRecord{outRec}, rec.AllowedUsers)
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ok":          true,
+		"job":         job,
+		"output_file": s.sanitizeRecordForUser(outRec, u),
+	})
 }

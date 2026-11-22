@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"lfh/internal/plugins"
 	"lfh/internal/storage"
 	"lfh/internal/version"
 )
@@ -141,11 +143,12 @@ type NodeStatus struct {
 	IOReadErrors       int64       `json:"io_read_errors"`
 	IOWriteErrors      int64       `json:"io_write_errors"`
 	IOTotalErrors      int64       `json:"io_total_errors"`
-	ZeroCopyCount      int         `json:"zero_copy_count,omitempty"`
-	ZeroCopyBytes      int64       `json:"zero_copy_bytes,omitempty"`
-	MountCount         int         `json:"mount_count,omitempty"`
-	ClipboardEnabled   bool        `json:"clipboard_enabled"`
-	Online             bool        `json:"online"`
+	ZeroCopyCount      int                         `json:"zero_copy_count,omitempty"`
+	ZeroCopyBytes      int64                       `json:"zero_copy_bytes,omitempty"`
+	MountCount         int                         `json:"mount_count,omitempty"`
+	ClipboardEnabled   bool                        `json:"clipboard_enabled"`
+	Plugins            []plugins.CapabilitySummary `json:"plugins,omitempty"`
+	Online             bool                        `json:"online"`
 	IsSelf             bool        `json:"is_self"`
 	LastSeen           time.Time   `json:"last_seen"`
 }
@@ -216,6 +219,7 @@ type Manager struct {
 	cfgPath             string
 	cfg                 Config
 	store               *storage.Store
+	pluginMgr           *plugins.Manager
 	selfURL             string
 	discoveredEntryURL  string
 	peers               map[string]*peerRecord
@@ -232,6 +236,12 @@ type Manager struct {
 	lastSelfSyncAttempt time.Time
 	lastHBLatencyMs     float64
 	lastSyncAt          time.Time
+}
+
+func (m *Manager) SetPluginManager(pm *plugins.Manager) {
+	m.mu.Lock()
+	m.pluginMgr = pm
+	m.mu.Unlock()
 }
 
 func ParseQuotaBytes(input string) (int64, error) {
@@ -563,7 +573,13 @@ func (m *Manager) SelfStatus() NodeStatus {
 	selfURL := m.selfURL
 	hbLat := m.lastHBLatencyMs
 	lastSync := m.lastSyncAt
+	pm := m.pluginMgr
 	m.mu.RUnlock()
+
+	var localPlugins []plugins.CapabilitySummary
+	if pm != nil {
+		localPlugins = pm.Capabilities()
+	}
 
 	now := time.Now()
 	if lastSync.IsZero() {
@@ -640,6 +656,7 @@ func (m *Manager) SelfStatus() NodeStatus {
 		ZeroCopyBytes:      zcBytes,
 		MountCount:         mountEntries,
 		ClipboardEnabled:   cfg.ClipboardEnabled,
+		Plugins:            localPlugins,
 		Online:             true,
 		IsSelf:             true,
 		LastSeen:           now,
@@ -810,6 +827,7 @@ func (m *Manager) HandleHeartbeat(payload HeartbeatPayload) bool {
 		prev.status.ZeroCopyCount != n.ZeroCopyCount ||
 		prev.status.MountCount != n.MountCount ||
 		prev.status.ClipboardEnabled != n.ClipboardEnabled ||
+		!equalPluginCapabilities(prev.status.Plugins, n.Plugins) ||
 		len(prev.files) != len(files)
 	if !changed {
 		for i := range files {
@@ -3388,4 +3406,322 @@ func formatBytesHuman(b int64) string {
 		idx++
 	}
 	return fmt.Sprintf("%.2f %s", val, units[idx])
+}
+
+func equalPluginCapabilities(a, b []plugins.CapabilitySummary) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].PluginID != b[i].PluginID ||
+			a[i].Version != b[i].Version ||
+			a[i].Enabled != b[i].Enabled ||
+			a[i].BusyJobs != b[i].BusyJobs ||
+			!equalStringSlice(a[i].Capabilities, b[i].Capabilities) {
+			return false
+		}
+	}
+	return true
+}
+
+// PluginProviderNode describes one online cluster node hosting a plugin capability.
+type PluginProviderNode struct {
+	NodeID         string  `json:"node_id"`
+	NodeName       string  `json:"node_name"`
+	IsSelf         bool    `json:"is_self"`
+	BusyJobs       int     `json:"busy_jobs"`
+	MaxConcurrency int     `json:"max_concurrency"`
+	CPUPercent     float64 `json:"cpu_percent"`
+	HasGPU         bool    `json:"has_gpu,omitempty"`
+}
+
+// ClusterCapabilityView summarizes an enabled capability aggregated across all online nodes.
+type ClusterCapabilityView struct {
+	Capability    string               `json:"capability"`
+	PluginID      string               `json:"plugin_id"`
+	Name          string               `json:"name"`
+	Version       string               `json:"version"`
+	SupportedExts []string             `json:"supported_exts"`
+	TriggerModes  []string             `json:"trigger_modes,omitempty"`
+	Providers     []PluginProviderNode `json:"providers"`
+}
+
+func (m *Manager) onlineClusterNodesSnapshot() []NodeStatus {
+	self := m.SelfStatus()
+	nodes := []NodeStatus{self}
+	m.mu.RLock()
+	for _, p := range m.peers {
+		st := p.status
+		if time.Since(st.LastSeen) <= PeerTimeout {
+			st.Online = true
+			st.IsSelf = false
+			nodes = append(nodes, st)
+		}
+	}
+	m.mu.RUnlock()
+	return nodes
+}
+
+// ClusterCapabilities aggregates enabled plugin capabilities across self and all online peer nodes.
+func (m *Manager) ClusterCapabilities() []ClusterCapabilityView {
+	nodes := m.onlineClusterNodesSnapshot()
+	byKey := make(map[string]*ClusterCapabilityView)
+	for _, n := range nodes {
+		for _, capItem := range n.Plugins {
+			if !capItem.Enabled {
+				continue
+			}
+			for _, capName := range capItem.Capabilities {
+				key := capItem.PluginID + "|" + capName
+				view, ok := byKey[key]
+				if !ok {
+					view = &ClusterCapabilityView{
+						Capability:    capName,
+						PluginID:      capItem.PluginID,
+						Name:          capItem.Name,
+						Version:       capItem.Version,
+						SupportedExts: append([]string(nil), capItem.SupportedExts...),
+						TriggerModes:  append([]string(nil), capItem.TriggerModes...),
+					}
+					byKey[key] = view
+				}
+				view.Providers = append(view.Providers, PluginProviderNode{
+					NodeID:         n.NodeID,
+					NodeName:       n.NodeName,
+					IsSelf:         n.IsSelf,
+					BusyJobs:       capItem.BusyJobs,
+					MaxConcurrency: capItem.MaxConcurrency,
+					CPUPercent:     n.CPUPercent,
+					HasGPU:         capItem.HasGPU,
+				})
+			}
+		}
+	}
+	out := make([]ClusterCapabilityView, 0, len(byKey))
+	for _, v := range byKey {
+		sort.Slice(v.Providers, func(i, j int) bool {
+			if v.Providers[i].IsSelf != v.Providers[j].IsSelf {
+				return v.Providers[i].IsSelf
+			}
+			return v.Providers[i].NodeName < v.Providers[j].NodeName
+		})
+		out = append(out, *v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Capability != out[j].Capability {
+			return out[i].Capability < out[j].Capability
+		}
+		return out[i].PluginID < out[j].PluginID
+	})
+	return out
+}
+
+// SelectComputeNode chooses the optimal online compute node hosting the requested plugin/capability.
+func (m *Manager) SelectComputeNode(capability, pluginID, preferredNodeID string) (NodeStatus, plugins.CapabilitySummary, error) {
+	wantCap := strings.TrimSpace(capability)
+	wantPlugin := strings.TrimSpace(strings.ToLower(pluginID))
+	type candidate struct {
+		node NodeStatus
+		cap  plugins.CapabilitySummary
+	}
+	var candidates []candidate
+	for _, n := range m.onlineClusterNodesSnapshot() {
+		for _, p := range n.Plugins {
+			if !p.Enabled {
+				continue
+			}
+			if wantPlugin != "" && p.PluginID != wantPlugin {
+				continue
+			}
+			if wantCap != "" {
+				hasCap := false
+				for _, c := range p.Capabilities {
+					if c == wantCap {
+						hasCap = true
+						break
+					}
+				}
+				if !hasCap {
+					continue
+				}
+			}
+			candidates = append(candidates, candidate{node: n, cap: p})
+		}
+	}
+	if len(candidates) == 0 {
+		return NodeStatus{}, plugins.CapabilitySummary{}, errors.New("当前集群中没有在线且已启用的对应算力插件节点")
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		aAvail := a.cap.BusyJobs < max(1, a.cap.MaxConcurrency)
+		bAvail := b.cap.BusyJobs < max(1, b.cap.MaxConcurrency)
+		if aAvail != bAvail {
+			return aAvail
+		}
+		if preferredNodeID != "" {
+			aLocal := a.node.NodeID == preferredNodeID
+			bLocal := b.node.NodeID == preferredNodeID
+			if aLocal != bLocal {
+				return aLocal
+			}
+		}
+		if a.cap.HasGPU != b.cap.HasGPU {
+			return a.cap.HasGPU
+		}
+		if a.cap.BusyJobs != b.cap.BusyJobs {
+			return a.cap.BusyJobs < b.cap.BusyJobs
+		}
+		if a.node.CPUPercent != b.node.CPUPercent {
+			return a.node.CPUPercent < b.node.CPUPercent
+		}
+		return a.node.NodeID < b.node.NodeID
+	})
+	return candidates[0].node, candidates[0].cap, nil
+}
+
+func (m *Manager) setPeerPlugins(nodeID string, caps []plugins.CapabilitySummary) {
+	m.mu.Lock()
+	if cur, ok := m.peers[nodeID]; ok {
+		cur.status.Plugins = caps
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) getLocalPluginManager() (*plugins.Manager, error) {
+	m.mu.RLock()
+	pm := m.pluginMgr
+	m.mu.RUnlock()
+	if pm == nil {
+		return nil, errors.New("本节点尚未初始化插件管理器")
+	}
+	return pm, nil
+}
+
+func (m *Manager) InstallNodePlugin(nodeID, pluginID string) (plugins.Manifest, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		pm, err := m.getLocalPluginManager()
+		if err != nil {
+			return plugins.Manifest{}, err
+		}
+		return pm.InstallFromMarketplace(pluginID)
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return plugins.Manifest{}, err
+	}
+	var resp struct {
+		Manifest plugins.Manifest            `json:"manifest"`
+		Plugins  []plugins.CapabilitySummary `json:"plugins"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/plugins/install", map[string]string{"plugin_id": pluginID}, &resp); err != nil {
+		return plugins.Manifest{}, err
+	}
+	m.setPeerPlugins(peer.NodeID, resp.Plugins)
+	return resp.Manifest, nil
+}
+
+func (m *Manager) ToggleNodePlugin(nodeID, pluginID string, enabled bool) (plugins.Manifest, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		pm, err := m.getLocalPluginManager()
+		if err != nil {
+			return plugins.Manifest{}, err
+		}
+		return pm.SetEnabled(pluginID, enabled)
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return plugins.Manifest{}, err
+	}
+	var resp struct {
+		Manifest plugins.Manifest            `json:"manifest"`
+		Plugins  []plugins.CapabilitySummary `json:"plugins"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/plugins/toggle", map[string]any{"plugin_id": pluginID, "enabled": enabled}, &resp); err != nil {
+		return plugins.Manifest{}, err
+	}
+	m.setPeerPlugins(peer.NodeID, resp.Plugins)
+	return resp.Manifest, nil
+}
+
+func (m *Manager) UninstallNodePlugin(nodeID, pluginID string) error {
+	if nodeID == "" || nodeID == m.NodeID() {
+		pm, err := m.getLocalPluginManager()
+		if err != nil {
+			return err
+		}
+		return pm.Uninstall(pluginID)
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Plugins []plugins.CapabilitySummary `json:"plugins"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodDelete, "/internal/cluster/plugins/"+url.PathEscape(pluginID), nil, &resp); err != nil {
+		return err
+	}
+	m.setPeerPlugins(peer.NodeID, resp.Plugins)
+	return nil
+}
+
+// ExecuteRemotePlugin dispatches a file to an online peer node for plugin execution and returns output bytes & name.
+func (m *Manager) ExecuteRemotePlugin(peer NodeStatus, capability, pluginID, fileName string, r io.Reader) ([]byte, string, string, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		defer pw.Close()
+		defer mw.Close()
+		_ = mw.WriteField("capability", capability)
+		_ = mw.WriteField("plugin_id", pluginID)
+		part, err := mw.CreateFormFile("file", fileName)
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(part, r); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+	}()
+
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/plugins/execute"
+	req, err := http.NewRequest(http.MethodPost, targetURL, pr)
+	if err != nil {
+		_ = pr.Close()
+		return nil, "", "", err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.streamClient.Do(req)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("调度插件任务到节点 %s 失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 128<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(rawBody, &errBody) == nil && errBody.Error != "" {
+			return nil, "", "", errors.New(errBody.Error)
+		}
+		return nil, "", "", fmt.Errorf("节点 %s 执行插件失败 (%d)", peer.NodeName, resp.StatusCode)
+	}
+	var out struct {
+		OutputName   string `json:"output_name"`
+		OutputBase64 string `json:"output_base64"`
+		Summary      string `json:"summary"`
+	}
+	if err := json.Unmarshal(rawBody, &out); err != nil {
+		return nil, "", "", err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(out.OutputBase64)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return decoded, out.OutputName, out.Summary, nil
 }

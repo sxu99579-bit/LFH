@@ -317,7 +317,7 @@
           <img class="brand-logo" src="/logo.png" alt="LFH" />
           <div>
             <div class="hero-eyebrow">MOBILE LAN FILEHUB</div>
-            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.11.21.13</span></h1>
+            <h1>LFH <span class="ver-badge" id="auth-version-badge">V0.12.0</span></h1>
           </div>
         </div>
         <p class="hero-lead">
@@ -384,7 +384,7 @@
       <div class="sidebar-brand">
         <img class="brand-logo small" src="/logo.png" alt="LFH" />
         <div class="sidebar-brand-text">
-          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.11.21.13</span></div>
+          <div class="brand-name">LFH <span class="ver-badge" id="sidebar-version-badge">V0.12.0</span></div>
           <div class="brand-sub">多维筛选与存储池总览</div>
         </div>
         <button id="btn-close-sidebar" class="btn btn-ghost btn-xs" type="button" aria-label="关闭筛选">
@@ -848,6 +848,7 @@
           <span id="users-pending-pill" class="pending-badge hidden">0</span>
         </button>
         <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="cluster">集群与网卡入口</button>
+        <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="plugins">插件市场与算力</button>
         <button class="settings-tab admin-only-tab hidden" type="button" data-settings-tab="update">
           系统升级
           <span id="update-tab-dot" class="update-dot hidden"></span>
@@ -1147,6 +1148,46 @@
           </div>
         </div>
 
+        <div class="settings-panel hidden" id="panel-plugins">
+          <div class="admin-card">
+            <div class="plugin-node-toolbar">
+              <div>
+                <h4>分布式算力插件市场</h4>
+                <p class="setting-hint">在任意节点安装并启用插件，全集群共享算力并自动本地化调度。</p>
+              </div>
+              <div class="row-actions">
+                <select id="plugin-install-node" class="field-select" title="选择目标节点"></select>
+                <button class="btn-ghost" type="button" id="btn-refresh-plugins">刷新</button>
+              </div>
+            </div>
+            <div id="plugins-marketplace-list" class="plugin-market-grid"></div>
+          </div>
+
+          <div class="admin-card">
+            <h4>全集群算力能力矩阵</h4>
+            <div id="plugins-capabilities-list" class="plugin-cap-matrix"></div>
+          </div>
+
+          <div class="admin-card">
+            <h4>算力任务记录</h4>
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>文件</th>
+                    <th>能力 / 插件</th>
+                    <th>执行节点</th>
+                    <th>状态</th>
+                    <th>结果摘要</th>
+                    <th>耗时</th>
+                  </tr>
+                </thead>
+                <tbody id="plugins-jobs-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-panel hidden" id="panel-update">
           <div class="admin-section">
             <div class="admin-section-head">
@@ -1159,7 +1200,7 @@
             </div>
             <div class="update-status-card">
               <div class="update-meta-grid">
-                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.11.21.13</strong></div>
+                <div class="device-summary-row"><span class="device-summary-lbl">当前版本</span><strong id="upd-cur-version">V0.12.0</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">最新版本</span><strong id="upd-latest-version">尚未检查</strong></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">运行平台</span><span id="upd-platform">-</span></div>
                 <div class="device-summary-row"><span class="device-summary-lbl">上次检查</span><span id="upd-checked-at">-</span></div>
@@ -1262,6 +1303,25 @@
     <div class="drop-overlay-card">
       <div class="drop-overlay-title">松开即可上传</div>
       <div class="drop-overlay-sub">自动分发至集群存储池</div>
+    </div>
+  </div>
+
+  <!-- 分布式算力插件调度弹窗 -->
+  <div id="plugin-run-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="plugin-run-file-title">
+    <div class="modal-backdrop" id="plugin-run-backdrop"></div>
+    <div class="modal-dialog modal-md">
+      <div class="modal-header">
+        <div>
+          <h3>分布式算力处理</h3>
+          <div id="plugin-run-file-title" class="muted" style="font-size:12px;"></div>
+        </div>
+        <button id="plugin-run-close" class="modal-close" type="button" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="setting-hint">系统将自动选择最优节点执行并将结果回存至「插件产物」目录。</p>
+        <div id="plugin-run-list" class="plugin-run-list"></div>
+        <div id="plugin-run-result" class="plugin-run-result hidden"></div>
+      </div>
     </div>
   </div>
 

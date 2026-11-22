@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.13</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.12.0</code>
 </p>
 
 ---
@@ -20,6 +20,9 @@
 
 ## 核心特性
 
+- **分布式算力插件系统与插件市场（Distributed Compute Plugins）**：
+  - 支持将算力插件按节点安装与启停（内置 **OCR 图文识别**、**智能文件整理**、**PDF 转 Word (.docx)**，同时支持自定义外部命令行/Sidecar 插件标准清单 `plugin.json`）；
+  - 各节点通过心跳实时汇总能力至主节点：**只要局域网内任意一台在线节点安装了某插件，全网所有终端均可触发使用**；主节点调度器自动按数据本地性、空闲并发槽位与 CPU 负载路由到最优节点计算并回传产物至 `插件产物/` 目录。
 - **断点续传、传输队列与文件完整性巡检（Transfer Queue & Integrity Scrubbing）**：
   - 大文件自动启用 4 MB 并发分片上传（`/api/uploads/init` -> `chunk` -> `complete`），支持**同指纹断点续传**与**秒传去重**，页面右下角/底部提供可折叠**「传输队列」悬浮抽屉**（支持上传/下载队列、并发控制、实时速度与剩余时间、暂停/继续/重试/取消）；
   - 上传写入期流式计算并持久化整文件 SHA-256，后台定期与管理员按需执行 **Bit-Rot 静默损坏巡检**，发现异常自动标记并计入存储读错误告警；

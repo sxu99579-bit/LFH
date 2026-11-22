@@ -41,6 +41,7 @@ func TestCompareVersions(t *testing.T) {
 		{"V0.11.21.11", "V0.11.21.10", 1},
 		{"V0.11.21.12", "V0.11.21.11", 1},
 		{"V0.11.21.13", "V0.11.21.12", 1},
+		{"V0.12.0", "V0.11.21.13", 1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersions(tc.a, tc.b); got != tc.want {
@@ -110,8 +111,8 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 		switch r.URL.Path {
 		case "/repos/tester/LFH/releases/latest":
 			_ = json.NewEncoder(w).Encode(githubRelease{
-				TagName:     "V0.12.0",
-				HTMLURL:     ts.URL + "/releases/V0.12.0",
+				TagName:     "V0.13.0",
+				HTMLURL:     ts.URL + "/releases/V0.13.0",
 				Body:        "Zero-downtime update test release",
 				PublishedAt: "2026-11-21T18:00:00Z",
 				Assets: []ReleaseAsset{
@@ -149,7 +150,7 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 
 	availableNotified := false
 	mgr.SetCallbacks(nil, func(st Status) {
-		if st.LatestVersion == "V0.12.0" {
+		if st.LatestVersion == "V0.13.0" {
 			availableNotified = true
 		}
 	}, nil)
@@ -158,7 +159,7 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckNow: %v", err)
 	}
-	if !st.HasUpdate || st.LatestVersion != "V0.12.0" || st.AssetName != assetName || !availableNotified {
+	if !st.HasUpdate || st.LatestVersion != "V0.13.0" || st.AssetName != assetName || !availableNotified {
 		t.Fatalf("unexpected check status: %+v notified=%v", st, availableNotified)
 	}
 
@@ -209,7 +210,7 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 	if err := mgr.ApplyUpdateSync(context.Background()); err != nil {
 		t.Fatalf("expected ApplyUpdateSync success, got %v", err)
 	}
-	if handedVersion != "V0.12.0" || mgr.Status().State != "done" || mgr.Status().Progress != 100 {
+	if handedVersion != "V0.13.0" || mgr.Status().State != "done" || mgr.Status().Progress != 100 {
 		t.Fatalf("unexpected final status: ver=%q status=%+v", handedVersion, mgr.Status())
 	}
 	gotCur, _ = os.ReadFile(fakeExe)

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -27,6 +28,7 @@ import (
 	"lfh/internal/auth"
 	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
+	"lfh/internal/plugins"
 	"lfh/internal/security"
 	"lfh/internal/storage"
 	"lfh/internal/updater"
@@ -61,16 +63,23 @@ func newTestServerWithCluster(t *testing.T, opts cluster.Options) (*Server, *clu
 	if err != nil {
 		t.Fatalf("NewAuditLogger: %v", err)
 	}
+	pm, err := plugins.NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager plugins: %v", err)
+	}
+	cm.SetPluginManager(pm)
 	srv := &Server{
-		auth:    authMgr,
-		store:   store,
-		cluster: cm,
-		events:  NewEventHub(),
-		updater: upMgr,
-		limiter: security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
-		audit:   auditLog,
-		webFS:   testEmbedFS,
-		port:    "8080",
+		auth:     authMgr,
+		store:    store,
+		cluster:  cm,
+		events:   NewEventHub(),
+		updater:  upMgr,
+		limiter:  security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
+		audit:    auditLog,
+		plugins:  pm,
+		jobsPath: filepath.Join(dir, "plugin-jobs.json"),
+		webFS:    testEmbedFS,
+		port:     "8080",
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -2594,5 +2603,176 @@ func TestStage3ChunkedUploadIntegrityAndSecurity(t *testing.T) {
 		if !seenActions[want] {
 			t.Fatalf("expected audit action %q in %+v", want, auditOut.Entries)
 		}
+	}
+}
+
+func TestStage4DistributedPluginClusterScheduling(t *testing.T) {
+	entrySrv, entryMgr, _, entryTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Node-A-OCR",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_, workerBMgr, _, workerBTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Node-B-Org",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_, workerCMgr, _, workerCTS := newTestServerWithCluster(t, cluster.Options{
+		Role:     cluster.RoleEntry,
+		NodeName: "Node-C-PDF",
+		QuotaGB:  10,
+		QuotaSet: true,
+	})
+	_ = workerBTS
+	_ = workerCTS
+
+	if err := workerBMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker B join: %v", err)
+	}
+	if err := workerCMgr.JoinEntryCluster(entryTS.URL, entryMgr.Secret(), 0); err != nil {
+		t.Fatalf("worker C join: %v", err)
+	}
+	if err := workerBMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker B heartbeat: %v", err)
+	}
+	if err := workerCMgr.SendHeartbeatNow(); err != nil {
+		t.Fatalf("worker C heartbeat: %v", err)
+	}
+
+	adminClient := loginTestAdmin(t, entrySrv, entryTS.URL)
+
+	// Install distinct plugins across nodes A, B, and C.
+	installPlugin := func(nodeID, pluginID string) {
+		body, _ := json.Marshal(map[string]string{"node_id": nodeID, "plugin_id": pluginID})
+		res, err := adminClient.Post(entryTS.URL+"/api/admin/plugins/install", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("install %s on %s: %v", pluginID, nodeID, err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 installing %s on %s, got %d", pluginID, nodeID, res.StatusCode)
+		}
+	}
+	installPlugin(entryMgr.NodeID(), plugins.PluginOCRVision)
+	installPlugin(workerBMgr.NodeID(), plugins.PluginAutoOrganizer)
+	installPlugin(workerCMgr.NodeID(), plugins.PluginPDFToWord)
+
+	// Verify cluster capabilities aggregation exposes all 3 heterogeneous capabilities.
+	capRes, _ := adminClient.Get(entryTS.URL + "/api/plugins/capabilities")
+	var capOut struct {
+		Capabilities []cluster.ClusterCapabilityView `json:"capabilities"`
+	}
+	_ = json.NewDecoder(capRes.Body).Decode(&capOut)
+	capRes.Body.Close()
+	if len(capOut.Capabilities) != 3 {
+		t.Fatalf("expected 3 aggregated cluster capabilities, got %+v", capOut.Capabilities)
+	}
+
+	// Upload synthetic PDF to Node A via multipart upload, then route PDF-to-Word to Node C!
+	var compressed bytes.Buffer
+	zw := zlib.NewWriter(&compressed)
+	_, _ = zw.Write([]byte("BT /F1 12 Tf (Stage4 Cross-Node PDF Compute) Tj ET"))
+	_ = zw.Close()
+	var pdfBuf bytes.Buffer
+	pdfBuf.WriteString("%PDF-1.4\n1 0 obj<<>>stream\n")
+	pdfBuf.Write(compressed.Bytes())
+	pdfBuf.WriteString("\nendstream\n%%EOF")
+
+	upPDF := func() storage.FileRecord {
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		_ = mw.WriteField("target_node", entryMgr.NodeID())
+		part, _ := mw.CreateFormFile("files", "cluster-report.pdf")
+		_, _ = part.Write(pdfBuf.Bytes())
+		_ = mw.Close()
+		req, _ := http.NewRequest(http.MethodPost, entryTS.URL+"/api/upload", &body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		res, err := adminClient.Do(req)
+		if err != nil {
+			t.Fatalf("upload pdf: %v", err)
+		}
+		var out struct {
+			Uploaded []storage.FileRecord `json:"uploaded"`
+		}
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		res.Body.Close()
+		if res.StatusCode != http.StatusCreated || len(out.Uploaded) != 1 {
+			t.Fatalf("unexpected pdf upload status=%d out=%+v", res.StatusCode, out)
+		}
+		return out.Uploaded[0]
+	}()
+
+	runJob := func(fileID, capability, pluginID string) (plugins.PluginJob, storage.FileRecord) {
+		jb, _ := json.Marshal(map[string]string{
+			"file_id":    fileID,
+			"capability": capability,
+			"plugin_id":  pluginID,
+		})
+		res, err := adminClient.Post(entryTS.URL+"/api/plugins/jobs", "application/json", bytes.NewReader(jb))
+		if err != nil {
+			t.Fatalf("POST /api/plugins/jobs: %v", err)
+		}
+		var out struct {
+			OK         bool               `json:"ok"`
+			Job        plugins.PluginJob  `json:"job"`
+			OutputFile storage.FileRecord `json:"output_file"`
+		}
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		res.Body.Close()
+		if res.StatusCode != http.StatusCreated || !out.OK {
+			t.Fatalf("expected 201 job output, got status=%d out=%+v", res.StatusCode, out)
+		}
+		return out.Job, out.OutputFile
+	}
+
+	pdfJob, docxFile := runJob(upPDF.ID, plugins.CapPDFToDocx, plugins.PluginPDFToWord)
+	if pdfJob.ComputeNodeID != workerCMgr.NodeID() || !strings.HasSuffix(docxFile.Name, ".docx") {
+		t.Fatalf("expected PDF job routed to Worker C producing .docx, got job=%+v file=%+v", pdfJob, docxFile)
+	}
+	dlDocx, _ := adminClient.Get(entryTS.URL + "/api/files/" + docxFile.ID + "/download")
+	docxBytes, _ := io.ReadAll(dlDocx.Body)
+	dlDocx.Body.Close()
+	zr, err := zip.NewReader(bytes.NewReader(docxBytes), int64(len(docxBytes)))
+	if err != nil {
+		t.Fatalf("downloaded .docx invalid zip: %v", err)
+	}
+	foundXMLText := false
+	for _, zf := range zr.File {
+		if zf.Name == "word/document.xml" {
+			rc, _ := zf.Open()
+			rawXML, _ := io.ReadAll(rc)
+			_ = rc.Close()
+			if strings.Contains(string(rawXML), "Stage4 Cross-Node PDF Compute") {
+				foundXMLText = true
+			}
+		}
+	}
+	if !foundXMLText {
+		t.Fatalf("expected converted .docx from Worker C to contain extracted PDF text")
+	}
+
+	// Verify auto-organizer job routes to Worker B cleanly.
+	orgJob, orgOut := runJob(upPDF.ID, plugins.CapAutoClassify, plugins.PluginAutoOrganizer)
+	if orgJob.ComputeNodeID != workerBMgr.NodeID() || !strings.HasSuffix(orgOut.Name, ".organize.json") {
+		t.Fatalf("expected auto-organizer routed to Worker B, got job=%+v out=%+v", orgJob, orgOut)
+	}
+
+	// Disabling pdf-to-word on Worker C removes capability from aggregated cluster list.
+	togBody, _ := json.Marshal(map[string]any{"node_id": workerCMgr.NodeID(), "plugin_id": plugins.PluginPDFToWord, "enabled": false})
+	togRes, _ := adminClient.Post(entryTS.URL+"/api/admin/plugins/toggle", "application/json", bytes.NewReader(togBody))
+	togRes.Body.Close()
+	if togRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 toggling plugin off, got %d", togRes.StatusCode)
+	}
+	capRes2, _ := adminClient.Get(entryTS.URL + "/api/plugins/capabilities")
+	var capOut2 struct {
+		Capabilities []cluster.ClusterCapabilityView `json:"capabilities"`
+	}
+	_ = json.NewDecoder(capRes2.Body).Decode(&capOut2)
+	capRes2.Body.Close()
+	if len(capOut2.Capabilities) != 2 {
+		t.Fatalf("expected 2 enabled capabilities after disabling C, got %+v", capOut2.Capabilities)
 	}
 }

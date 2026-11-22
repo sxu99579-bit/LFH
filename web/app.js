@@ -21,9 +21,13 @@ const state = {
   settingsTab: "general",
   pendingUsersCount: 0,
   theme: "dark",
-  appVersion: "V0.11.21.13",
+  appVersion: "V0.12.0",
   localImportMode: "import",
   mounts: [],
+  clusterCapabilities: [],
+  marketplacePlugins: [],
+  pluginJobs: [],
+  activePluginRunFileId: "",
   transfers: [],
   transferTab: "upload",
   transferOpen: false,
@@ -670,7 +674,7 @@ function isExtAllowedByPolicy(filename) {
 }
 
 function syncVersionBadges() {
-  const ver = state.appVersion || "V0.11.21.13";
+  const ver = state.appVersion || "V0.12.0";
   if ($("auth-version-badge")) $("auth-version-badge").textContent = ver;
   if ($("sidebar-version-badge")) $("sidebar-version-badge").textContent = ver;
 }
@@ -1016,9 +1020,14 @@ function startLiveSync() {
     if (ev.kind === "cluster_sync") {
       scheduleAutoRefresh();
       const modal = $("settings-modal");
-      if (modal && !modal.classList.contains("hidden") && state.settingsTab === "cluster") {
-        loadPassiveDiscovered();
-        loadAdminMounts();
+      if (modal && !modal.classList.contains("hidden")) {
+        if (state.settingsTab === "cluster") {
+          loadPassiveDiscovered();
+          loadAdminMounts();
+        } else if (state.settingsTab === "plugins") {
+          loadAdminPlugins();
+          loadPluginJobs();
+        }
       }
       return;
     }
@@ -1151,7 +1160,18 @@ async function refreshAll() {
 
 async function loadCluster() {
   try {
-    const data = await api("/api/cluster");
+    const prevCapSig = JSON.stringify((state.clusterCapabilities || []).map((c) => `${c.capability}:${(c.providers || []).length}`));
+    const [data, capData] = await Promise.all([
+      api("/api/cluster"),
+      api("/api/plugins/capabilities").catch(() => null),
+    ]);
+    if (capData && Array.isArray(capData.capabilities)) {
+      state.clusterCapabilities = capData.capabilities;
+      const nextCapSig = JSON.stringify(state.clusterCapabilities.map((c) => `${c.capability}:${(c.providers || []).length}`));
+      if (nextCapSig !== prevCapSig && state.files && state.files.length > 0 && state.workspacePage === "files") {
+        renderCurrentFilesView(true);
+      }
+    }
     state.pool = data.pool;
     state.clusterSecret = data.cluster_secret || "";
     if (data.port) state.port = data.port;
@@ -1610,6 +1630,26 @@ function formatStorageModeBadge(rec) {
   return badges.join("");
 }
 
+function matchExtForPlugin(supportedExts, fileName) {
+  if (!Array.isArray(supportedExts) || supportedExts.length === 0) return false;
+  if (supportedExts.some((x) => x === "*" || x === ".*")) return true;
+  const name = String(fileName || "");
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return false;
+  const ext = name.slice(dot).toLowerCase();
+  const bare = ext.replace(/^\./, "");
+  return supportedExts.some((x) => {
+    const norm = String(x || "").trim().toLowerCase();
+    return norm === ext || norm === bare || `.${norm}` === ext;
+  });
+}
+
+function getMatchingCapabilitiesForFile(fileName) {
+  return (state.clusterCapabilities || []).filter(
+    (c) => Array.isArray(c.providers) && c.providers.length > 0 && matchExtForPlugin(c.supported_exts, fileName)
+  );
+}
+
 function buildRecordMeta(rec) {
   const ext = (rec?.ext || "").toLowerCase().replace(/^\./, "");
   const online = rec.node_online !== false;
@@ -1624,6 +1664,10 @@ function buildRecordMeta(rec) {
     : "";
   const editBtn = canEdit
     ? `<button class="btn btn-ghost btn-xs" type="button" data-action="edit" data-id="${rec.id}" ${online && !rec.source_missing ? "" : "disabled title='节点离线或源文件缺失'"} title="在线文本编辑并保存为新版本">编辑</button>`
+    : "";
+  const pluginMatches = online && !rec.source_missing ? getMatchingCapabilitiesForFile(rec.name) : [];
+  const pluginBtn = pluginMatches.length > 0
+    ? `<button class="btn btn-ghost btn-xs" type="button" data-action="plugin-run" data-id="${escapeHtml(rec.id)}" title="调用集群算力插件处理此文件（可用能力：${escapeHtml(pluginMatches.map((c) => c.name || c.capability).join("、"))}）">算力</button>`
     : "";
   const verNum = Number(rec.version || 1);
   const verCnt = Number(rec.version_count || (Array.isArray(rec.versions) ? rec.versions.length + 1 : 1));
@@ -1685,6 +1729,7 @@ function buildRecordMeta(rec) {
     canEdit,
     previewBtn,
     editBtn,
+    pluginBtn,
     verBadgeHtml,
     storageBadgeHtml,
     verBtn,
@@ -1752,6 +1797,7 @@ function renderFilesTable() {
         <div class="row-actions">
           ${meta.previewBtn}
           ${meta.editBtn}
+          ${meta.pluginBtn}
           ${meta.verBtn}
           ${meta.propsBtn}
           ${meta.accessBtn}
@@ -1826,6 +1872,7 @@ function renderFilesGrid() {
       <div class="file-card-actions">
         ${meta.previewBtn}
         ${meta.editBtn}
+        ${meta.pluginBtn}
         ${meta.verBtn}
         ${meta.propsBtn}
         ${meta.accessBtn}
@@ -3659,7 +3706,7 @@ function compareVersionsClient(a, b) {
 
 async function syncClusterNodeVersions(nodeID, nodeName) {
   const isSingle = Boolean(nodeID && nodeID !== "all");
-  const entryVer = state.pool?.entry_version || state.appVersion || "V0.11.21.7";
+  const entryVer = state.pool?.entry_version || state.appVersion || "V0.12.0";
   const label = isSingle ? `分节点「${nodeName || nodeID}」` : "所有在线分节点";
   try {
     const data = await api("/api/admin/cluster/upgrade-nodes", {
@@ -4092,7 +4139,7 @@ function renderNodeHealthPage() {
       const wErr = Number(n.io_write_errors || 0);
       const totErr = Number(n.io_total_errors || rErr + wErr);
       const syncTime = n.last_sync_at || n.last_seen;
-      const entryVer = pool?.entry_version || state.appVersion || "V0.11.21.7";
+      const entryVer = pool?.entry_version || state.appVersion || "V0.12.0";
       const nodeVer = n.version || (n.is_self ? entryVer : "V0.11.21.4");
       const isBehind = !n.is_self && compareVersionsClient(nodeVer, entryVer) < 0;
       const isAdmin = Boolean(state.user && state.user.role === "admin");
@@ -4110,6 +4157,10 @@ function renderNodeHealthPage() {
       const onlineBadge = n.online
         ? `<span class="status-pill status-ok">在线健康</span>`
         : `<span class="status-pill status-off">离线 (${escapeHtml(formatRelativeTime(n.last_seen))})</span>`;
+      const enabledPlugins = Array.isArray(n.plugins) ? n.plugins.filter((p) => p.enabled) : [];
+      const pluginPillsHtml = enabledPlugins.length > 0
+        ? `<div class="plugin-card-tags" style="margin-top:6px;">${enabledPlugins.map((p) => `<span class="plugin-cap-pill" title="${escapeHtml((p.capabilities || []).join(", "))}">${escapeHtml(p.name || p.plugin_id)}${Number(p.busy_jobs || 0) > 0 ? ` (${Number(p.busy_jobs)}/${Number(p.max_concurrency || 1)})` : ""}</span>`).join("")}</div>`
+        : "";
 
       return `
         <div class="health-node-card ${n.online ? "" : "offline"}">
@@ -4124,6 +4175,7 @@ function renderNodeHealthPage() {
                 <span class="clip-status-badge ${n.clipboard_enabled ? "on" : "off"}">超级剪贴板：${n.clipboard_enabled ? "已开启" : "已关闭"}</span>
               </div>
               <div class="health-node-url">${escapeHtml(n.http_url || "本机直连")} · ${escapeHtml(n.os || "-")}/${escapeHtml(n.arch || "-")} · 文件数 ${Number(n.file_count || 0)} 个</div>
+              ${pluginPillsHtml}
             </div>
             <div class="row-actions" style="align-items:center;">
               <span class="ver-badge">${escapeHtml(nodeVer)}</span>
@@ -4616,7 +4668,7 @@ function switchSettingsTab(tab) {
   document.querySelectorAll("[data-settings-tab]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.settingsTab === tab);
   });
-  for (const name of ["general", "security", "users", "cluster", "update"]) {
+  for (const name of ["general", "security", "users", "cluster", "plugins", "update"]) {
     const panel = $(`panel-${name}`);
     if (panel) panel.classList.toggle("hidden", name !== tab);
   }
@@ -4626,6 +4678,9 @@ function switchSettingsTab(tab) {
   } else if (tab === "security" && state.user && state.user.role === "admin") {
     loadIntegrityStatus();
     loadAdminAudit();
+  } else if (tab === "plugins" && state.user && state.user.role === "admin") {
+    loadAdminPlugins();
+    loadPluginJobs();
   }
 }
 
@@ -4956,6 +5011,8 @@ async function refreshAdminData() {
     loadAdminMounts();
     loadIntegrityStatus();
     loadAdminAudit();
+    loadAdminPlugins();
+    loadPluginJobs();
     renderInvitesTable(invData.invites || []);
     renderUsersTable(usersData.users || []);
     if (updateData && updateData.status) {
@@ -4966,11 +5023,366 @@ async function refreshAdminData() {
   }
 }
 
+// ==================== Stage 4: 分布式算力插件市场与任务调度 ====================
+async function loadAdminPlugins() {
+  if (!state.user || state.user.role !== "admin") return;
+  try {
+    const data = await api("/api/admin/plugins/marketplace");
+    if (Array.isArray(data.marketplace)) state.marketplacePlugins = data.marketplace;
+    if (Array.isArray(data.capabilities)) state.clusterCapabilities = data.capabilities;
+    if (Array.isArray(data.nodes) && state.pool) {
+      state.pool.nodes = data.nodes;
+    }
+    renderAdminPlugins();
+  } catch (err) {
+    if ($("plugins-marketplace-list")) {
+      $("plugins-marketplace-list").innerHTML = `<div class="muted">加载插件市场失败：${escapeHtml(err.message)}</div>`;
+    }
+  }
+}
+
+async function loadPluginJobs() {
+  try {
+    const data = await api("/api/plugins/jobs");
+    state.pluginJobs = Array.isArray(data.jobs) ? data.jobs : [];
+    renderPluginJobs();
+  } catch {
+    state.pluginJobs = [];
+    renderPluginJobs();
+  }
+}
+
+function getSelectedPluginTargetNodeId(nodes) {
+  const sel = $("plugin-install-node");
+  const cur = sel ? sel.value : "";
+  if (cur && nodes.some((n) => n.node_id === cur)) return cur;
+  const selfNode = nodes.find((n) => n.is_self && n.online);
+  if (selfNode) return selfNode.node_id;
+  const onlineNode = nodes.find((n) => n.online);
+  return onlineNode ? onlineNode.node_id : (nodes[0]?.node_id || "");
+}
+
+function syncPluginMutationState(data) {
+  if (data && data.pool) {
+    state.pool = data.pool;
+    renderPoolStatus();
+    renderNodeSummary();
+    if (state.workspacePage === "health") renderNodeHealthPage();
+  }
+  if (data && Array.isArray(data.capabilities)) {
+    state.clusterCapabilities = data.capabilities;
+    if (state.workspacePage === "files" && state.files.length > 0) {
+      renderCurrentFilesView(true);
+    }
+  }
+  renderAdminPlugins();
+}
+
+function renderAdminPlugins() {
+  const sel = $("plugin-install-node");
+  const marketEl = $("plugins-marketplace-list");
+  const capEl = $("plugins-capabilities-list");
+  const nodes = Array.isArray(state.pool?.nodes) ? state.pool.nodes : [];
+  const targetNodeId = getSelectedPluginTargetNodeId(nodes);
+
+  if (sel) {
+    sel.innerHTML = nodes.length === 0
+      ? `<option value="">暂无可用节点</option>`
+      : nodes.map((n) => {
+          const roleTag = n.role === "entry" ? "主" : "从";
+          const statusTag = n.online ? "在线" : "离线";
+          return `<option value="${escapeHtml(n.node_id)}" ${n.node_id === targetNodeId ? "selected" : ""} ${n.online ? "" : "disabled"}>${escapeHtml(n.node_name)} (${roleTag} · ${statusTag})</option>`;
+        }).join("");
+  }
+
+  const targetNode = nodes.find((n) => n.node_id === targetNodeId);
+  const targetOnline = Boolean(targetNode && targetNode.online);
+
+  if (marketEl) {
+    const items = state.marketplacePlugins || [];
+    if (items.length === 0) {
+      marketEl.innerHTML = `<div class="muted">暂无可用插件条目</div>`;
+    } else {
+      marketEl.innerHTML = items.map((item) => {
+        const pid = escapeHtml(item.id);
+        const nid = escapeHtml(targetNodeId);
+        const inst = (targetNode?.plugins || []).find((p) => p.plugin_id === item.id);
+        const installedNodes = nodes
+          .map((n) => {
+            const p = (n.plugins || []).find((x) => x.plugin_id === item.id);
+            return p ? `${n.node_name} (${p.enabled ? "启用" : "停用"})` : null;
+          })
+          .filter(Boolean);
+
+        const capBadges = (item.capabilities || [])
+          .map((c) => `<span class="plugin-cap-pill">${escapeHtml(c)}</span>`)
+          .join("");
+        const extText = Array.isArray(item.supported_exts) && item.supported_exts.length > 0
+          ? item.supported_exts.join(" ")
+          : "*";
+
+        let actionBtns = "";
+        if (!targetNodeId || !targetOnline) {
+          actionBtns = `<button type="button" class="btn btn-ghost btn-xs" disabled>目标节点离线</button>`;
+        } else if (!inst) {
+          actionBtns = `<button type="button" class="btn btn-primary btn-xs" data-plugin-act="install" data-node="${nid}" data-plugin="${pid}">安装到 ${escapeHtml(targetNode.node_name)}</button>`;
+        } else {
+          const nextEnabled = !inst.enabled;
+          actionBtns = `
+            <span class="status-pill ${inst.enabled ? "status-ok" : "status-off"}">${inst.enabled ? "当前节点已启用" : "当前节点已停用"}</span>
+            <button type="button" class="btn ${nextEnabled ? "btn-primary" : "btn-ghost"} btn-xs" data-plugin-act="toggle" data-node="${nid}" data-plugin="${pid}" data-enabled="${nextEnabled}">${nextEnabled ? "启用" : "停用"}</button>
+            <button type="button" class="btn btn-danger btn-xs" data-plugin-act="uninstall" data-node="${nid}" data-plugin="${pid}">卸载</button>
+          `;
+        }
+
+        return `
+          <div class="plugin-card">
+            <div class="plugin-card-head">
+              <div>
+                <div class="plugin-card-title">${escapeHtml(item.name)} <span class="muted">(${pid})</span></div>
+                <div class="muted" style="font-size:11px;">${escapeHtml(item.category || "compute")} · v${escapeHtml(item.version || "1.0.0")} · 并发上限 ${Number(item.max_concurrency || 1)}</div>
+              </div>
+              <span class="cat-tag">${escapeHtml(item.runtime || "builtin")}</span>
+            </div>
+            <div class="plugin-card-desc">${escapeHtml(item.description || "")}</div>
+            <div class="plugin-card-tags">
+              ${capBadges}
+              <span class="cat-tag" title="支持扩展名">支持：${escapeHtml(extText)}</span>
+            </div>
+            <div class="muted" style="font-size:11px;">
+              依赖：${escapeHtml(item.requirements || "内置零依赖")} · 集群分布：${escapeHtml(installedNodes.length > 0 ? installedNodes.join("，") : "尚未安装")}
+            </div>
+            <div class="row-actions" style="margin-top:auto;padding-top:4px;">${actionBtns}</div>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  if (capEl) {
+    const caps = state.clusterCapabilities || [];
+    const disabledRows = [];
+    for (const n of nodes) {
+      for (const p of n.plugins || []) {
+        if (!p.enabled) {
+          disabledRows.push({ node: n, plugin: p });
+        }
+      }
+    }
+    if (caps.length === 0 && disabledRows.length === 0) {
+      capEl.innerHTML = `<div class="muted">集群尚未安装或启用任何算力插件，可在上方市场选择节点一键安装。</div>`;
+    } else {
+      const capHtml = caps.map((c) => {
+        const providersHtml = (c.providers || []).map((pv) => `
+          <span class="plugin-provider-tag">
+            <span>${escapeHtml(pv.node_name || pv.node_id)}${pv.is_self ? " (主本机)" : ""}</span>
+            <span class="muted">负载 ${Number(pv.busy_jobs || 0)}/${Number(pv.max_concurrency || 1)} · CPU ${Number(pv.cpu_percent || 0).toFixed(0)}%${pv.has_gpu ? " · GPU" : ""}</span>
+            <button type="button" class="btn btn-ghost btn-xs" data-plugin-act="toggle" data-node="${escapeHtml(pv.node_id)}" data-plugin="${escapeHtml(c.plugin_id)}" data-enabled="false">停用</button>
+            <button type="button" class="btn btn-danger btn-xs" data-plugin-act="uninstall" data-node="${escapeHtml(pv.node_id)}" data-plugin="${escapeHtml(c.plugin_id)}">卸载</button>
+          </span>
+        `).join("");
+        return `
+          <div class="plugin-cap-row">
+            <div class="plugin-cap-row-head">
+              <div>
+                <strong>${escapeHtml(c.name || c.capability)}</strong>
+                <span class="plugin-cap-pill">${escapeHtml(c.capability)}</span>
+                <span class="muted" style="font-size:12px;">插件：${escapeHtml(c.plugin_id)} · 扩展名：${escapeHtml((c.supported_exts || []).join(", "))}</span>
+              </div>
+              <span class="status-pill status-ok">${(c.providers || []).length} 个算力节点在线</span>
+            </div>
+            <div class="plugin-provider-list">${providersHtml}</div>
+          </div>
+        `;
+      }).join("");
+
+      const disabledHtml = disabledRows.length > 0
+        ? `
+          <div class="plugin-cap-row">
+            <div class="plugin-cap-row-head">
+              <strong>已安装但停用的节点插件</strong>
+              <span class="status-pill status-off">${disabledRows.length} 项停用</span>
+            </div>
+            <div class="plugin-provider-list">
+              ${disabledRows.map(({ node, plugin }) => `
+                <span class="plugin-provider-tag disabled">
+                  <span>${escapeHtml(plugin.name || plugin.plugin_id)} @ ${escapeHtml(node.node_name)}</span>
+                  <button type="button" class="btn btn-primary btn-xs" data-plugin-act="toggle" data-node="${escapeHtml(node.node_id)}" data-plugin="${escapeHtml(plugin.plugin_id)}" data-enabled="true">启用</button>
+                  <button type="button" class="btn btn-danger btn-xs" data-plugin-act="uninstall" data-node="${escapeHtml(node.node_id)}" data-plugin="${escapeHtml(plugin.plugin_id)}">卸载</button>
+                </span>
+              `).join("")}
+            </div>
+          </div>
+        `
+        : "";
+
+      capEl.innerHTML = capHtml + disabledHtml;
+    }
+  }
+}
+
+function renderPluginJobs() {
+  const tbody = $("plugins-jobs-tbody");
+  if (!tbody) return;
+  const jobs = state.pluginJobs || [];
+  if (jobs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;">暂无分布式算力任务记录</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = jobs.slice(0, 50).map((j) => {
+    const statusCls = j.status === "succeeded" ? "status-ok" : j.status === "failed" ? "status-off" : "";
+    const statusLabel = j.status === "succeeded" ? "成功" : j.status === "failed" ? "失败" : j.status || "运行中";
+    const summaryText = escapeHtml(j.summary || j.error || "-");
+    const outLink = j.output_file_id
+      ? ` <a class="btn btn-ghost btn-xs" href="/api/files/${escapeHtml(j.output_file_id)}/download">下载 ${escapeHtml(j.output_file_name || "产物")}</a>`
+      : "";
+    return `
+      <tr>
+        <td>${escapeHtml(j.source_file_name || j.source_file_id || "-")}</td>
+        <td><strong>${escapeHtml(j.plugin_id || "-")}</strong> <span class="muted">(${escapeHtml(j.capability || "-")})</span></td>
+        <td>${escapeHtml(j.compute_node_name || j.compute_node_id || "-")}</td>
+        <td><span class="status-pill ${statusCls}">${escapeHtml(statusLabel)}</span></td>
+        <td>${summaryText}${outLink}</td>
+        <td>${Number(j.duration_ms || 0)} ms</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+async function installPluginOnNode(nodeId, pluginId) {
+  try {
+    const data = await api("/api/admin/plugins/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId, plugin_id: pluginId }),
+    });
+    syncPluginMutationState(data);
+    showToast(`已在节点安装并启用插件 ${pluginId}`, "success");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function togglePluginOnNode(nodeId, pluginId, enabled) {
+  try {
+    const data = await api("/api/admin/plugins/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId, plugin_id: pluginId, enabled }),
+    });
+    syncPluginMutationState(data);
+    showToast(`已${enabled ? "启用" : "停用"}插件 ${pluginId}`, "success");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function uninstallPluginOnNode(nodeId, pluginId) {
+  if (!confirm(`确定要从该节点卸载插件 ${pluginId} 吗？`)) return;
+  try {
+    const data = await api(`/api/admin/plugins/${encodeURIComponent(nodeId)}/${encodeURIComponent(pluginId)}`, {
+      method: "DELETE",
+    });
+    syncPluginMutationState(data);
+    showToast(`已卸载插件 ${pluginId}`, "success");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function closePluginRunModal() {
+  state.activePluginRunFileId = "";
+  const modal = $("plugin-run-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function openPluginRunModal(fileId) {
+  const rec = state.files.find((f) => f.id === fileId);
+  if (!rec) return;
+  const modal = $("plugin-run-modal");
+  const titleEl = $("plugin-run-file-title");
+  const listEl = $("plugin-run-list");
+  const resEl = $("plugin-run-result");
+  if (!modal || !listEl) return;
+
+  state.activePluginRunFileId = fileId;
+  if (titleEl) {
+    titleEl.textContent = `${rec.name} (${formatSize(rec.size)}) · 当前存储节点：${rec.node_name || rec.node_id || "本机"}`;
+  }
+  if (resEl) {
+    resEl.className = "plugin-run-result hidden";
+    resEl.innerHTML = "";
+  }
+
+  const matches = getMatchingCapabilitiesForFile(rec.name);
+  if (matches.length === 0) {
+    listEl.innerHTML = `<div class="muted">当前集群没有匹配此文件类型的在线算力插件，管理员可在「设置 → 插件市场与算力」中安装启用。</div>`;
+  } else {
+    listEl.innerHTML = matches.map((cap) => {
+      const providersText = (cap.providers || [])
+        .map((pv) => `${pv.node_name || pv.node_id}${pv.has_gpu ? " (GPU)" : ""} [${Number(pv.busy_jobs || 0)}/${Number(pv.max_concurrency || 1)}]`)
+        .join("、");
+      return `
+        <div class="plugin-run-item">
+          <div class="plugin-run-item-info">
+            <div class="plugin-run-item-title">${escapeHtml(cap.name || cap.capability)} <span class="plugin-cap-pill">${escapeHtml(cap.capability)}</span></div>
+            <div class="plugin-run-item-meta">插件：${escapeHtml(cap.plugin_id)} · 可用算力节点：${escapeHtml(providersText || "自动分配")}</div>
+          </div>
+          <button type="button" class="btn btn-primary btn-xs" data-run-cap="${escapeHtml(cap.capability)}" data-run-plugin="${escapeHtml(cap.plugin_id)}">调度执行</button>
+        </div>
+      `;
+    }).join("");
+  }
+  modal.classList.remove("hidden");
+}
+
+async function executePluginJob(fileId, capability, pluginId, triggerBtn) {
+  const listEl = $("plugin-run-list");
+  const resEl = $("plugin-run-result");
+  const buttons = listEl ? Array.from(listEl.querySelectorAll("button")) : [];
+  buttons.forEach((b) => { b.disabled = true; });
+  if (triggerBtn) triggerBtn.textContent = "算力调度执行中...";
+  if (resEl) {
+    resEl.className = "plugin-run-result";
+    resEl.innerHTML = `正在为文件调度最优算力节点并执行 <strong>${escapeHtml(pluginId || capability)}</strong>...`;
+  }
+  try {
+    const data = await api("/api/plugins/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_id: fileId, capability, plugin_id: pluginId }),
+    });
+    const job = data.job || {};
+    const outFile = data.output_file || null;
+    const outId = outFile?.id || job.output_file_id || "";
+    const outName = outFile?.name || job.output_file_name || "产物文件";
+    if (resEl) {
+      resEl.className = "plugin-run-result";
+      resEl.innerHTML = `
+        <div><strong>算力执行完成</strong>（执行节点：${escapeHtml(job.compute_node_name || job.compute_node_id || "-")} · 耗时 ${Number(job.duration_ms || 0)} ms）</div>
+        <div style="margin-top:4px;">${escapeHtml(job.summary || "处理已完成")}</div>
+        ${outId ? `<div class="row-actions" style="margin-top:8px;"><a class="btn btn-primary btn-xs" href="/api/files/${escapeHtml(outId)}/download">下载产物 (${escapeHtml(outName)})</a><span class="muted" style="font-size:12px;">已保存至「插件产物/${escapeHtml(job.plugin_id || pluginId)}」目录</span></div>` : ""}
+      `;
+    }
+    showToast(`算力任务完成：已由 ${job.compute_node_name || "集群节点"} 执行`, "success");
+    await Promise.all([refreshAll(), loadPluginJobs()]);
+  } catch (err) {
+    if (resEl) {
+      resEl.className = "plugin-run-result error";
+      resEl.innerHTML = `<strong>算力执行失败：</strong>${escapeHtml(err.message)}`;
+    }
+    showToast(err.message, "error");
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+    if (triggerBtn) triggerBtn.textContent = "调度执行";
+  }
+}
+
 function renderUpdateUI() {
   const st = state.updateStatus;
   if (!st || !$("upd-cur-version")) return;
 
-  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.11.21.7";
+  $("upd-cur-version").textContent = st.current_version || state.appVersion || "V0.12.0";
   $("upd-latest-version").textContent = st.latest_version || "尚未检查";
   $("upd-platform").textContent = `${st.os || "-"}/${st.arch || "-"}`;
   $("upd-checked-at").textContent = st.checked_at || "未检查";
@@ -5246,7 +5658,7 @@ function renderAdminCluster() {
     $("toggle-auto-sync-workers").checked = state.pool.auto_sync_workers !== false;
   }
 
-  const entryVer = state.pool.entry_version || state.appVersion || "V0.11.21.7";
+  const entryVer = state.pool.entry_version || state.appVersion || "V0.12.0";
   const tbody = $("cluster-nodes-tbody");
   tbody.innerHTML = "";
   for (const n of state.pool.nodes || []) {
@@ -5811,6 +6223,8 @@ function bindEvents() {
       if (rec) enqueueRangeDownload(rec);
     } else if (action === "edit") {
       openTextEditor(id);
+    } else if (action === "plugin-run") {
+      openPluginRunModal(id);
     } else if (action === "versions") {
       openFileVersionsModal(id);
     } else if (action === "props") {
@@ -6880,6 +7294,56 @@ function bindEvents() {
       e.returnValue = "";
     }
   });
+
+  // Stage 4: 分布式算力插件市场与任务调度事件绑定
+  if ($("btn-refresh-plugins")) {
+    $("btn-refresh-plugins").onclick = async () => {
+      await Promise.all([loadAdminPlugins(), loadPluginJobs(), loadCluster()]);
+      showToast("已刷新全集群插件算力状态", "success");
+    };
+  }
+  if ($("plugin-install-node")) {
+    $("plugin-install-node").onchange = () => renderAdminPlugins();
+  }
+  const handlePluginActionClick = (e) => {
+    const btn = e.target.closest("[data-plugin-act]");
+    if (!btn || btn.disabled) return;
+    const act = btn.dataset.pluginAct;
+    const nodeId = btn.dataset.node || "";
+    const pluginId = btn.dataset.plugin || "";
+    if (!nodeId || !pluginId) return;
+    if (act === "install") {
+      installPluginOnNode(nodeId, pluginId);
+    } else if (act === "toggle") {
+      togglePluginOnNode(nodeId, pluginId, btn.dataset.enabled === "true");
+    } else if (act === "uninstall") {
+      uninstallPluginOnNode(nodeId, pluginId);
+    }
+  };
+  if ($("plugins-marketplace-list")) {
+    $("plugins-marketplace-list").onclick = handlePluginActionClick;
+  }
+  if ($("plugins-capabilities-list")) {
+    $("plugins-capabilities-list").onclick = handlePluginActionClick;
+  }
+  if ($("plugin-run-close")) {
+    $("plugin-run-close").onclick = closePluginRunModal;
+  }
+  if ($("plugin-run-backdrop")) {
+    $("plugin-run-backdrop").onclick = closePluginRunModal;
+  }
+  if ($("plugin-run-list")) {
+    $("plugin-run-list").onclick = (e) => {
+      const btn = e.target.closest("[data-run-cap]");
+      if (!btn || btn.disabled || !state.activePluginRunFileId) return;
+      executePluginJob(
+        state.activePluginRunFileId,
+        btn.dataset.runCap || "",
+        btn.dataset.runPlugin || "",
+        btn
+      );
+    };
+  }
 
   // Password form inside Settings -> General
   $("pwd-form").onsubmit = async (e) => {

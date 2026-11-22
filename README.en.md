@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.11.21.13</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <code>V0.12.0</code>
 </p>
 
 ---
@@ -20,6 +20,9 @@ Ships as a single binary with zero database setup required—ready for both Dock
 
 ## Key Features
 
+- **Distributed Compute Plugin System & Marketplace**:
+  - Install and toggle plugins per cluster node (built-in **OCR Vision**, **Auto Organizer**, and **PDF to Word (.docx)**, plus extensible `plugin.json` external command runners);
+  - Heartbeats automatically aggregate node capabilities cluster-wide so any user can trigger plugins hosted anywhere on the LAN, while the scheduler routes jobs by data locality, concurrency slots, and CPU load and saves output artifacts into `插件产物/`.
 - **Resumable Chunked Transfers, Queue Drawer & Integrity Scrubbing**:
   - Automatic 4 MB parallel chunked uploads (`/api/uploads/init` -> `chunk` -> `complete`) with fingerprint-based resume and SHA-256 instant deduplication, paired with Range-segmented queued downloads inside a collapsible **Transfer Queue** drawer (pause/resume/retry/cancel, live speed & ETA);
   - Persists streaming SHA-256 checksums on write and runs scheduled/on-demand **Bit-Rot Integrity Scrubbing** to detect silent disk corruption;
