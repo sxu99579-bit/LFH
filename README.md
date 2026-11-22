@@ -22,6 +22,10 @@
 
 单二进制开箱即用，无外部数据库或第三方运行时依赖；支持 Docker 容器部署与本地一键运行。
 
+<p align="center">
+  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="LFH 桌面端与移动端工作台概览" />
+</p>
+
 ## 核心特性
 
 - **分布式算力插件系统与插件市场（Distributed Compute Plugins）**：
@@ -56,6 +60,21 @@
   - 普通成员仅展示外观主题与个人账号面板；节点存储磁盘选择、路径切换（含已有文件一键跨盘迁移）及真实存储路径对普通用户严格隐藏，仅限管理员管理。
 - **深浅双主题与全端适配**：内置精致深/浅色模式切换，界面针对桌面端、平板及移动端重排优化。
 - **GitHub 仓库版本检测与不停机升级**：管理面板可自动检查仓库新版本，支持后台下载校验并在热交接后完成不停机平滑更新。
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./assets/readme/cluster-mesh.jpg" alt="分布式多节点统一存储池拓扑" />
+      <br />
+      <sub><b>多机分布式存储池</b> · Windows / Linux / macOS 与手机共享单一入口</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./assets/readme/compute-sync.jpg" alt="零拷贝存储分层与分布式算力调度" />
+      <br />
+      <sub><b>零拷贝分层 & 算力调度</b> · 同盘硬链、断点续传与全集群插件协同</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -166,6 +185,7 @@ go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
 │   ├── storage/                # 本地文件写入、设备指纹追踪与聚合索引
 │   ├── updater/                # GitHub Release 检查、校验与零停机替换升级
 │   └── version/                # 应用标识与版本信息
+├── assets/                     # Logo 矢量/透明包与 README 视觉插图
 ├── frontend/                   # React 19 + TypeScript + Vite + Tailwind v4 前端源码（参考 shadcn-admin 风格）
 ├── web/                        # 预构建前端产物（内嵌至 Go 单文件：index.html / mobile.html / assets）
 ├── Dockerfile                  # 多阶段生产容器镜像构建文件

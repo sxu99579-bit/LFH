@@ -22,6 +22,10 @@
 
 Ships as a single binary with zero database setup required—ready for both Docker containers and native local deployment.
 
+<p align="center">
+  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="LFH Desktop and Mobile Workspaces" />
+</p>
+
 ## Key Features
 
 - **Distributed Compute Plugin System & Marketplace**:
@@ -56,6 +60,21 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - Standard users only see Appearance and Account settings. Storage drive selection, physical directory migration across disks, and server disk paths stay strictly hidden and accessible to administrators only.
 - **Light & Dark Themes across All Screens**: Polished light and dark themes with responsive layouts tuned for desktop, tablet, and mobile viewports.
 - **Zero-Downtime GitHub Self-Updater**: Checks the configured GitHub repository (`sxu99579-bit/LFH`) for new releases, verifies downloads, and swaps the running binary via graceful handoff.
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./assets/readme/cluster-mesh.jpg" alt="Distributed Multi-Device LAN Storage Mesh" />
+      <br />
+      <sub><b>Distributed LAN Pool</b> · Pool Windows, Linux, macOS & mobile under one entry</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./assets/readme/compute-sync.jpg" alt="Zero-Copy Layering & Distributed Compute Sync" />
+      <br />
+      <sub><b>Zero-Copy & Compute</b> · Hardlinks, chunked resume & cluster-wide plugins</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -166,6 +185,7 @@ All backend packages use pure Go stdlib with embedded frontend static assets (`/
 │   ├── storage/                # File store, device fingerprinting & query facets
 │   ├── updater/                # GitHub Release check, verification & live swap
 │   └── version/                # App name, release tag & default repo
+├── assets/                     # Minimalist SVG/PNG logo suite & README illustrations
 ├── frontend/                   # React 19 + TypeScript + Vite + Tailwind v4 frontend source (inspired by shadcn-admin)
 ├── web/                        # Compiled frontend bundle embedded via Go (index.html, mobile.html, assets)
 ├── Dockerfile                  # Multi-stage Alpine container build
