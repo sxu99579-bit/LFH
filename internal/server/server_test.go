@@ -2792,7 +2792,7 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 	curSum := sha256.Sum256(curBytes)
 	curHex := hex.EncodeToString(curSum[:])
 
-	newBytes := []byte("BIN-V0.11.23.0")
+	newBytes := []byte("BIN-V99.0.2.0")
 	newSum := sha256.Sum256(newBytes)
 	newHex := hex.EncodeToString(newSum[:])
 
@@ -2802,8 +2802,8 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 		case "/repos/tester/LFH/releases":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
-					"tag_name":     "V0.11.23.0",
-					"name":         "V0.11.23.0",
+					"tag_name":     "V99.0.2.0",
+					"name":         "V99.0.2.0",
 					"published_at": "2026-11-23T09:00:00Z",
 					"assets": []map[string]any{
 						{"name": assetName, "size": len(newBytes), "browser_download_url": ghTS.URL + "/dl/new/" + assetName},
@@ -2829,10 +2829,10 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 					},
 				},
 			})
-		case "/repos/tester/LFH/releases/latest", "/repos/tester/LFH/releases/tags/V0.11.23.0":
+		case "/repos/tester/LFH/releases/latest", "/repos/tester/LFH/releases/tags/V99.0.2.0":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"tag_name": "V0.11.23.0",
-				"name":     "V0.11.23.0",
+				"tag_name": "V99.0.2.0",
+				"name":     "V99.0.2.0",
 				"assets": []map[string]any{
 					{"name": assetName, "size": len(newBytes), "browser_download_url": ghTS.URL + "/dl/new/" + assetName},
 					{"name": "checksums.txt", "size": 128, "browser_download_url": ghTS.URL + "/dl/new/checksums.txt"},
@@ -2968,7 +2968,7 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 
 	// 3. Strong constraint: if Worker is unreachable while marked online, Entry must ABORT and not switch alone.
 	workerTS.Close()
-	upBody, _ := json.Marshal(map[string]any{"target_version": "V0.11.23.0", "sync_cluster": true})
+	upBody, _ := json.Marshal(map[string]any{"target_version": "V99.0.2.0", "sync_cluster": true})
 	failRes, err := adminClient.Post(entryTS.URL+"/api/admin/update/switch", "application/json", bytes.NewReader(upBody))
 	if err != nil {
 		t.Fatalf("POST switch fail test: %v", err)
@@ -2987,9 +2987,9 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 		t.Fatalf("expected Entry handoff aborted when Worker failed, got %q", abortedEntryVer)
 	}
 
-	// 4. Add Worker B reporting a higher version V0.11.22.9 + pdf-to-word plugin:
+	// 4. Add Worker B reporting a higher version V99.0.1.0 + pdf-to-word plugin:
 	// Verify pool reports version_consistent=false, SelectComputeNode refuses mixed node,
-	// Tier 1 reconcile ("highest_node") pulls Worker B's binary, and Tier 2 ("github_latest") pushes V0.11.23.0.
+	// Tier 1 reconcile ("highest_node") pulls Worker B's binary, and Tier 2 ("github_latest") pushes V99.0.2.0.
 	workerBSrv, workerBMgr, _, workerBTS := newTestServerWithCluster(t, cluster.Options{
 		Role:     cluster.RoleEntry,
 		NodeName: "Worker-B-Ahead",
@@ -2998,7 +2998,7 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 	})
 	_ = workerBMgr.SetAutoSyncWorkers(false)
 	workerBExe := filepath.Join(t.TempDir(), "workerB.exe")
-	aheadBytes := []byte("WORKER-B-BINARY-V0.11.22.9")
+	aheadBytes := []byte("WORKER-B-BINARY-V99.0.1.0")
 	_ = os.WriteFile(workerBExe, aheadBytes, 0755)
 	workerBUpd, err := updater.NewManager(t.TempDir(), "tester/LFH")
 	if err != nil {
@@ -3019,10 +3019,10 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 		t.Fatalf("workerB join: %v", err)
 	}
 
-	// Send signed heartbeat directly to Entry with ahead version V0.11.22.9.
+	// Send signed heartbeat directly to Entry with ahead version V99.0.1.0.
 	hbStatus := workerBMgr.SelfStatus()
 	hbStatus.HTTPURL = workerBTS.URL
-	hbStatus.Version = "V0.11.22.9"
+	hbStatus.Version = "V99.0.1.0"
 	hbPayload, _ := json.Marshal(cluster.HeartbeatPayload{Node: hbStatus})
 	hbReq, _ := http.NewRequest(http.MethodPost, entryTS.URL+"/internal/cluster/heartbeat", bytes.NewReader(hbPayload))
 	hbReq.Header.Set("Content-Type", "application/json")
@@ -3034,8 +3034,8 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 	hbRes.Body.Close()
 
 	pool := entryMgr.PoolSummaryForRole(true)
-	if pool.VersionConsistent || pool.HighestNodeVersion != "V0.11.22.9" {
-		t.Fatalf("expected version_consistent=false and highest=V0.11.22.9, got %+v", pool)
+	if pool.VersionConsistent || pool.HighestNodeVersion != "V99.0.1.0" {
+		t.Fatalf("expected version_consistent=false and highest=V99.0.1.0, got %+v", pool)
 	}
 	if _, _, selErr := entryMgr.SelectComputeNode(plugins.CapPDFToDocx, plugins.PluginPDFToWord, ""); selErr == nil || !strings.Contains(selErr.Error(), "版本不一致") {
 		t.Fatalf("expected SelectComputeNode to reject mismatched node version, got %v", selErr)
@@ -3050,8 +3050,8 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 	var rec1Out map[string]any
 	_ = json.NewDecoder(rec1Res.Body).Decode(&rec1Out)
 	rec1Res.Body.Close()
-	if rec1Res.StatusCode != http.StatusOK || rec1Out["strategy_used"] != "highest_node_pull" || rec1Out["target_version"] != "V0.11.22.9" {
-		t.Fatalf("expected Tier 1 highest_node_pull V0.11.22.9, got status=%d out=%+v", rec1Res.StatusCode, rec1Out)
+	if rec1Res.StatusCode != http.StatusOK || rec1Out["strategy_used"] != "highest_node_pull" || rec1Out["target_version"] != "V99.0.1.0" {
+		t.Fatalf("expected Tier 1 highest_node_pull V99.0.1.0, got status=%d out=%+v", rec1Res.StatusCode, rec1Out)
 	}
 
 	deadline = time.Now().Add(3 * time.Second)
@@ -3073,7 +3073,7 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 	// Mark original Worker offline before Tier 2 test so only live Worker B participates cleanly.
 	entryMgr.SetPeerLastSeenForTest(workerMgr.NodeID(), time.Now().Add(-5*time.Minute))
 
-	// Tier 2: github_latest reconciles all online nodes (Worker B + Entry) to V0.11.23.0.
+	// Tier 2: github_latest reconciles all online nodes (Worker B + Entry) to V99.0.2.0.
 	rec2Body, _ := json.Marshal(map[string]string{"strategy": "github_latest"})
 	rec2Res, err := adminClient.Post(entryTS.URL+"/api/admin/cluster/reconcile-versions", "application/json", bytes.NewReader(rec2Body))
 	if err != nil {
@@ -3082,8 +3082,8 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 	var rec2Out map[string]any
 	_ = json.NewDecoder(rec2Res.Body).Decode(&rec2Out)
 	rec2Res.Body.Close()
-	if rec2Res.StatusCode != http.StatusOK || rec2Out["strategy_used"] != "github_latest" || rec2Out["target_version"] != "V0.11.23.0" {
-		t.Fatalf("expected Tier 2 github_latest V0.11.23.0, got status=%d out=%+v", rec2Res.StatusCode, rec2Out)
+	if rec2Res.StatusCode != http.StatusOK || rec2Out["strategy_used"] != "github_latest" || rec2Out["target_version"] != "V99.0.2.0" {
+		t.Fatalf("expected Tier 2 github_latest V99.0.2.0, got status=%d out=%+v", rec2Res.StatusCode, rec2Out)
 	}
 
 	deadline = time.Now().Add(4 * time.Second)
@@ -3091,16 +3091,16 @@ func TestClusterStrictVersionSwitchRollbackAndReconcile(t *testing.T) {
 		hMu.Lock()
 		eVer, wVer = entryHandoffVer, workerHandoffVer
 		hMu.Unlock()
-		if eVer == "V0.11.23.0" && wVer == "V0.11.23.0" {
+		if eVer == "V99.0.2.0" && wVer == "V99.0.2.0" {
 			break
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
 	if b, _ := os.ReadFile(entryExe); string(b) != string(newBytes) {
-		t.Fatalf("expected entryExe updated to V0.11.23.0, got %q", string(b))
+		t.Fatalf("expected entryExe updated to V99.0.2.0, got %q", string(b))
 	}
 	if b, _ := os.ReadFile(workerBExe); string(b) != string(newBytes) {
-		t.Fatalf("expected workerBExe updated to V0.11.23.0, got %q", string(b))
+		t.Fatalf("expected workerBExe updated to V99.0.2.0, got %q", string(b))
 	}
 }
 

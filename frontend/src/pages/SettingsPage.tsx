@@ -19,7 +19,7 @@ import {
   Users,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { cn, formatQuotaDisplay, formatSize, formatTime } from '@/lib/utils'
+import { cn, copyTextToClipboard, formatQuotaDisplay, formatSize, formatTime } from '@/lib/utils'
 import type {
   AuditEntry,
   ClusterResponse,
@@ -565,10 +565,10 @@ export function SettingsPage({
   const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin)
 
   return (
-    <div className="space-y-5">
+    <div className="min-w-0 w-full space-y-5">
       <div>
         <h1 className="text-lg sm:text-xl font-semibold tracking-tight">系统设置与集群治理</h1>
-        <p className="text-xs text-muted-foreground mt-0.5">
+        <p className="text-xs text-muted-foreground mt-0.5 break-words">
           管理个人偏好、安全上传策略、分布式多节点拓扑、虚拟挂载及全集群一致版本控制
         </p>
       </div>
@@ -654,69 +654,84 @@ export function SettingsPage({
             </CardContent>
           </Card>
 
-          <Card className="lg:col-span-2">
+          <Card className="lg:col-span-2 min-w-0 overflow-hidden">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Smartphone className="h-4 w-4 text-primary" />
+              <CardTitle className="flex flex-wrap items-center gap-2 leading-snug">
+                <Smartphone className="h-4 w-4 text-primary shrink-0" />
                 <span>iPhone 快捷指令 (Shortcuts) 一键上传 &amp; 主屏幕应用</span>
               </CardTitle>
-              <CardDescription>
+              <CardDescription className="break-words">
                 无需填写任何请求头或表单字段，生成专属令牌链接后在 iPhone 自带「快捷指令」配两步即可从微信/QQ/相册一键直传
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4 text-xs">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <label className="font-medium">个人访问令牌 (API Token)</label>
-                  <div className="flex flex-wrap gap-2">
+              <div className="grid gap-3 md:grid-cols-2 min-w-0">
+                <div className="space-y-1.5 min-w-0">
+                  <label className="font-medium block">个人访问令牌 (API Token)</label>
+                  <div className="flex flex-col sm:flex-row gap-2 min-w-0">
                     <Input
                       readOnly
                       value={apiToken}
-                      placeholder="尚未生成，点击右侧生成专属令牌"
-                      className="flex-1 min-w-[180px] font-mono text-xs"
+                      placeholder="尚未生成，点击下方生成专属令牌"
+                      className="min-w-0 w-full flex-1 font-mono text-xs"
                     />
-                    <Button
-                      size="sm"
-                      disabled={busyAction === 'token'}
-                      onClick={async () => {
-                        setBusyAction('token')
-                        try {
-                          const res = await api.regenerateToken()
-                          setApiToken(res.token || '')
-                          toast('已生成新的个人访问令牌', 'success')
-                        } catch (err) {
-                          toast(err instanceof Error ? err.message : '生成令牌失败', 'error')
-                        } finally {
-                          setBusyAction('')
-                        }
-                      }}
-                    >
-                      {apiToken ? '重置令牌' : '生成令牌'}
-                    </Button>
-                    {apiToken && (
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                       <Button
                         size="sm"
-                        variant="ghost"
-                        className="text-destructive"
+                        disabled={busyAction === 'token'}
                         onClick={async () => {
-                          if (!window.confirm('确定吊销当前令牌？吊销后 iPhone 快捷指令需更换新令牌。')) return
-                          await api.revokeToken()
-                          setApiToken('')
-                          toast('已吊销个人令牌', 'success')
+                          setBusyAction('token')
+                          try {
+                            const res = await api.regenerateToken()
+                            setApiToken(res.token || '')
+                            toast('已生成新的个人访问令牌', 'success')
+                          } catch (err) {
+                            toast(err instanceof Error ? err.message : '生成令牌失败', 'error')
+                          } finally {
+                            setBusyAction('')
+                          }
                         }}
                       >
-                        吊销
+                        {apiToken ? '重置令牌' : '生成令牌'}
                       </Button>
-                    )}
+                      {apiToken && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            const ok = await copyTextToClipboard(apiToken)
+                            toast(ok ? '已复制个人访问令牌' : '复制失败，请长按输入框复制', ok ? 'success' : 'error')
+                          }}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          <span>复制</span>
+                        </Button>
+                      )}
+                      {apiToken && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive"
+                          onClick={async () => {
+                            if (!window.confirm('确定吊销当前令牌？吊销后 iPhone 快捷指令需更换新令牌。')) return
+                            await api.revokeToken()
+                            setApiToken('')
+                            toast('已吊销个人令牌', 'success')
+                          }}
+                        >
+                          吊销
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                <div className="space-y-1.5">
-                  <label className="font-medium">选择入口网络地址（局域网或 Tailscale）</label>
+                <div className="space-y-1.5 min-w-0">
+                  <label className="font-medium block">选择入口网络地址（局域网或 Tailscale）</label>
                   <Select
                     value={shortcutBaseUrl}
                     onChange={(e) => setShortcutBaseUrl(e.target.value)}
-                    className="w-full h-9 text-xs"
+                    className="w-full min-w-0 max-w-full h-9 text-xs"
                   >
                     {(info?.entry_addrs && info.entry_addrs.length > 0
                       ? info.entry_addrs.map((a) => ({ label: `${a.tag ? `${a.tag} · ` : ''}${a.url}`, url: a.url }))
@@ -731,7 +746,7 @@ export function SettingsPage({
               </div>
 
               {apiToken && shortcutBaseUrl && (
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 md:grid-cols-2 min-w-0">
                   {[
                     {
                       label: '微信 / QQ / 相册通用上传专属 URL',
@@ -742,22 +757,26 @@ export function SettingsPage({
                       url: `${shortcutBaseUrl.replace(/\/$/, '')}/api/shortcut/upload?folder=${encodeURIComponent('超级剪贴板')}&token=${encodeURIComponent(apiToken)}`,
                     },
                   ].map((item) => (
-                    <div key={item.label} className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{item.label}</span>
+                    <div key={item.label} className="min-w-0 overflow-hidden rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium leading-snug">{item.label}</span>
                         <Button
                           size="xs"
                           variant="outline"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(item.url)
-                            toast(`已复制：${item.label}`, 'success')
+                          className="shrink-0"
+                          onClick={async () => {
+                            const ok = await copyTextToClipboard(item.url)
+                            toast(
+                              ok ? `已复制：${item.label}` : '浏览器限制自动复制，请长按下方链接全选复制',
+                              ok ? 'success' : 'error'
+                            )
                           }}
                         >
                           <Copy className="h-3 w-3" />
                           <span>复制链接</span>
                         </Button>
                       </div>
-                      <div className="truncate font-mono text-[11px] text-muted-foreground select-all">
+                      <div className="rounded-md bg-background/70 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground break-all select-all">
                         {item.url}
                       </div>
                     </div>
@@ -765,7 +784,7 @@ export function SettingsPage({
                 </div>
               )}
 
-              <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-1 text-[11px] text-muted-foreground leading-relaxed">
+              <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-1.5 text-[11px] text-muted-foreground leading-relaxed break-words">
                 <div className="font-semibold text-foreground">iPhone 极简配置（仅需 2 步，无需填任何 Header）：</div>
                 <div>1. 打开 iPhone「快捷指令」App 新建指令，底部点 i 打开「在共享表单中显示」。</div>
                 <div>2. 添加「重复每一项(快捷指令输入)」-&gt; 循环内添加「获取 URL 内容」-&gt; URL 粘贴上方复制的专属链接 -&gt; 方法选 <code className="font-mono text-foreground">POST</code> -&gt; 请求体选 <code className="font-mono text-foreground">文件</code> 并绑定「重复项目」即可。</div>
@@ -949,9 +968,9 @@ export function SettingsPage({
                           <Button
                             size="xs"
                             variant="ghost"
-                            onClick={() => {
-                              void navigator.clipboard.writeText(inv.code)
-                              toast(`已复制邀请码 ${inv.code}`, 'success')
+                            onClick={async () => {
+                              const ok = await copyTextToClipboard(inv.code)
+                              toast(ok ? `已复制邀请码 ${inv.code}` : '复制失败', ok ? 'success' : 'error')
                             }}
                           >
                             <Copy className="h-3 w-3" />
@@ -1229,9 +1248,9 @@ export function SettingsPage({
                     <Button
                       size="xs"
                       variant="ghost"
-                      onClick={() => {
-                        void navigator.clipboard.writeText(cluster.cluster_secret!)
-                        toast('已复制集群密钥', 'success')
+                      onClick={async () => {
+                        const ok = await copyTextToClipboard(cluster.cluster_secret!)
+                        toast(ok ? '已复制集群密钥' : '复制失败', ok ? 'success' : 'error')
                       }}
                     >
                       <Copy className="h-3 w-3" />

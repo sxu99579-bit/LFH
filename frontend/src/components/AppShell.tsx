@@ -25,7 +25,7 @@ import {
   X,
 } from 'lucide-react'
 import type { NavTab, PoolSummary, ServerInfo, ThemeMode, TransferTask, User } from '@/types'
-import { cn, formatQuotaDisplay } from '@/lib/utils'
+import { cn, copyTextToClipboard, formatQuotaDisplay } from '@/lib/utils'
 import { Badge, Button, Sheet, useToast } from '@/components/ui'
 
 interface AppShellProps {
@@ -98,12 +98,9 @@ export function AppShell({
   const navItems = allNavItems.filter((item) => !item.adminOnly || isAdmin)
 
   const copyEntryUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(displayEntryUrl)
-      toast(`已复制入口地址：${displayEntryUrl}`, 'success')
-    } catch {
-      toast(displayEntryUrl, 'info')
-    }
+    const ok = await copyTextToClipboard(displayEntryUrl)
+    if (ok) toast(`已复制入口地址：${displayEntryUrl}`, 'success')
+    else toast(displayEntryUrl, 'info')
   }
 
   const handleVersionReconcile = async () => {
@@ -129,7 +126,7 @@ export function AppShell({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold tracking-tight">LFH</div>
           <div className="truncate text-[11px] text-muted-foreground">
-            {info?.version || 'V0.11.22.7'} · 分布式共享池
+            {info?.version || 'V0.11.23.0'} · 分布式共享池
           </div>
         </div>
         {sidebarOpen && (
@@ -236,7 +233,7 @@ export function AppShell({
   /* ==================== Mobile Layout ==================== */
   if (isMobile) {
     return (
-      <div className="min-h-screen bg-background text-foreground flex flex-col pb-[76px]">
+      <div className="min-h-screen w-full max-w-full overflow-x-clip bg-background text-foreground flex flex-col pb-[76px]">
         {/* Mobile Header */}
         <header className="sticky top-0 z-30 flex h-13 items-center justify-between gap-2 border-b border-border bg-card/90 px-3 backdrop-blur-md">
           <div className="flex items-center gap-2 min-w-0">
@@ -300,7 +297,7 @@ export function AppShell({
         )}
 
         {/* Mobile Body */}
-        <main className="flex-1 px-3 py-3">{children}</main>
+        <main className="flex-1 min-w-0 w-full px-3 py-3">{children}</main>
 
         {/* Mobile Bottom Tab Bar with center + action button */}
         <nav className="fixed bottom-0 inset-x-0 z-40 border-t border-border bg-card/95 backdrop-blur-md pb-safe">
@@ -369,7 +366,7 @@ export function AppShell({
           onClose={() => setMobileMenuOpen(false)}
           side="bottom"
           title="快捷操作与入口切换"
-          subtitle={`当前版本 ${info?.version || 'V0.11.22.7'}`}
+          subtitle={`当前版本 ${info?.version || 'V0.11.23.0'}`}
         >
           <div className="grid grid-cols-2 gap-2.5">
             <button

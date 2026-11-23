@@ -10,7 +10,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { canPreviewFile, formatSize, formatTime } from '@/lib/utils'
+import { canPreviewFile, copyTextToClipboard, formatSize, formatTime } from '@/lib/utils'
 import type { FileRecord, NodeStatus, User } from '@/types'
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Input, Switch, Textarea, useToast } from '@/components/ui'
 
@@ -85,7 +85,11 @@ export function ClipboardPage({
         onPreviewFile(rec)
         return
       }
-      await navigator.clipboard.writeText(text)
+      const ok = await copyTextToClipboard(text)
+      if (!ok) {
+        onPreviewFile(rec)
+        return
+      }
       toast(`已复制 ${rec.name} 的文本内容`, 'success')
     } catch (err) {
       toast(err instanceof Error ? err.message : '复制文本失败，请点预览查看', 'error')

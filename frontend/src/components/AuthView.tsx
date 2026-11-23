@@ -25,7 +25,7 @@ export function AuthView({
   const [notice, setNotice] = useState('')
 
   const inviteRequired = serverInfo?.invite_required !== false
-  const ver = serverInfo?.version || 'V0.11.22.7'
+  const ver = serverInfo?.version || 'V0.11.23.0'
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

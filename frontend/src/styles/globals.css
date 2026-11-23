@@ -89,6 +89,8 @@
   html,
   body {
     height: 100%;
+    max-width: 100%;
+    overflow-x: clip;
     font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
   }
   html[data-layout="mobile"] body {
