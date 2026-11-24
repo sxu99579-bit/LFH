@@ -313,6 +313,25 @@ func (s *Store) GetLease(fileID string) (FileLease, bool) {
 	return cur, true
 }
 
+// ListActiveLeases returns all non-expired soft edit leases currently held on this node.
+func (s *Store) ListActiveLeases() []FileLease {
+	now := time.Now()
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	if len(s.leases) == 0 {
+		return nil
+	}
+	out := make([]FileLease, 0, len(s.leases))
+	for id, cur := range s.leases {
+		if !now.Before(cur.ExpiresAt) {
+			delete(s.leases, id)
+			continue
+		}
+		out = append(out, cur)
+	}
+	return out
+}
+
 // CheckLeaseForWrite verifies whether actorKeyID may mutate fileID right now.
 func (s *Store) CheckLeaseForWrite(fileID, actorKeyID string, force bool) error {
 	id := strings.TrimSpace(fileID)

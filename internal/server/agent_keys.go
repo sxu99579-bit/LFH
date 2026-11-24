@@ -284,6 +284,9 @@ func (s *Server) handleToggleAgentKey(w http.ResponseWriter, r *http.Request, u 
 		writeAgentKeyError(w, err)
 		return
 	}
+	if updated.Disabled {
+		s.getMCPServer().DisconnectByAgentKey(id)
+	}
 	s.logAudit(r, u.Username, "agent_key_toggle", updated.Name, "ok", fmt.Sprintf("id=%s disabled=%v", updated.ID, updated.Disabled))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":  true,
@@ -297,6 +300,7 @@ func (s *Server) handleDeleteAgentKey(w http.ResponseWriter, r *http.Request, u 
 		writeAgentKeyError(w, err)
 		return
 	}
+	s.getMCPServer().DisconnectByAgentKey(id)
 	s.logAudit(r, u.Username, "agent_key_delete", id, "ok", "id="+id)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

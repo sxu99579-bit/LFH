@@ -256,6 +256,19 @@ func toolCatalog() []Tool {
 				},
 			},
 		},
+		{
+			Name:        "report_agent_status",
+			Description: "Report current human-readable work state, task summary, and progress to the LFH live Agent dashboard.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"state"},
+				"properties": map[string]any{
+					"state":    map[string]any{"type": "string", "enum": []string{"working", "idle", "waiting", "done", "error"}, "description": "Current execution state."},
+					"task":     map[string]any{"type": "string", "description": "Short task summary shown in UI (max 200 chars)."},
+					"progress": map[string]any{"type": "string", "description": "Optional progress text such as 2/5 or 60%."},
+				},
+			},
+		},
 	}
 }
 
@@ -266,7 +279,7 @@ func decodeToolArgs(raw json.RawMessage, dst any) error {
 	return json.Unmarshal(raw, dst)
 }
 
-func (s *Server) dispatchTool(ctx context.Context, r *http.Request, p auth.Principal, name string, rawArgs json.RawMessage) (CallToolResult, bool) {
+func (s *Server) dispatchTool(ctx context.Context, r *http.Request, p auth.Principal, sessionID, name string, rawArgs json.RawMessage) (CallToolResult, bool) {
 	requireScope := func(scope string) *CallToolResult {
 		if scope != "" && !p.HasScope(scope) {
 			res := newToolErrorResult(NewToolError("forbidden", "当前 Agent 密钥缺少权限: "+scope, "Ask the administrator to grant scope '"+scope+"' on this AgentKey.", nil))
@@ -614,6 +627,34 @@ func (s *Server) dispatchTool(ctx context.Context, r *http.Request, p auth.Princ
 			return newToolErrorResult(err), true
 		}
 		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "report_agent_status":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in struct {
+			State    string `json:"state"`
+			Task     string `json:"task"`
+			Progress string `json:"progress"`
+		}
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		snap, err := s.updateReportedStatus(sessionID, in.State, in.Task, in.Progress)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(map[string]any{
+			"ok":                true,
+			"status":            snap.Status,
+			"reported_state":    snap.ReportedState,
+			"reported_task":     snap.ReportedTask,
+			"reported_progress": snap.ReportedProgress,
+		})
 		if err != nil {
 			return newToolErrorResult(err), true
 		}

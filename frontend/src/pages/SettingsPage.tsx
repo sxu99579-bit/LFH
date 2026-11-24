@@ -167,6 +167,21 @@ export function SettingsPage({
   // Personal API Token & iOS Shortcuts state
   const [apiToken, setApiToken] = useState('')
   const [shortcutBaseUrl, setShortcutBaseUrl] = useState('')
+  const [pendingAgentPairings, setPendingAgentPairings] = useState(0)
+
+  const loadPendingPairings = useCallback(() => {
+    void api
+      .getAgentPairings()
+      .then((res) => setPendingAgentPairings(res.pending_count || 0))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    loadPendingPairings()
+    const onAgentEvent = () => loadPendingPairings()
+    window.addEventListener('lfh:agent-event', onAgentEvent)
+    return () => window.removeEventListener('lfh:agent-event', onAgentEvent)
+  }, [loadPendingPairings])
 
   useEffect(() => {
     void api
@@ -608,13 +623,18 @@ export function SettingsPage({
             type="button"
             onClick={() => setTab(item.id)}
             className={cn(
-              'shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer',
+              'shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer',
               tab === item.id
                 ? 'bg-primary text-primary-foreground shadow-xs'
                 : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
             )}
           >
-            {item.label}
+            <span>{item.label}</span>
+            {item.id === 'agent' && pendingAgentPairings > 0 && (
+              <span className="inline-flex min-w-4 h-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-white tabular-nums">
+                {pendingAgentPairings}
+              </span>
+            )}
           </button>
         ))}
       </div>

@@ -332,6 +332,101 @@ export interface AgentKeyItem {
   last_used_ip?: string
 }
 
+export interface AgentPairingItem {
+  id: string
+  confirm_code: string
+  name: string
+  client_type: string
+  client_version?: string
+  hostname?: string
+  os?: string
+  source_ip?: string
+  target_owner?: string
+  requested_scopes: AgentScope[]
+  requested_read_folders?: string[]
+  requested_write_folders?: string[]
+  approved_scopes?: AgentScope[]
+  approved_read_folders?: string[]
+  approved_write_folders?: string[]
+  note?: string
+  status: 'pending' | 'approved' | 'claimed' | 'rejected' | 'expired'
+  created_at: string
+  expires_at: string
+  resolved_at?: string | null
+  approved_by?: string
+  approved_key_id?: string
+}
+
+export interface AgentLeaseView {
+  file_id: string
+  file_name?: string
+  path?: string
+  folder_path?: string
+  expires_at: string
+}
+
+export interface MCPSessionSnapshot {
+  session_id: string
+  owner: string
+  username: string
+  is_agent: boolean
+  agent_key_id?: string
+  agent_name?: string
+  client_name?: string
+  client_version?: string
+  client_ip?: string
+  protocol_version?: string
+  status: 'working' | 'watching' | 'online' | 'idle' | string
+  sse_connected: boolean
+  active_tool?: string
+  active_target?: string
+  active_since?: string | null
+  reported_state?: string
+  reported_task?: string
+  reported_progress?: string
+  reported_at?: string | null
+  last_tool?: string
+  last_target?: string
+  last_tool_ok: boolean
+  tool_calls: number
+  created_at: string
+  last_seen: string
+}
+
+export interface AgentPresenceItem {
+  key: AgentKeyItem
+  online: boolean
+  status: 'working' | 'watching' | 'online' | 'offline' | string
+  client_name?: string
+  client_version?: string
+  client_ip?: string
+  protocol_version?: string
+  sse_connected: boolean
+  active_tool?: string
+  active_target?: string
+  active_since?: string | null
+  reported_state?: string
+  reported_task?: string
+  reported_progress?: string
+  reported_at?: string | null
+  last_tool?: string
+  last_target?: string
+  last_tool_ok: boolean
+  tool_calls: number
+  session_ids?: string[]
+  active_leases?: AgentLeaseView[]
+  last_seen?: string | null
+}
+
+export interface AgentPresenceSummary {
+  total_agents: number
+  online_agents: number
+  working_agents: number
+  watching_agents: number
+  active_sessions: number
+  pending_pairings: number
+}
+
 export interface FileLease {
   file_id: string
   holder_key_id: string

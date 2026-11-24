@@ -168,11 +168,11 @@ func TestMCPProtocolSessionsBatchAndStructuredErrors(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	// 1. Auth checks: missing token -> 401; rate limited -> 429.
+	// 1. Auth checks: missing token -> 401 with resource_metadata; rate limited -> 429.
 	r401 := postMCP(t, ts.URL, "", "", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "ping"})
 	r401.Body.Close()
-	if r401.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 without token, got %d", r401.StatusCode)
+	if r401.StatusCode != http.StatusUnauthorized || !strings.Contains(r401.Header.Get("WWW-Authenticate"), "resource_metadata=") {
+		t.Fatalf("expected 401 with WWW-Authenticate resource_metadata, got status=%d header=%q", r401.StatusCode, r401.Header.Get("WWW-Authenticate"))
 	}
 	r429 := postMCP(t, ts.URL, "limited", "", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "ping"})
 	r429.Body.Close()
@@ -228,8 +228,34 @@ func TestMCPProtocolSessionsBatchAndStructuredErrors(t *testing.T) {
 		Tools []Tool `json:"tools"`
 	}
 	_ = json.Unmarshal(resBytes, &listRes)
-	if len(listRes.Tools) != 17 {
-		t.Fatalf("expected 17 MCP tools, got %d", len(listRes.Tools))
+	if len(listRes.Tools) != 18 {
+		t.Fatalf("expected 18 MCP tools, got %d", len(listRes.Tools))
+	}
+
+	// Report live status and confirm ListSessions captures client metadata and working state.
+	repResp := postMCP(t, ts.URL, "agent-a", sid, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      13,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "report_agent_status",
+			"arguments": map[string]any{"state": "working", "task": "Implementing auth", "progress": "2/4"},
+		},
+	})
+	repResp.Body.Close()
+	if repResp.StatusCode != http.StatusOK {
+		t.Fatalf("report_agent_status HTTP %d", repResp.StatusCode)
+	}
+	sessions := srv.ListSessions()
+	var foundSess *SessionSnapshot
+	for i := range sessions {
+		if sessions[i].SessionID == sid {
+			foundSess = &sessions[i]
+			break
+		}
+	}
+	if foundSess == nil || foundSess.ClientName != "test-client" || foundSess.ReportedTask != "Implementing auth" || foundSess.Status != "working" || foundSess.ToolCalls == 0 {
+		t.Fatalf("unexpected live session snapshot: %+v", foundSess)
 	}
 
 	// Verify scope check on trigger_workspace_verify (agent-a lacks verify scope -> forbidden).
@@ -320,5 +346,26 @@ func TestMCPProtocolSessionsBatchAndStructuredErrors(t *testing.T) {
 	afterDel.Body.Close()
 	if afterDel.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 using deleted session, got %d", afterDel.StatusCode)
+	}
+
+	// 7. DisconnectSession forcibly drops an active session.
+	init2 := postMCP(t, ts.URL, "agent-a", "", map[string]any{
+		"jsonrpc": "2.0",
+		"id":      100,
+		"method":  "initialize",
+		"params":  map[string]any{"protocolVersion": "2025-03-26", "clientInfo": map[string]string{"name": "Cursor", "version": "0.49"}},
+	})
+	sid2 := init2.Header.Get("Mcp-Session-Id")
+	init2.Body.Close()
+	if sid2 == "" {
+		t.Fatalf("expected second session id")
+	}
+	if _, ok := srv.DisconnectSession(sid2); !ok {
+		t.Fatalf("expected DisconnectSession(%s) to succeed", sid2)
+	}
+	afterForce := postMCP(t, ts.URL, "agent-a", sid2, map[string]any{"jsonrpc": "2.0", "id": 101, "method": "ping"})
+	afterForce.Body.Close()
+	if afterForce.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 after force disconnect, got %d", afterForce.StatusCode)
 	}
 }

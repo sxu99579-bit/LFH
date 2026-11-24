@@ -64,7 +64,9 @@ type Server struct {
 	verifyRunner         *bridge.VerifyRunner
 	ticketGuard          *bridge.TicketReplayGuard
 	ticketFallbackSecret string
-	mcpHandler           http.Handler
+	mcpServer            *mcp.Server
+	agentPairing         *agentPairingManager
+	mcpOAuth             *mcpOAuthManager
 	jobsMu       sync.RWMutex
 	jobs         []plugins.PluginJob
 	jobsPath     string
@@ -109,7 +111,7 @@ func New(authMgr *auth.Manager, store *storage.Store, clusterMgr *cluster.Manage
 		port:         port,
 	}
 	srv.events.SetOnPublish(srv.dispatchWebhookForFileEvent)
-	srv.mcpHandler = mcp.NewServer(newServerMCPBackend(srv), version.Version)
+	srv.mcpServer = srv.newWiredMCPServer()
 	srv.loadPluginJobs()
 	return srv, nil
 }
@@ -146,13 +148,34 @@ func (s *Server) getUpdater() *updater.Manager {
 	return s.updater
 }
 
-func (s *Server) getMCPHandler() http.Handler {
+func (s *Server) newWiredMCPServer() *mcp.Server {
+	srv := mcp.NewServer(newServerMCPBackend(s), version.Version)
+	srv.SetOnPresenceChange(func(event string, snap mcp.SessionSnapshot) {
+		if s.events == nil {
+			return
+		}
+		var allowed []string
+		if snap.Username != "" {
+			allowed = []string{snap.Username}
+		}
+		s.PublishEvent(FileChangeEvent{
+			Kind:         "agent_status",
+			Uploader:     snap.Username,
+			ActorName:    snap.AgentName,
+			NodeName:     snap.Status,
+			AllowedUsers: allowed,
+		})
+	})
+	return srv
+}
+
+func (s *Server) getMCPServer() *mcp.Server {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.mcpHandler == nil {
-		s.mcpHandler = mcp.NewServer(newServerMCPBackend(s), version.Version)
+	if s.mcpServer == nil {
+		s.mcpServer = s.newWiredMCPServer()
 	}
-	return s.mcpHandler
+	return s.mcpServer
 }
 
 func (s *Server) PublishEvent(ev FileChangeEvent) {
@@ -468,6 +491,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/agent-keys/{id}", s.requireHumanAuth(s.handleUpdateAgentKey))
 	mux.HandleFunc("POST /api/agent-keys/{id}/toggle", s.requireHumanAuth(s.handleToggleAgentKey))
 	mux.HandleFunc("DELETE /api/agent-keys/{id}", s.requireHumanAuth(s.handleDeleteAgentKey))
+	mux.HandleFunc("POST /api/agent-pairing/request", s.handleCreateAgentPairing)
+	mux.HandleFunc("GET /api/agent-pairing/{id}", s.handlePollAgentPairing)
+	mux.HandleFunc("GET /api/agent-pairing", s.requireHumanAuth(s.handleListAgentPairings))
+	mux.HandleFunc("POST /api/agent-pairing/{id}/approve", s.requireHumanAuth(s.handleApproveAgentPairing))
+	mux.HandleFunc("POST /api/agent-pairing/{id}/reject", s.requireHumanAuth(s.handleRejectAgentPairing))
+	mux.HandleFunc("GET /api/agent-sessions", s.requireHumanAuth(s.handleListAgentSessions))
+	mux.HandleFunc("DELETE /api/agent-sessions/{sessionID}", s.requireHumanAuth(s.handleDisconnectAgentSession))
+	mux.HandleFunc("GET /agent/connect.ps1", s.handleAgentConnectPS1)
+	mux.HandleFunc("GET /agent/connect.sh", s.handleAgentConnectSH)
 
 	mux.HandleFunc("GET /api/cluster", s.requireHumanAuth(s.handleGetCluster))
 	mux.HandleFunc("GET /api/users/selectable", s.requirePrincipal(auth.ScopeRead, s.handleListSelectableUsers))
@@ -556,7 +588,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/files/{id}/extract", s.requirePrincipal(auth.ScopeWrite, s.handleExtractArchive))
 	mux.HandleFunc("DELETE /api/files/{id}", s.requirePrincipal(auth.ScopeDelete, s.handleDelete))
 
-	mcpH := s.getMCPHandler()
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleOAuthProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleOAuthProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthAuthServerMeta)
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOAuthAuthServerMeta)
+	mux.HandleFunc("POST /oauth/register", s.handleOAuthRegister)
+	mux.HandleFunc("GET /oauth/authorize", s.handleOAuthAuthorizeGet)
+	mux.HandleFunc("POST /oauth/authorize", s.handleOAuthAuthorizePost)
+	mux.HandleFunc("POST /oauth/token", s.handleOAuthToken)
+
+	mcpH := s.getMCPServer()
 	mux.Handle("POST /mcp", mcpH)
 	mux.Handle("GET /mcp", mcpH)
 	mux.Handle("DELETE /mcp", mcpH)

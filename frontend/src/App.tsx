@@ -195,6 +195,18 @@ function WorkspaceApp() {
           void loadCluster()
           return
         }
+        if (data.kind === 'agent_pairing') {
+          window.dispatchEvent(new CustomEvent('lfh:agent-event', { detail: data }))
+          const code = String(data.node_name || '').trim()
+          if (code && code !== 'approved' && code !== 'rejected' && code !== 'oauth_approved') {
+            toast(`新 Agent「${data.actor_name || 'Agent'}」请求接入（确认码 ${code}）`, 'info')
+          }
+          return
+        }
+        if (data.kind === 'agent_status') {
+          window.dispatchEvent(new CustomEvent('lfh:agent-event', { detail: data }))
+          return
+        }
       } catch {
         // ignore parse error
       }

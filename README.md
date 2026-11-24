@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">问题反馈</a> · <code>V0.11.24.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">问题反馈</a> · <code>V0.11.24.1</code>
 </p>
 
 ---
@@ -29,9 +29,10 @@
 ## 核心特性
 
 - **多智能体文件协作中枢（Agent File Bridge & 原生 MCP）**：
-  - **零信任 AgentKey 凭证**：支持签发以 `lfh_ag_` 开头的受限 Agent 密钥（服务端仅存 SHA-256 哈希），细粒度控制 `read / write / share / verify / delete` 作用域、读写目录前缀白名单、默认可见成员约束与请求速率限制；设置页「Agent 协作」支持一键生成 Cursor / Antigravity / Claude Code CLI / cURL 接入配置；
+  - **一键免密接入、自主配对审批与原生 OAuth 2.1**：提供 `/agent/connect.ps1`（Windows）与 `/agent/connect.sh`（macOS / Linux）一条命令自动探测并写入 Cursor / Antigravity / Claude Code CLI / Claude Desktop 配置；Agent 可通过 `/api/agent-pairing/request` 自助申请配对，管理员在 Web 控制台实时接收 SSE 提醒后一键「批准 / 拒绝」（支持按最小权限裁剪作用域，拒绝越权），同时兼容原生 MCP OAuth 2.1 动态客户端注册与 PKCE S256 授权（`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/*`）；
+  - **Agent 实时控制台与零信任凭证**：设置页「Agent 协作」顶部提供实时控制台，聚合展示已授权密钥、活跃 MCP 会话、工作状态与当前任务/文件软租约，并支持一键断开与实时 SSE 状态刷新；签发的 `lfh_ag_` 密钥服务端仅存 SHA-256 哈希，细粒度控制 `read / write / share / verify / delete` 作用域、目录前缀白名单与请求速率限制；
   - **可写工作区挂载与高并发读写**：挂载目录可按需启用 `Writable` 写穿模式与 `Shadow` 自动版本备份，内置文件忽略规则与敏感路径（`.git`、`.ssh`、`.env` 等）硬拦截；提供分段文件锁（Striped Locks）、CAS 乐观版本校验（`expected_version`）、软编辑租约（`/api/files/{id}/lease`）及精准补丁 / 多文件事务提交（`/api/files/{id}/patch`、`/api/files/batch-commit`）；
-  - **纯 Go 原生 Streamable HTTP `/mcp`（17 项工具）**：免外部桥接进程直接暴露 `/mcp` 端点，涵盖工作区发现、检索、分片/行号读取、补丁、事务提交、软租约、`wait_for_changes` 长轮询、`issue_transfer_ticket` 与 `trigger_workspace_verify`；
+  - **纯 Go 原生 Streamable HTTP `/mcp`（18 项工具）**：免外部桥接进程直接暴露 `/mcp` 端点，涵盖工作区发现、检索、分片/行号读取、补丁、事务提交、软租约、`wait_for_changes` 长轮询、`issue_transfer_ticket`、`trigger_workspace_verify` 与实时状态汇报 `report_agent_status`；
   - **短链直传、Webhook 自动化、受控构建校验与 WAL 压缩**：支持 HMAC 签名的 `/s/ticket` 一次性上传与临时下载短链（局域网/Tailscale 下自动路由至 Direct-to-Worker 直传，跳过主节点中转）；管理员可配置按目录前缀与事件过滤的 Webhook（`X-LFH-Signature-256` 签名、`1s/4s/12s` 退避重试与在线测试投递）；挂载目录可配置白名单预设校验命令（无 Shell 注入、单飞合流、末尾 `128KB` 捕获与 `.lfh-logs/` 落盘）；底层元数据采用 `files.wal` 顺序日志与去抖原子快照压缩。
 - **分布式算力插件系统与插件市场（Distributed Compute Plugins）**：
   - 支持将算力插件按节点安装与启停（内置 **OCR 图文识别**、**智能文件整理**、**PDF 转 Word (.docx)**，同时支持自定义外部命令行/Sidecar 插件标准清单 `plugin.json`）；

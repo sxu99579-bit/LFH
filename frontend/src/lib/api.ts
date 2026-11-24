@@ -1,5 +1,8 @@
 import type {
   AgentKeyItem,
+  AgentPairingItem,
+  AgentPresenceItem,
+  AgentPresenceSummary,
   AgentScope,
   AuditEntry,
   BandwidthProbeResult,
@@ -12,6 +15,7 @@ import type {
   IntegrityStatus,
   InviteCode,
   MarketplaceItem,
+  MCPSessionSnapshot,
   MountItem,
   PluginJob,
   PluginRecommendation,
@@ -399,6 +403,47 @@ export const api = {
     }),
   deleteAgentKey: (id: string) =>
     apiFetch<{ ok: boolean }>(`/api/agent-keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  getAgentPairings: () =>
+    apiFetch<{ ok: boolean; requests: AgentPairingItem[]; pending_count: number }>('/api/agent-pairing'),
+  approveAgentPairing: (
+    id: string,
+    payload: {
+      name?: string
+      owner_username?: string
+      scopes?: AgentScope[]
+      read_folders?: string[]
+      write_folders?: string[]
+      default_allowed_users?: string[]
+      allow_set_visibility?: boolean
+      rate_limit_per_min?: number
+      expires_hours?: number
+    } = {}
+  ) =>
+    apiFetch<{ ok: boolean; request: AgentPairingItem; key: AgentKeyItem }>(
+      `/api/agent-pairing/${encodeURIComponent(id)}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ),
+  rejectAgentPairing: (id: string) =>
+    apiFetch<{ ok: boolean; request: AgentPairingItem }>(
+      `/api/agent-pairing/${encodeURIComponent(id)}/reject`,
+      { method: 'POST' }
+    ),
+  getAgentSessions: () =>
+    apiFetch<{
+      ok: boolean
+      summary: AgentPresenceSummary
+      agents: AgentPresenceItem[]
+      sessions: MCPSessionSnapshot[]
+    }>('/api/agent-sessions'),
+  disconnectAgentSession: (sessionID: string) =>
+    apiFetch<{ ok: boolean }>(`/api/agent-sessions/${encodeURIComponent(sessionID)}`, {
+      method: 'DELETE',
+    }),
 
   getFileLease: (id: string) =>
     apiFetch<{ locked: boolean; lease: FileLease | null }>(`/api/files/${encodeURIComponent(id)}/lease`),

@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.24.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.24.1</code>
 </p>
 
 ---
@@ -29,9 +29,10 @@ Ships as a single binary with zero database setup required—ready for both Dock
 ## Key Features
 
 - **Multi-Agent File Bridge & Native MCP Server**:
-  - **Zero-Trust `AgentKey` Credentials**: Issue scoped `lfh_ag_` API keys (stored solely as SHA-256 hashes on disk) with granular `read / write / share / verify / delete` permissions, folder prefix allowlists, visibility enforcement, and rate limits, paired with one-click Cursor / Antigravity / Claude Code CLI / cURL snippet generation in **Settings -> Agent Bridge**;
+  - **One-Click Onboarding, Self-Pairing Approval & Native MCP OAuth 2.1**: Run `/agent/connect.ps1` (Windows) or `/agent/connect.sh` (macOS / Linux) to auto-detect and configure Cursor, Antigravity, Claude Code CLI, and Claude Desktop in one command; Agents request access via `/api/agent-pairing/request` while admins receive live SSE alerts in the Web UI to Approve/Reject with one click (with safe scope trimming), alongside native MCP OAuth 2.1 dynamic registration & PKCE S256 (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/oauth/*`);
+  - **Live Agent Console & Zero-Trust `AgentKey` Credentials**: **Settings -> Agent Bridge** features a real-time console displaying authorized keys, active MCP sessions, live work states, current tasks, and active file leases with one-click session disconnect; `lfh_ag_` keys are stored solely as SHA-256 hashes on disk with granular `read / write / share / verify / delete` permissions, folder prefix allowlists, and rate limits;
   - **Writable Workspace Mounts & Safe Concurrency**: Mounted directories can opt into `Writable` mode with automatic `Shadow` version backups, customizable ignore filters, and hardcoded sensitive-path guards (`.git`, `.ssh`, `.env`, etc.); protected by striped file locks, optimistic CAS checks (`expected_version`), soft edit leases (`/api/files/{id}/lease`), search-and-replace / unified diff patching (`/api/files/{id}/patch`), and atomic multi-file commits (`/api/files/batch-commit`);
-  - **Pure Go Streamable HTTP `/mcp` (17 Tools)**: Embedded MCP server exposing workspace discovery, targeted line-range reads, patching, atomic commits, leases, long-poll `wait_for_changes`, `issue_transfer_ticket`, and `trigger_workspace_verify`;
+  - **Pure Go Streamable HTTP `/mcp` (18 Tools)**: Embedded MCP server exposing workspace discovery, targeted line-range reads, patching, atomic commits, leases, long-poll `wait_for_changes`, `issue_transfer_ticket`, `trigger_workspace_verify`, and live presence reporting via `report_agent_status`;
   - **Presigned Direct-to-Worker Tickets, Webhooks, Controlled Verify & WAL Compaction**: Issue HMAC-signed `/s/ticket` links (automatically routing LAN/Tailscale transfers directly to Worker nodes without Entry proxying); automate external notifications with prefix-filtered Webhooks (`X-LFH-Signature-256`, `1s/4s/12s` retry, synchronous test button); run non-shell allowlisted build/test verify presets with single-flight coalescing, 128 KB tail capture, and `.lfh-logs/` persistence backed by sequential `files.wal` snapshot compaction.
 - **Distributed Compute Plugin System & Marketplace**:
   - Install and toggle plugins per cluster node (built-in **OCR Vision**, **Auto Organizer**, and **PDF to Word (.docx)**, plus extensible `plugin.json` external command runners);
