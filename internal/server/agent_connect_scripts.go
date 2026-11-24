@@ -142,9 +142,33 @@ if (-not $agentName) {
   $agentName = "$hostName-$primaryClient"
 }
 
+$deviceKind = ''
+try {
+  $enclosure = Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction Stop | Select-Object -First 1
+  if ($enclosure -and $enclosure.ChassisTypes) {
+    foreach ($ct in $enclosure.ChassisTypes) {
+      if ($ct -in 8, 9, 10, 14, 31, 32) {
+        $deviceKind = 'laptop'
+        break
+      }
+    }
+  }
+} catch {}
+if (-not $deviceKind) {
+  $hl = $hostName.ToLowerInvariant()
+  if ($hl -match 'laptop|notebook|thinkpad|surface|matebook|zenbook|book') {
+    $deviceKind = 'laptop'
+  } elseif ($hl -match 'nas|server|srv|node') {
+    $deviceKind = 'server'
+  } else {
+    $deviceKind = 'desktop'
+  }
+}
+
 Write-Host ""
 Write-Host "=== LFH One-Click Agent Pairing ===" -ForegroundColor Cyan
 Write-Host ("Server : " + $baseUrl)
+Write-Host ("Device : " + $deviceKind + " (" + $hostName + ")")
 if ($detected.Count -gt 0) {
   Write-Host ("Clients: " + ($detected -join ', '))
 } else {
@@ -157,6 +181,7 @@ $reqPayload = @{
   client_version = 'ps1-connect'
   hostname = $hostName
   os = 'windows'
+  device_kind = $deviceKind
   target_owner = $targetOwner
   requested_scopes = @('read', 'write')
   requested_read_folders = @('*')
@@ -315,7 +340,32 @@ if ($whoResp.result -and $whoResp.result.content -and $whoResp.result.content.Co
   $whoData = $whoResp.result.content[0].text | ConvertFrom-Json
   Write-Host ("Connected as   : " + $whoData.actor_label + " (user=" + $whoData.username + ")") -ForegroundColor Green
   Write-Host ("Scopes         : " + ($whoData.scopes -join ', '))
+  if (($whoData.scopes -contains 'write') -and (-not $whoData.write_folders -or $whoData.write_folders.Count -eq 0)) {
+    Write-Host ""
+    Write-Host "[LFH Tip] Key has 'write' scope, but write_folders is currently empty." -ForegroundColor Yellow
+    Write-Host "         Configure write_folders (e.g. *) in LFH Web UI -> Settings -> Agent Bridge before writing files." -ForegroundColor Yellow
+  }
 }
+
+try {
+  $targetHost = ([uri]$baseUrl).Host
+  $hasProxy = [bool]($env:HTTP_PROXY -or $env:HTTPS_PROXY -or $env:http_proxy -or $env:https_proxy)
+  $isPriv = $targetHost -match '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|127\.|localhost)$'
+  if ($hasProxy -and $isPriv) {
+    $npAll = @($env:NO_PROXY, $env:no_proxy) -join ','
+    $hasBadQuotes = ($env:NO_PROXY -match '^"|"$') -or ($env:no_proxy -match '^"|"$')
+    $covered = ($npAll -match [regex]::Escape($targetHost)) -or ($targetHost.StartsWith('192.168.') -and $npAll -match '192\.168\.') -or ($targetHost.StartsWith('100.') -and $npAll -match '100\.64\.')
+    if ($hasBadQuotes -or -not $covered) {
+      Write-Host ""
+      Write-Host "[LFH Proxy Warning] HTTP_PROXY/HTTPS_PROXY is active without bypassing LAN/Tailscale in NO_PROXY." -ForegroundColor Yellow
+      Write-Host "IDE/Antigravity may time out connecting to LFH. Run these 3 lines and restart your IDE:" -ForegroundColor Yellow
+      Write-Host ('$noProxy = "localhost,127.0.0.1,::1,' + $targetHost + ',10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10"')
+      Write-Host '[Environment]::SetEnvironmentVariable("NO_PROXY", $noProxy, "User")'
+      Write-Host '[Environment]::SetEnvironmentVariable("no_proxy", $noProxy, "User")'
+    }
+  }
+} catch {}
+
 Write-Host "Done! Restart or reload MCP servers in your IDE to start collaborating." -ForegroundColor Cyan
 `
 
@@ -387,6 +437,39 @@ if [ -z "$AGENT_NAME" ]; then
   AGENT_NAME="${HOST_NAME}-${PRIMARY_CLIENT}"
 fi
 
+HOST_LOWER=$(printf '%s' "$HOST_NAME" | tr '[:upper:]' '[:lower:]')
+DEVICE_KIND="desktop"
+case "$OS_TAG" in
+  darwin)
+    case "$HOST_LOWER" in
+      *macbook*|*laptop*) DEVICE_KIND="laptop" ;;
+      *) DEVICE_KIND="mac" ;;
+    esac
+    ;;
+  linux)
+    case "$HOST_LOWER" in
+      *laptop*|*notebook*|*thinkpad*|*book*) DEVICE_KIND="laptop" ;;
+      *) DEVICE_KIND="server" ;;
+    esac
+    ;;
+esac
+
+TARGET_HOST=$(printf '%s' "$BASE_URL" | sed -n 's#^[a-zA-Z]*://\([^/:]*\).*#\1#p')
+IS_PRIV=0
+case "$TARGET_HOST" in
+  192.168.*|10.*|127.*|localhost|100.*|172.16.*|172.17.*|172.18.*|172.19.*|172.2[0-9].*|172.3[01].*)
+    IS_PRIV=1
+    ;;
+esac
+
+lfh_curl() {
+  if [ "$IS_PRIV" -eq 1 ] && [ -n "$TARGET_HOST" ]; then
+    curl --noproxy "$TARGET_HOST" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 json_get() {
   JSON_KEY="$1"
   RAW_JSON="$2"
@@ -408,6 +491,7 @@ EOF
 echo ""
 echo "=== LFH One-Click Agent Pairing ==="
 echo "Server : $BASE_URL"
+echo "Device : $DEVICE_KIND ($HOST_NAME)"
 if [ -n "$DETECTED" ]; then
   echo "Clients: $DETECTED"
 else
@@ -415,10 +499,10 @@ else
 fi
 
 SAFE_OWNER=$(printf '%s' "$TARGET_OWNER" | tr -d '"\\\r\n')
-REQ_PAYLOAD=$(printf '{"name":"%s","client_type":"%s","client_version":"sh-connect","hostname":"%s","os":"%s","target_owner":"%s","requested_scopes":["read","write"],"requested_read_folders":["*"],"note":"Shell one-click pairing"}' \
-  "$AGENT_NAME" "$PRIMARY_CLIENT" "$HOST_NAME" "$OS_TAG" "$SAFE_OWNER")
+REQ_PAYLOAD=$(printf '{"name":"%s","client_type":"%s","client_version":"sh-connect","hostname":"%s","os":"%s","device_kind":"%s","target_owner":"%s","requested_scopes":["read","write"],"requested_read_folders":["*"],"note":"Shell one-click pairing"}' \
+  "$AGENT_NAME" "$PRIMARY_CLIENT" "$HOST_NAME" "$OS_TAG" "$DEVICE_KIND" "$SAFE_OWNER")
 
-CREATE_RES=$(curl -fsS -X POST "${BASE_URL}/api/agent-pairing/request" \
+CREATE_RES=$(lfh_curl -fsS -X POST "${BASE_URL}/api/agent-pairing/request" \
   -H "Content-Type: application/json" \
   -d "$REQ_PAYLOAD")
 
@@ -445,7 +529,7 @@ ATTEMPT=0
 while [ "$ATTEMPT" -lt 150 ]; do
   sleep 2
   ATTEMPT=$((ATTEMPT + 1))
-  POLL_RES=$(curl -fsS "${BASE_URL}/api/agent-pairing/${PAIR_ID}" -H "X-Pairing-Secret: ${POLL_SECRET}")
+  POLL_RES=$(lfh_curl -fsS "${BASE_URL}/api/agent-pairing/${PAIR_ID}" -H "X-Pairing-Secret: ${POLL_SECRET}")
   STATUS=$(json_get "status" "$POLL_RES")
   case "$STATUS" in
     approved)
@@ -589,21 +673,54 @@ echo ""
 echo "Running MCP self-check (initialize + whoami)..."
 HDR_FILE=$(mktemp)
 trap 'rm -f "$HDR_FILE"' EXIT
-curl -fsS -D "$HDR_FILE" -X POST "$MCP_URL" \
+lfh_curl -fsS -D "$HDR_FILE" -X POST "$MCP_URL" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"lfh-connect","version":"1.0"}}}' >/dev/null
 SID=$(grep -i '^Mcp-Session-Id:' "$HDR_FILE" | head -n 1 | cut -d':' -f2- | tr -d ' \r\n' || true)
 if [ -n "$SID" ]; then
-  WHO_RES=$(curl -fsS -X POST "$MCP_URL" \
+  WHO_RES=$(lfh_curl -fsS -X POST "$MCP_URL" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Mcp-Session-Id: ${SID}" \
     -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami","arguments":{}}}')
   if [ -n "$WHO_RES" ]; then
     echo "Self-check OK  : session=${SID}"
+    if command -v python3 >/dev/null 2>&1; then
+      printf '%s' "$WHO_RES" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    txt = d.get('result',{}).get('content',[{}])[0].get('text','{}')
+    w = json.loads(txt)
+    if 'write' in (w.get('scopes') or []) and not (w.get('write_folders') or []):
+        print('[LFH Tip] Key has write scope, but write_folders is empty. Set write_folders (e.g. *) in LFH Web UI before writing files.')
+except Exception:
+    pass
+" || true
+    fi
   fi
 fi
+
+PROXY_ACTIVE="${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}"
+NOPROXY_ALL="${NO_PROXY:-},${no_proxy:-}"
+if [ -n "$PROXY_ACTIVE" ] && [ "$IS_PRIV" -eq 1 ] && [ -n "$TARGET_HOST" ]; then
+  NEED_FIX=0
+  case "${NO_PROXY:-}${no_proxy:-}" in
+    *'"'*) NEED_FIX=1 ;;
+  esac
+  case "$NOPROXY_ALL" in
+    *"$TARGET_HOST"*|*"192.168."*|*"100.64."*) ;;
+    *) NEED_FIX=1 ;;
+  esac
+  if [ "$NEED_FIX" -eq 1 ]; then
+    echo ""
+    echo "[LFH Proxy Warning] HTTP_PROXY/HTTPS_PROXY is active without bypassing LAN/Tailscale in NO_PROXY." >&2
+    echo "Ensure your shell/IDE exports NO_PROXY cleanly before restarting your IDE:" >&2
+    echo "  export NO_PROXY=\"localhost,127.0.0.1,::1,${TARGET_HOST},10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10\"" >&2
+  fi
+fi
+
 echo "Done! Restart or reload MCP servers in your IDE to start collaborating."
 `
 

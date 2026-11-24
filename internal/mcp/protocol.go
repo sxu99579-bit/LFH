@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"lfh/internal/bridge"
 	"lfh/internal/storage"
 )
 
@@ -187,7 +188,40 @@ func newToolErrorResult(err error) CallToolResult {
 		msg = err.Error()
 	}
 	code := "tool_error"
+	hint := ""
 	switch {
+	case errors.Is(err, bridge.ErrTaskNotFound):
+		code = "task_not_found"
+	case errors.Is(err, bridge.ErrSubtaskNotFound):
+		code = "subtask_not_found"
+	case errors.Is(err, bridge.ErrTaskAssignedToOther):
+		code = "assigned_to_other"
+		hint = "This task or subtask is exclusively locked to another @Agent. Pick a different claimable item."
+	case errors.Is(err, bridge.ErrTaskScheduledInFuture):
+		code = "scheduled_in_future"
+		hint = "Task has not reached its scheduled_at time yet. Wait until it becomes pending."
+	case errors.Is(err, bridge.ErrSubtaskBlockedByDeps):
+		code = "blocked_by_deps"
+		hint = "Check depends_on subtasks via list_tasks and wait until all prerequisites are done."
+	case errors.Is(err, bridge.ErrTaskAlreadyClaimed):
+		code = "already_claimed"
+		hint = "Another Agent claimed this task first. Call list_tasks(claimable_only=true) for another task."
+	case errors.Is(err, bridge.ErrTaskLeaseNotHeld):
+		code = "lease_not_held"
+		hint = "Call claim_task first (or confirm your lease has not expired)."
+	case errors.Is(err, bridge.ErrTaskSplitNotAllowed):
+		code = "split_not_allowed"
+	case errors.Is(err, bridge.ErrTaskAlreadySplit):
+		code = "already_split"
+	case errors.Is(err, bridge.ErrTaskCommentLimitReached):
+		code = "comment_limit_reached"
+		hint = "Discussion round limit reached; wait for a human to review or reopen."
+	case errors.Is(err, bridge.ErrTaskNotClaimable):
+		code = "task_not_claimable"
+	case errors.Is(err, bridge.ErrTaskForbidden):
+		code = "forbidden"
+	case errors.Is(err, bridge.ErrTaskInvalidInput):
+		code = "invalid_params"
 	case strings.Contains(msg, "无权") || strings.Contains(msg, "禁止") || strings.Contains(msg, "缺少权限") || strings.Contains(msg, "只读"):
 		code = "forbidden"
 	case strings.Contains(msg, "不存在") || strings.Contains(msg, "未找到"):
@@ -198,6 +232,7 @@ func newToolErrorResult(err error) CallToolResult {
 	payload := ToolError{
 		Code:    code,
 		Message: msg,
+		Hint:    hint,
 	}
 	b, _ := json.Marshal(payload)
 	return CallToolResult{

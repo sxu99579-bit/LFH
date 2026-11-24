@@ -28,6 +28,8 @@ import type { NavTab, PoolSummary, ServerInfo, ThemeMode, TransferTask, User } f
 import { cn, copyTextToClipboard, formatQuotaDisplay } from '@/lib/utils'
 import { Badge, Button, Sheet, useToast } from '@/components/ui'
 
+import { ListTodo } from 'lucide-react'
+
 interface AppShellProps {
   user: User
   info: ServerInfo | null
@@ -38,6 +40,7 @@ interface AppShellProps {
   onToggleTheme: () => void
   isMobile: boolean
   tasks: TransferTask[]
+  pendingTasksCount?: number
   onToggleTransferDrawer: () => void
   onOpenCommandPalette: () => void
   onQuickUploadFiles: () => void
@@ -58,6 +61,7 @@ export function AppShell({
   onToggleTheme,
   isMobile,
   tasks,
+  pendingTasksCount = 0,
   onToggleTransferDrawer,
   onOpenCommandPalette,
   onQuickUploadFiles,
@@ -90,6 +94,7 @@ export function AppShell({
 
   const allNavItems: Array<{ id: NavTab; label: string; shortLabel: string; icon: React.ComponentType<{ className?: string }>; adminOnly?: boolean }> = [
     { id: 'files', label: '文件中心', shortLabel: '文件', icon: Files },
+    { id: 'tasks', label: 'AI 任务板', shortLabel: '任务', icon: ListTodo },
     { id: 'clipboard', label: '超级剪贴板', shortLabel: '剪贴板', icon: Clipboard },
     { id: 'plugins', label: '算力与插件', shortLabel: '算力', icon: Cpu, adminOnly: true },
     { id: 'health', label: '节点健康', shortLabel: '监控', icon: Activity },
@@ -126,7 +131,7 @@ export function AppShell({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold tracking-tight">LFH</div>
           <div className="truncate text-[11px] text-muted-foreground">
-            {info?.version || 'V0.11.24.1'} · 分布式共享池
+            {info?.version || 'V0.11.24.2'} · 分布式共享池
           </div>
         </div>
         {sidebarOpen && (
@@ -163,6 +168,11 @@ export function AppShell({
                 >
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="truncate">{item.label}</span>
+                  {item.id === 'tasks' && pendingTasksCount > 0 && (
+                    <span className="ml-auto rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400 tabular-nums">
+                      {pendingTasksCount}
+                    </span>
+                  )}
                   {item.id === 'health' && pool && (
                     <span className="ml-auto rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 tabular-nums">
                       {pool.online_nodes}/{pool.total_nodes}
@@ -366,7 +376,7 @@ export function AppShell({
           onClose={() => setMobileMenuOpen(false)}
           side="bottom"
           title="快捷操作与入口切换"
-          subtitle={`当前版本 ${info?.version || 'V0.11.24.1'}`}
+          subtitle={`当前版本 ${info?.version || 'V0.11.24.2'}`}
         >
           <div className="grid grid-cols-2 gap-2.5">
             <button
@@ -393,6 +403,18 @@ export function AppShell({
               <FilePlus2 className="h-4.5 w-4.5 text-primary" />
               <div className="text-sm font-medium">新建 TXT 文本</div>
               <div className="text-[11px] text-muted-foreground">快速记录备忘/代码</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMobileMenuOpen(false)
+                onTabChange('tasks')
+              }}
+              className="flex flex-col items-start gap-1.5 rounded-xl border border-border bg-muted/30 p-3 text-left hover:bg-accent"
+            >
+              <ListTodo className="h-4.5 w-4.5 text-primary" />
+              <div className="text-sm font-medium">AI 任务板</div>
+              <div className="text-[11px] text-muted-foreground">抢单与定时协同</div>
             </button>
             {isAdmin && (
               <button

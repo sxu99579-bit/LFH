@@ -34,6 +34,7 @@ type AgentPairingRequestInput struct {
 	ClientVersion         string   `json:"client_version,omitempty"`
 	Hostname              string   `json:"hostname,omitempty"`
 	OS                    string   `json:"os,omitempty"`
+	DeviceKind            string   `json:"device_kind,omitempty"`
 	TargetOwner           string   `json:"target_owner,omitempty"`
 	RequestedScopes       []string `json:"requested_scopes,omitempty"`
 	RequestedReadFolders  []string `json:"requested_read_folders,omitempty"`
@@ -51,6 +52,10 @@ type ApprovePairingInput struct {
 	AllowSetVisibility  *bool      `json:"allow_set_visibility,omitempty"`
 	RateLimitPerMin     *int       `json:"rate_limit_per_min,omitempty"`
 	ExpiresHours        int        `json:"expires_hours,omitempty"`
+	AvatarID            string     `json:"avatar_id,omitempty"`
+	DisplayAlias        string     `json:"display_alias,omitempty"`
+	DeviceAlias         string     `json:"device_alias,omitempty"`
+	DeviceKind          string     `json:"device_kind,omitempty"`
 }
 
 type PublicAgentPairing struct {
@@ -61,6 +66,7 @@ type PublicAgentPairing struct {
 	ClientVersion         string     `json:"client_version,omitempty"`
 	Hostname              string     `json:"hostname,omitempty"`
 	OS                    string     `json:"os,omitempty"`
+	DeviceKind            string     `json:"device_kind,omitempty"`
 	SourceIP              string     `json:"source_ip,omitempty"`
 	TargetOwner           string     `json:"target_owner,omitempty"`
 	RequestedScopes       []string   `json:"requested_scopes"`
@@ -353,6 +359,11 @@ func (s *Server) handleCreateAgentPairing(w http.ResponseWriter, r *http.Request
 	confirmCode := randomConfirmCode()
 	targetOwner := sanitizePairingText(in.TargetOwner, 64)
 
+	deviceKind := auth.NormalizeDeviceKind(in.DeviceKind)
+	if deviceKind == "" {
+		deviceKind = auth.InferDeviceKind(in.OS, hostname)
+	}
+
 	rec := &agentPairingRecord{
 		PublicAgentPairing: PublicAgentPairing{
 			ID:                    id,
@@ -362,6 +373,7 @@ func (s *Server) handleCreateAgentPairing(w http.ResponseWriter, r *http.Request
 			ClientVersion:         sanitizePairingText(in.ClientVersion, 32),
 			Hostname:              hostname,
 			OS:                    sanitizePairingText(in.OS, 32),
+			DeviceKind:            deviceKind,
 			SourceIP:              sourceIP,
 			TargetOwner:           targetOwner,
 			RequestedScopes:       sanitizeProposedScopes(in.RequestedScopes),
@@ -612,6 +624,16 @@ func (s *Server) handleApproveAgentPairing(w http.ResponseWriter, r *http.Reques
 		t := now.Add(time.Duration(in.ExpiresHours) * time.Hour)
 		expiresAt = &t
 	}
+	deviceAlias := strings.TrimSpace(in.DeviceAlias)
+	if deviceAlias == "" {
+		deviceAlias = rec.Hostname
+	}
+	deviceKind := auth.NormalizeDeviceKind(in.DeviceKind)
+	if deviceKind == "" {
+		deviceKind = rec.DeviceKind
+	}
+	avatarID := strings.TrimSpace(in.AvatarID)
+	displayAlias := strings.TrimSpace(in.DisplayAlias)
 	pm.mu.Unlock()
 
 	plainToken, pubKey, err := s.auth.CreateAgentKey(auth.CreateAgentKeyInput{
@@ -623,6 +645,10 @@ func (s *Server) handleApproveAgentPairing(w http.ResponseWriter, r *http.Reques
 		DefaultAllowedUsers: defaultAllowed,
 		AllowSetVisibility:  allowVis,
 		RateLimitPerMin:     rateLimit,
+		AvatarID:            avatarID,
+		DisplayAlias:        displayAlias,
+		DeviceAlias:         deviceAlias,
+		DeviceKind:          deviceKind,
 		ExpiresAt:           expiresAt,
 	})
 	if err != nil {

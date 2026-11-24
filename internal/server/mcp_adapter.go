@@ -122,7 +122,7 @@ func (b *serverMCPBackend) toFileSummary(rec storage.FileRecord, lease *storage.
 func (b *serverMCPBackend) WhoAmI(ctx context.Context, p auth.Principal) (mcp.WhoAmIResult, error) {
 	var scopes []string
 	var readFolders, writeFolders, defaultAllowed []string
-	var agentKeyID, agentName string
+	var agentKeyID, agentName, avatarID, displayAlias, deviceAlias, deviceKind string
 	var allowSetVis bool
 
 	if p.IsAgent && p.AgentKey != nil {
@@ -132,6 +132,10 @@ func (b *serverMCPBackend) WhoAmI(ctx context.Context, p auth.Principal) (mcp.Wh
 		defaultAllowed = append([]string(nil), p.AgentKey.DefaultAllowedUsers...)
 		agentKeyID = p.AgentKey.ID
 		agentName = p.AgentKey.Name
+		avatarID = p.AgentKey.AvatarID
+		displayAlias = p.AgentKey.DisplayAlias
+		deviceAlias = p.AgentKey.DeviceAlias
+		deviceKind = p.AgentKey.DeviceKind
 		allowSetVis = p.AgentKey.AllowSetVisibility
 	} else {
 		scopes = []string{auth.ScopeRead, auth.ScopeWrite, auth.ScopeShare, auth.ScopeVerify, auth.ScopeDelete}
@@ -179,6 +183,10 @@ func (b *serverMCPBackend) WhoAmI(ctx context.Context, p auth.Principal) (mcp.Wh
 		ActorLabel:          p.ActorLabel(),
 		AgentKeyID:          agentKeyID,
 		AgentName:           agentName,
+		AvatarID:            avatarID,
+		DisplayAlias:        displayAlias,
+		DeviceAlias:         deviceAlias,
+		DeviceKind:          deviceKind,
 		Scopes:              scopes,
 		ReadFolders:         readFolders,
 		WriteFolders:        writeFolders,
@@ -1102,4 +1110,68 @@ func (b *serverMCPBackend) TriggerWorkspaceVerify(ctx context.Context, p auth.Pr
 		return bridge.VerifyResult{}, statusErrToMCP(status, err.Error())
 	}
 	return res, nil
+}
+
+func (b *serverMCPBackend) ListTasks(ctx context.Context, p auth.Principal, in bridge.TaskListFilter) (bridge.TaskListResult, error) {
+	if strings.TrimSpace(in.AssignedAgent) != "" {
+		if pub, ok := b.srv.auth.ResolveAgentKeyRef(in.AssignedAgent); ok {
+			in.AssignedAgent = pub.ID
+		}
+	}
+	return b.srv.getTasks().ListTasks(taskActorFromPrincipal(p), in), nil
+}
+
+func (b *serverMCPBackend) ClaimTask(ctx context.Context, p auth.Principal, in bridge.ClaimTaskInput) (bridge.AgentTask, error) {
+	return b.srv.getTasks().ClaimTask(taskActorFromPrincipal(p), in)
+}
+
+func (b *serverMCPBackend) HeartbeatTask(ctx context.Context, p auth.Principal, in mcp.HeartbeatTaskInput) (bridge.AgentTask, error) {
+	return b.srv.getTasks().HeartbeatTask(taskActorFromPrincipal(p), bridge.ClaimTaskInput{
+		TaskID:       in.TaskID,
+		SubtaskID:    in.SubtaskID,
+		LeaseSeconds: in.LeaseSeconds,
+	})
+}
+
+func (b *serverMCPBackend) SplitTask(ctx context.Context, p auth.Principal, in bridge.SplitTaskInput) (bridge.AgentTask, error) {
+	for i := range in.Subtasks {
+		if strings.TrimSpace(in.Subtasks[i].AssignedAgent) == "" {
+			continue
+		}
+		id, lbl, err := b.srv.resolveExplicitAgentTarget(in.Subtasks[i].AssignedAgent)
+		if err != nil {
+			return bridge.AgentTask{}, mcp.NewToolError("invalid_params", err.Error(), "", nil)
+		}
+		in.Subtasks[i].AssignedAgent = id
+		if in.Subtasks[i].AssignedAgentLabel == "" {
+			in.Subtasks[i].AssignedAgentLabel = lbl
+		}
+	}
+	return b.srv.getTasks().SplitTask(taskActorFromPrincipal(p), in)
+}
+
+func (b *serverMCPBackend) PostTaskComment(ctx context.Context, p auth.Principal, in bridge.PostCommentInput) (mcp.TaskCommentResult, error) {
+	task, cmt, err := b.srv.getTasks().PostComment(taskActorFromPrincipal(p), in)
+	if err != nil {
+		return mcp.TaskCommentResult{}, err
+	}
+	return mcp.TaskCommentResult{Task: task, Comment: cmt}, nil
+}
+
+func (b *serverMCPBackend) CompleteTask(ctx context.Context, p auth.Principal, in bridge.CompleteTaskInput) (bridge.AgentTask, error) {
+	return b.srv.getTasks().CompleteTask(taskActorFromPrincipal(p), in)
+}
+
+func (b *serverMCPBackend) ReleaseTask(ctx context.Context, p auth.Principal, in bridge.ReleaseTaskInput) (bridge.AgentTask, error) {
+	if strings.TrimSpace(in.ReassignAgent) != "" {
+		id, lbl, err := b.srv.resolveExplicitAgentTarget(in.ReassignAgent)
+		if err != nil {
+			return bridge.AgentTask{}, mcp.NewToolError("invalid_params", err.Error(), "", nil)
+		}
+		in.ReassignAgent = id
+		if in.ReassignAgentLabel == "" {
+			in.ReassignAgentLabel = lbl
+		}
+	}
+	return b.srv.getTasks().ReleaseTask(taskActorFromPrincipal(p), in)
 }

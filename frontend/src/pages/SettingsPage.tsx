@@ -66,9 +66,10 @@ interface SettingsPageProps {
   onToggleTheme: () => void
   onRefreshAll: () => Promise<void> | void
   onOpenMountModal: () => void
+  focusTab?: { tab: SettingsTab; seq: number } | null
 }
 
-type SettingsTab = 'general' | 'agent' | 'security' | 'users' | 'cluster' | 'update' | 'logs'
+export type SettingsTab = 'general' | 'agent' | 'security' | 'users' | 'cluster' | 'update' | 'logs'
 
 export function SettingsPage({
   user,
@@ -78,10 +79,17 @@ export function SettingsPage({
   onToggleTheme,
   onRefreshAll,
   onOpenMountModal,
+  focusTab,
 }: SettingsPageProps) {
   const { toast } = useToast()
   const isAdmin = user.role === 'admin'
-  const [tab, setTab] = useState<SettingsTab>('general')
+  const [tab, setTab] = useState<SettingsTab>(focusTab?.tab || 'general')
+
+  useEffect(() => {
+    if (focusTab?.tab) {
+      setTab(focusTab.tab)
+    }
+  }, [focusTab])
 
   // General state
   const [deviceName, setDeviceName] = useState(() => {

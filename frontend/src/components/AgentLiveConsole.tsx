@@ -6,6 +6,7 @@ import {
   Clock,
   Copy,
   Lock,
+  Paintbrush,
   Pencil,
   PlugZap,
   Plus,
@@ -29,6 +30,14 @@ import type {
   MountItem,
   User,
 } from '@/types'
+import {
+  AgentAvatarBadge,
+  AgentProfileModal,
+  DeviceMiniIcon,
+  agentDeviceLabel,
+  agentDisplayName,
+  deviceKindShortLabel,
+} from '@/components/AgentAvatar'
 import {
   Badge,
   Button,
@@ -173,6 +182,7 @@ export function AgentLiveConsole({
   const [appRateLimit, setAppRateLimit] = useState('180')
   const [appExpireHours, setAppExpireHours] = useState('0')
   const [submittingApprove, setSubmittingApprove] = useState(false)
+  const [profileKey, setProfileKey] = useState<AgentKeyItem | null>(null)
 
   const loadLiveState = useCallback(async () => {
     setLoading(true)
@@ -664,11 +674,24 @@ export function AgentLiveConsole({
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0 space-y-1">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={cn('h-2.5 w-2.5 rounded-full shrink-0', stInfo.dotClass)} />
-                        <span className="font-semibold text-sm">{k.name}</span>
+                        <AgentAvatarBadge
+                          agentKey={k}
+                          onlineStatus={k.disabled ? 'offline' : item.status}
+                          size="sm"
+                        />
+                        <span className="font-semibold text-sm">{agentDisplayName(k)}</span>
+                        {k.display_alias?.trim() && (
+                          <Badge variant="outline" className="text-[10px]">
+                            {k.name}
+                          </Badge>
+                        )}
                         <Badge variant={stInfo.variant}>{stInfo.label}</Badge>
                         {k.disabled && <Badge variant="outline">密钥已停用</Badge>}
                         {expired && <Badge variant="destructive">已过期</Badge>}
+                        <Badge variant="outline" className="gap-1">
+                          <DeviceMiniIcon kind={k.device_kind} className="h-3 w-3" />
+                          <span>{agentDeviceLabel(k) || deviceKindShortLabel(k.device_kind)}</span>
+                        </Badge>
                         {item.client_name && (
                           <Badge variant="secondary">
                             {item.client_name}
@@ -714,6 +737,10 @@ export function AgentLiveConsole({
                           <span>断开 ({activeSids.length})</span>
                         </Button>
                       )}
+                      <Button size="xs" variant="outline" onClick={() => setProfileKey(k)}>
+                        <Paintbrush className="h-3 w-3" />
+                        <span>换装</span>
+                      </Button>
                       <Button size="xs" variant="outline" onClick={() => onSelectKeyForConfig(k.id)}>
                         <Terminal className="h-3 w-3" />
                         <span>配置</span>
@@ -920,6 +947,19 @@ export function AgentLiveConsole({
 
           <div className="space-y-1.5">
             <label className="font-medium block">可写目录白名单（留空则禁止写入）</label>
+            {appScopes.includes('write') && parseFolderRules(appWriteFolders).length === 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+                <span>已勾选写权限 (write)，但可写目录为空，该 Agent 将无法写入任何文件。</span>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => setAppWriteFolders((p) => appendFolderRule(p, '*'))}
+                >
+                  + 一键允许全部目录 (*)
+                </Button>
+              </div>
+            )}
             <Textarea
               value={appWriteFolders}
               onChange={(e) => setAppWriteFolders(e.target.value)}
@@ -989,6 +1029,16 @@ export function AgentLiveConsole({
           </div>
         </form>
       </Dialog>
+
+      <AgentProfileModal
+        open={Boolean(profileKey)}
+        agentKey={profileKey}
+        onClose={() => setProfileKey(null)}
+        onSaved={() => {
+          void loadLiveState()
+          void onKeysChanged()
+        }}
+      />
     </div>
   )
 }

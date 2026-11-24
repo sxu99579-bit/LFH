@@ -25,10 +25,12 @@ import {
   TextEditorModal,
 } from '@/components/FileModals'
 import { FilesPage } from '@/pages/FilesPage'
+import { AgentTasksPage } from '@/pages/AgentTasksPage'
 import { ClipboardPage } from '@/pages/ClipboardPage'
 import { PluginsPage } from '@/pages/PluginsPage'
 import { HealthPage } from '@/pages/HealthPage'
 import { SettingsPage } from '@/pages/SettingsPage'
+import type { SettingsTab } from '@/pages/SettingsPage'
 
 function WorkspaceApp() {
   const { toast } = useToast()
@@ -46,6 +48,8 @@ function WorkspaceApp() {
   const [info, setInfo] = useState<ServerInfo | null>(null)
   const [user, setUser] = useState<User | null>(null)
   const [activeTab, setActiveTab] = useState<NavTab>('files')
+  const [pendingTasksCount, setPendingTasksCount] = useState(0)
+  const [settingsFocusTab, setSettingsFocusTab] = useState<{ tab: SettingsTab; seq: number } | null>(null)
 
   const [cluster, setCluster] = useState<ClusterResponse | null>(null)
   const [summary, setSummary] = useState<SummaryStats | null>(null)
@@ -124,12 +128,16 @@ function WorkspaceApp() {
 
   const loadAuxData = useCallback(async () => {
     try {
-      const [capRes, selRes] = await Promise.all([
+      const [capRes, selRes, taskRes] = await Promise.all([
         api.getPluginCapabilities(),
         api.getSelectableUsers(),
+        api.listAgentTasks({ limit: 1 }).catch(() => null),
       ])
       setCapabilities(capRes.capabilities || [])
       setSelectableUsers(selRes.users || [])
+      if (taskRes?.summary) {
+        setPendingTasksCount((taskRes.summary.pending || 0) + (taskRes.summary.paused || 0))
+      }
       if (user?.role === 'admin') {
         const mntRes = await api.getMounts().catch(() => ({ mounts: [] }))
         const nextSet = new Set<string>()
@@ -205,6 +213,21 @@ function WorkspaceApp() {
         }
         if (data.kind === 'agent_status') {
           window.dispatchEvent(new CustomEvent('lfh:agent-event', { detail: data }))
+          return
+        }
+        if (data.kind === 'agent_task' || data.kind === 'agent_profile') {
+          window.dispatchEvent(new CustomEvent('lfh:agent-event', { detail: data }))
+          void api
+            .listAgentTasks({ limit: 1 })
+            .then((res) => {
+              if (res?.summary) {
+                setPendingTasksCount((res.summary.pending || 0) + (res.summary.paused || 0))
+              }
+            })
+            .catch(() => {})
+          if (data.kind === 'agent_task' && data.node_name === 'completed') {
+            void loadFilesAndSummary()
+          }
           return
         }
       } catch {
@@ -339,6 +362,7 @@ function WorkspaceApp() {
         onToggleTheme={toggleTheme}
         isMobile={isMobile}
         tasks={transfers.tasks}
+        pendingTasksCount={pendingTasksCount}
         onToggleTransferDrawer={() => transfers.setOpen(!transfers.open)}
         onOpenCommandPalette={() => setCmdOpen(true)}
         onQuickUploadFiles={() => fileInputRef.current?.click()}
@@ -389,6 +413,19 @@ function WorkspaceApp() {
           />
         )}
 
+        {activeTab === 'tasks' && (
+          <AgentTasksPage
+            user={user}
+            info={info}
+            isMobile={isMobile}
+            onSummaryChange={(s) => setPendingTasksCount((s.pending || 0) + (s.paused || 0))}
+            onOpenAgentSettings={() => {
+              setSettingsFocusTab({ tab: 'agent', seq: Date.now() })
+              setActiveTab('settings')
+            }}
+          />
+        )}
+
         {activeTab === 'clipboard' && (
           <ClipboardPage
             user={user}
@@ -428,6 +465,7 @@ function WorkspaceApp() {
             onToggleTheme={toggleTheme}
             onRefreshAll={refreshAll}
             onOpenMountModal={() => setLocalImportMode('mount')}
+            focusTab={settingsFocusTab}
           />
         )}
       </AppShell>

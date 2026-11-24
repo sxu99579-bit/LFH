@@ -529,12 +529,15 @@ export function AgentBridgeTab({ user, info, mounts }: AgentBridgeTabProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Wrench className="h-4 w-4 text-primary" />
-            <span>内置 MCP 服务端点与 18 项协同工具</span>
+            <span>内置 MCP 服务端点与 25 项协同工具</span>
           </CardTitle>
           <CardDescription>
             纯 Go 原生 Streamable HTTP 服务端点：<code className="font-mono">{mcpUrl}</code>（同步开放{' '}
             <code className="font-mono">/agent/connect.ps1</code>、
             <code className="font-mono">/agent/connect.sh</code>、
+            <code className="font-mono">/agent/worker.ps1</code>、
+            <code className="font-mono">/agent/worker.sh</code>、
+            <code className="font-mono">/api/agent-tasks</code>、
             <code className="font-mono">/api/agent-pairing/*</code>、
             <code className="font-mono">/api/agent-sessions</code>、
             <code className="font-mono">/oauth/*</code>、
@@ -546,7 +549,7 @@ export function AgentBridgeTab({ user, info, mounts }: AgentBridgeTabProps) {
             <code className="font-mono">/api/admin/webhooks</code>）
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-3 text-[11px]">
+        <CardContent className="grid gap-3 md:grid-cols-2 lg:grid-cols-4 text-[11px]">
           <div className="rounded-lg border border-border p-3 space-y-1">
             <div className="font-semibold text-xs">探索、读写与大文件短链</div>
             <div className="text-muted-foreground leading-relaxed font-mono">
@@ -563,6 +566,12 @@ export function AgentBridgeTab({ user, info, mounts }: AgentBridgeTabProps) {
             <div className="font-semibold text-xs">软租约、状态上报与接力监听</div>
             <div className="text-muted-foreground leading-relaxed font-mono">
               acquire_lease, release_lease, set_file_visibility, delete_file, wait_for_changes, report_agent_status
+            </div>
+          </div>
+          <div className="rounded-lg border border-border p-3 space-y-1">
+            <div className="font-semibold text-xs">AI 任务板抢单与拆块协同</div>
+            <div className="text-muted-foreground leading-relaxed font-mono">
+              list_tasks, claim_task, heartbeat_task, split_task, post_task_comment, complete_task, release_task
             </div>
           </div>
         </CardContent>

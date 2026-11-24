@@ -14,6 +14,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+)
+
+var (
+	// ValidAgentAvatars enumerates built-in SVG cartoon mascots for zero-dependency visual identity.
+	ValidAgentAvatars = []string{"shiba", "bluecat", "panda", "owl", "bunny", "fox", "penguin", "mecha"}
+	// ValidAgentDeviceKinds enumerates corner device badge categories on Agent avatars.
+	ValidAgentDeviceKinds = []string{"laptop", "desktop", "mac", "server"}
 )
 
 const (
@@ -47,6 +55,10 @@ type AgentKey struct {
 	AllowSetVisibility  bool       `json:"allow_set_visibility"`
 	RateLimitPerMin     int        `json:"rate_limit_per_min"`
 	Disabled            bool       `json:"disabled,omitempty"`
+	AvatarID            string     `json:"avatar_id,omitempty"`
+	DisplayAlias        string     `json:"display_alias,omitempty"`
+	DeviceAlias         string     `json:"device_alias,omitempty"`
+	DeviceKind          string     `json:"device_kind,omitempty"`
 	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	LastUsedAt          *time.Time `json:"last_used_at,omitempty"`
@@ -66,6 +78,10 @@ type PublicAgentKey struct {
 	AllowSetVisibility  bool       `json:"allow_set_visibility"`
 	RateLimitPerMin     int        `json:"rate_limit_per_min"`
 	Disabled            bool       `json:"disabled,omitempty"`
+	AvatarID            string     `json:"avatar_id,omitempty"`
+	DisplayAlias        string     `json:"display_alias,omitempty"`
+	DeviceAlias         string     `json:"device_alias,omitempty"`
+	DeviceKind          string     `json:"device_kind,omitempty"`
 	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	LastUsedAt          *time.Time `json:"last_used_at,omitempty"`
@@ -81,6 +97,10 @@ type CreateAgentKeyInput struct {
 	DefaultAllowedUsers []string   `json:"default_allowed_users"`
 	AllowSetVisibility  bool       `json:"allow_set_visibility"`
 	RateLimitPerMin     int        `json:"rate_limit_per_min"`
+	AvatarID            string     `json:"avatar_id,omitempty"`
+	DisplayAlias        string     `json:"display_alias,omitempty"`
+	DeviceAlias         string     `json:"device_alias,omitempty"`
+	DeviceKind          string     `json:"device_kind,omitempty"`
 	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 }
 
@@ -93,6 +113,10 @@ type UpdateAgentKeyInput struct {
 	AllowSetVisibility  *bool      `json:"allow_set_visibility,omitempty"`
 	RateLimitPerMin     *int       `json:"rate_limit_per_min,omitempty"`
 	Disabled            *bool      `json:"disabled,omitempty"`
+	AvatarID            *string    `json:"avatar_id,omitempty"`
+	DisplayAlias        *string    `json:"display_alias,omitempty"`
+	DeviceAlias         *string    `json:"device_alias,omitempty"`
+	DeviceKind          *string    `json:"device_kind,omitempty"`
 	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 	ClearExpiresAt      bool       `json:"clear_expires_at,omitempty"`
 }
@@ -121,7 +145,80 @@ func cloneStrings(src []string) []string {
 	return out
 }
 
+// DefaultAvatarForKeyID deterministically selects a built-in cartoon avatar for an Agent key ID.
+func DefaultAvatarForKeyID(id string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(id)))
+	return ValidAgentAvatars[int(sum[0])%len(ValidAgentAvatars)]
+}
+
+// NormalizeAvatarID returns a valid cartoon avatar ID or empty string if unrecognized.
+func NormalizeAvatarID(raw string) string {
+	clean := strings.ToLower(strings.TrimSpace(raw))
+	for _, item := range ValidAgentAvatars {
+		if clean == item {
+			return item
+		}
+	}
+	return ""
+}
+
+// NormalizeDeviceKind returns a valid device badge kind or empty string if unrecognized.
+func NormalizeDeviceKind(raw string) string {
+	clean := strings.ToLower(strings.TrimSpace(raw))
+	for _, item := range ValidAgentDeviceKinds {
+		if clean == item {
+			return item
+		}
+	}
+	return ""
+}
+
+// InferDeviceKind derives laptop/desktop/mac/server from client OS and hostname heuristics.
+func InferDeviceKind(osName, hostname string) string {
+	o := strings.ToLower(strings.TrimSpace(osName))
+	h := strings.ToLower(strings.TrimSpace(hostname))
+	if strings.Contains(o, "darwin") || strings.Contains(o, "mac") || strings.Contains(h, "macbook") || strings.Contains(h, "imac") || strings.Contains(h, "mac-") {
+		if strings.Contains(h, "macbook") {
+			return "laptop"
+		}
+		return "mac"
+	}
+	for _, kw := range []string{"laptop", "notebook", "thinkpad", "surface", "matebook", "zenbook", "macbook", "book"} {
+		if strings.Contains(h, kw) {
+			return "laptop"
+		}
+	}
+	if strings.Contains(o, "linux") || strings.Contains(o, "ubuntu") || strings.Contains(o, "debian") {
+		return "server"
+	}
+	for _, kw := range []string{"nas", "server", "srv", "docker", "vps", "node"} {
+		if strings.Contains(h, kw) {
+			return "server"
+		}
+	}
+	return "desktop"
+}
+
+// NormalizeAgentAlias strips control characters and caps rune length for display/device aliases.
+func NormalizeAgentAlias(raw string, maxRunes int) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(raw))
+	runes := []rune(cleaned)
+	if maxRunes > 0 && len(runes) > maxRunes {
+		return string(runes[:maxRunes])
+	}
+	return cleaned
+}
+
 func toPublicAgentKey(k AgentKey) PublicAgentKey {
+	avatarID := NormalizeAvatarID(k.AvatarID)
+	if avatarID == "" {
+		avatarID = DefaultAvatarForKeyID(k.ID)
+	}
 	return PublicAgentKey{
 		ID:                  k.ID,
 		Name:                k.Name,
@@ -134,6 +231,10 @@ func toPublicAgentKey(k AgentKey) PublicAgentKey {
 		AllowSetVisibility:  k.AllowSetVisibility,
 		RateLimitPerMin:     k.RateLimitPerMin,
 		Disabled:            k.Disabled,
+		AvatarID:            avatarID,
+		DisplayAlias:        k.DisplayAlias,
+		DeviceAlias:         k.DeviceAlias,
+		DeviceKind:          NormalizeDeviceKind(k.DeviceKind),
 		ExpiresAt:           cloneTimePtr(k.ExpiresAt),
 		CreatedAt:           k.CreatedAt,
 		LastUsedAt:          cloneTimePtr(k.LastUsedAt),
@@ -501,6 +602,22 @@ func (m *Manager) CreateAgentKey(in CreateAgentKeyInput) (string, PublicAgentKey
 	if err != nil {
 		return "", PublicAgentKey{}, err
 	}
+	avatarID := ""
+	if strings.TrimSpace(in.AvatarID) != "" {
+		avatarID = NormalizeAvatarID(in.AvatarID)
+		if avatarID == "" {
+			return "", PublicAgentKey{}, errors.New("无效的卡通形象标识")
+		}
+	}
+	deviceKind := ""
+	if strings.TrimSpace(in.DeviceKind) != "" {
+		deviceKind = NormalizeDeviceKind(in.DeviceKind)
+		if deviceKind == "" {
+			return "", PublicAgentKey{}, errors.New("无效的设备类型标识")
+		}
+	}
+	displayAlias := NormalizeAgentAlias(in.DisplayAlias, 24)
+	deviceAlias := NormalizeAgentAlias(in.DeviceAlias, 32)
 
 	rawTokenBytes := make([]byte, 24)
 	if _, err := rand.Read(rawTokenBytes); err != nil {
@@ -540,6 +657,9 @@ func (m *Manager) CreateAgentKey(in CreateAgentKeyInput) (string, PublicAgentKey
 	if keyID == "" {
 		return "", PublicAgentKey{}, errors.New("生成 Agent 密钥 ID 失败")
 	}
+	if avatarID == "" {
+		avatarID = DefaultAvatarForKeyID(keyID)
+	}
 
 	ak := AgentKey{
 		ID:                  keyID,
@@ -553,6 +673,10 @@ func (m *Manager) CreateAgentKey(in CreateAgentKeyInput) (string, PublicAgentKey
 		DefaultAllowedUsers: defaultAllowed,
 		AllowSetVisibility:  in.AllowSetVisibility,
 		RateLimitPerMin:     normalizeRateLimit(in.RateLimitPerMin),
+		AvatarID:            avatarID,
+		DisplayAlias:        displayAlias,
+		DeviceAlias:         deviceAlias,
+		DeviceKind:          deviceKind,
 		ExpiresAt:           cloneTimePtr(in.ExpiresAt),
 		CreatedAt:           time.Now(),
 	}
@@ -595,6 +719,50 @@ func (m *Manager) GetAgentKey(id string) (PublicAgentKey, bool) {
 		return PublicAgentKey{}, false
 	}
 	return toPublicAgentKey(ak), true
+}
+
+// ResolveAgentKeyRef resolves an Agent key by ID, display_alias, or key Name (stripping optional leading @).
+func (m *Manager) ResolveAgentKeyRef(ref string) (PublicAgentKey, bool) {
+	clean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ref), "@"))
+	if clean == "" {
+		return PublicAgentKey{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if ak, ok := m.agentKeys[clean]; ok {
+		return toPublicAgentKey(ak), true
+	}
+	var fallback *PublicAgentKey
+	for _, ak := range m.agentKeys {
+		if ak.DisplayAlias != "" && strings.EqualFold(ak.DisplayAlias, clean) {
+			pub := toPublicAgentKey(ak)
+			if !ak.Disabled {
+				return pub, true
+			}
+			if fallback == nil {
+				fallback = &pub
+			}
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
+	}
+	for _, ak := range m.agentKeys {
+		if strings.EqualFold(ak.Name, clean) {
+			pub := toPublicAgentKey(ak)
+			if !ak.Disabled {
+				return pub, true
+			}
+			if fallback == nil {
+				fallback = &pub
+			}
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
+	}
+	return PublicAgentKey{}, false
 }
 
 func canManageAgentKey(ak AgentKey, actorUsername, actorRole string) bool {
@@ -661,6 +829,36 @@ func (m *Manager) UpdateAgentKey(id, actorUsername, actorRole string, in UpdateA
 	}
 	if in.Disabled != nil {
 		next.Disabled = *in.Disabled
+	}
+	if in.AvatarID != nil {
+		raw := strings.TrimSpace(*in.AvatarID)
+		if raw == "" {
+			next.AvatarID = DefaultAvatarForKeyID(next.ID)
+		} else {
+			norm := NormalizeAvatarID(raw)
+			if norm == "" {
+				return PublicAgentKey{}, errors.New("无效的卡通形象标识")
+			}
+			next.AvatarID = norm
+		}
+	}
+	if in.DisplayAlias != nil {
+		next.DisplayAlias = NormalizeAgentAlias(*in.DisplayAlias, 24)
+	}
+	if in.DeviceAlias != nil {
+		next.DeviceAlias = NormalizeAgentAlias(*in.DeviceAlias, 32)
+	}
+	if in.DeviceKind != nil {
+		raw := strings.TrimSpace(*in.DeviceKind)
+		if raw == "" {
+			next.DeviceKind = ""
+		} else {
+			norm := NormalizeDeviceKind(raw)
+			if norm == "" {
+				return PublicAgentKey{}, errors.New("无效的设备类型标识")
+			}
+			next.DeviceKind = norm
+		}
 	}
 	if in.ClearExpiresAt {
 		next.ExpiresAt = nil

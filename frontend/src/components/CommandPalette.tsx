@@ -11,6 +11,7 @@ import {
   FileText,
   X,
 } from 'lucide-react'
+import { ListTodo } from 'lucide-react'
 import type { FileRecord, NavTab } from '@/types'
 import { formatSize } from '@/lib/utils'
 
@@ -82,6 +83,7 @@ export function CommandPalette({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
               {[
                 { label: '打开文件中心', icon: Files, fn: () => onNavigate('files') },
+                { label: '打开 AI 协同任务板', icon: ListTodo, fn: () => onNavigate('tasks') },
                 { label: '打开超级剪贴板', icon: Clipboard, fn: () => onNavigate('clipboard') },
                 ...(isAdmin ? [{ label: '打开算力与插件市场', icon: Cpu, fn: () => onNavigate('plugins') }] : []),
                 { label: '节点健康与内网带宽', icon: Activity, fn: () => onNavigate('health') },

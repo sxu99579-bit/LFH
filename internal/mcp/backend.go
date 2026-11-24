@@ -39,6 +39,10 @@ type WhoAmIResult struct {
 	ActorLabel          string      `json:"actor_label,omitempty"`
 	AgentKeyID          string      `json:"agent_key_id,omitempty"`
 	AgentName           string      `json:"agent_name,omitempty"`
+	AvatarID            string      `json:"avatar_id,omitempty"`
+	DisplayAlias        string      `json:"display_alias,omitempty"`
+	DeviceAlias         string      `json:"device_alias,omitempty"`
+	DeviceKind          string      `json:"device_kind,omitempty"`
 	Scopes              []string    `json:"scopes"`
 	ReadFolders         []string    `json:"read_folders,omitempty"`
 	WriteFolders        []string    `json:"write_folders,omitempty"`
@@ -300,6 +304,17 @@ type TriggerVerifyInput struct {
 	PresetID string `json:"preset_id"`
 }
 
+type HeartbeatTaskInput struct {
+	TaskID       string `json:"task_id"`
+	SubtaskID    string `json:"subtask_id,omitempty"`
+	LeaseSeconds int    `json:"lease_seconds,omitempty"`
+}
+
+type TaskCommentResult struct {
+	Task    bridge.AgentTask   `json:"task"`
+	Comment bridge.TaskComment `json:"comment"`
+}
+
 // Backend bridges MCP tool invocations cleanly into LFH auth, storage, cluster, and event services.
 type Backend interface {
 	Authenticate(r *http.Request) (auth.Principal, error)
@@ -322,4 +337,12 @@ type Backend interface {
 	WaitForChanges(ctx context.Context, p auth.Principal, in WaitChangesInput) (WaitChangesResult, error)
 	IssueTransferTicket(ctx context.Context, r *http.Request, p auth.Principal, in IssueTicketInput) (IssueTicketResult, error)
 	TriggerWorkspaceVerify(ctx context.Context, p auth.Principal, in TriggerVerifyInput) (bridge.VerifyResult, error)
+
+	ListTasks(ctx context.Context, p auth.Principal, in bridge.TaskListFilter) (bridge.TaskListResult, error)
+	ClaimTask(ctx context.Context, p auth.Principal, in bridge.ClaimTaskInput) (bridge.AgentTask, error)
+	HeartbeatTask(ctx context.Context, p auth.Principal, in HeartbeatTaskInput) (bridge.AgentTask, error)
+	SplitTask(ctx context.Context, p auth.Principal, in bridge.SplitTaskInput) (bridge.AgentTask, error)
+	PostTaskComment(ctx context.Context, p auth.Principal, in bridge.PostCommentInput) (TaskCommentResult, error)
+	CompleteTask(ctx context.Context, p auth.Principal, in bridge.CompleteTaskInput) (bridge.AgentTask, error)
+	ReleaseTask(ctx context.Context, p auth.Principal, in bridge.ReleaseTaskInput) (bridge.AgentTask, error)
 }

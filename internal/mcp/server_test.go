@@ -137,6 +137,34 @@ func (s *stubBackend) TriggerWorkspaceVerify(ctx context.Context, p auth.Princip
 	return bridge.VerifyResult{OK: true, MountID: in.MountID, PresetID: in.PresetID}, nil
 }
 
+func (s *stubBackend) ListTasks(ctx context.Context, p auth.Principal, in bridge.TaskListFilter) (bridge.TaskListResult, error) {
+	return bridge.TaskListResult{}, nil
+}
+
+func (s *stubBackend) ClaimTask(ctx context.Context, p auth.Principal, in bridge.ClaimTaskInput) (bridge.AgentTask, error) {
+	return bridge.AgentTask{ID: in.TaskID, Status: bridge.TaskStatusInProgress}, nil
+}
+
+func (s *stubBackend) HeartbeatTask(ctx context.Context, p auth.Principal, in HeartbeatTaskInput) (bridge.AgentTask, error) {
+	return bridge.AgentTask{ID: in.TaskID, Status: bridge.TaskStatusInProgress}, nil
+}
+
+func (s *stubBackend) SplitTask(ctx context.Context, p auth.Principal, in bridge.SplitTaskInput) (bridge.AgentTask, error) {
+	return bridge.AgentTask{ID: in.TaskID, Status: bridge.TaskStatusInProgress}, nil
+}
+
+func (s *stubBackend) PostTaskComment(ctx context.Context, p auth.Principal, in bridge.PostCommentInput) (TaskCommentResult, error) {
+	return TaskCommentResult{Task: bridge.AgentTask{ID: in.TaskID}}, nil
+}
+
+func (s *stubBackend) CompleteTask(ctx context.Context, p auth.Principal, in bridge.CompleteTaskInput) (bridge.AgentTask, error) {
+	return bridge.AgentTask{ID: in.TaskID, Status: bridge.TaskStatusDone}, nil
+}
+
+func (s *stubBackend) ReleaseTask(ctx context.Context, p auth.Principal, in bridge.ReleaseTaskInput) (bridge.AgentTask, error) {
+	return bridge.AgentTask{ID: in.TaskID, Status: bridge.TaskStatusPending}, nil
+}
+
 func postMCP(t *testing.T, tsURL, token, sessionID string, body any) *http.Response {
 	t.Helper()
 	b, _ := json.Marshal(body)
@@ -228,8 +256,8 @@ func TestMCPProtocolSessionsBatchAndStructuredErrors(t *testing.T) {
 		Tools []Tool `json:"tools"`
 	}
 	_ = json.Unmarshal(resBytes, &listRes)
-	if len(listRes.Tools) != 18 {
-		t.Fatalf("expected 18 MCP tools, got %d", len(listRes.Tools))
+	if len(listRes.Tools) != 25 {
+		t.Fatalf("expected 25 MCP tools, got %d", len(listRes.Tools))
 	}
 
 	// Report live status and confirm ListSessions captures client metadata and working state.

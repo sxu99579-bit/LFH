@@ -546,7 +546,7 @@ func summarizeToolTarget(toolName string, rawArgs json.RawMessage) string {
 	case "report_agent_status":
 		return truncateText(str("task"), 96)
 	}
-	for _, key := range []string{"path", "file_id", "folder_prefix", "folder_path", "content_query", "name_query"} {
+	for _, key := range []string{"task_id", "path", "file_id", "folder_prefix", "folder_path", "content_query", "name_query"} {
 		if val := str(key); val != "" && val != "<nil>" {
 			return truncateText(val, 96)
 		}

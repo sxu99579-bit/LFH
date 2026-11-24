@@ -67,6 +67,7 @@ type Server struct {
 	mcpServer            *mcp.Server
 	agentPairing         *agentPairingManager
 	mcpOAuth             *mcpOAuthManager
+	tasks                *bridge.TaskManager
 	jobsMu       sync.RWMutex
 	jobs         []plugins.PluginJob
 	jobsPath     string
@@ -111,6 +112,11 @@ func New(authMgr *auth.Manager, store *storage.Store, clusterMgr *cluster.Manage
 		port:         port,
 	}
 	srv.events.SetOnPublish(srv.dispatchWebhookForFileEvent)
+	tm, err := srv.newWiredTaskManager(store.DataDir())
+	if err != nil {
+		return nil, err
+	}
+	srv.tasks = tm
 	srv.mcpServer = srv.newWiredMCPServer()
 	srv.loadPluginJobs()
 	return srv, nil
@@ -178,6 +184,48 @@ func (s *Server) getMCPServer() *mcp.Server {
 	return s.mcpServer
 }
 
+func (s *Server) newWiredTaskManager(dataDir string) (*bridge.TaskManager, error) {
+	tm, err := bridge.NewTaskManager(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	tm.SetOnChange(func(event string, task bridge.AgentTask) {
+		if s.events == nil {
+			return
+		}
+		var allowed []string
+		if task.OwnerUsername != "" {
+			allowed = []string{task.OwnerUsername}
+		}
+		s.PublishEvent(FileChangeEvent{
+			Kind:         "agent_task",
+			Uploader:     task.OwnerUsername,
+			ActorName:    task.ClaimedByName,
+			BatchID:      task.ID,
+			NodeName:     event,
+			AllowedUsers: allowed,
+		})
+	})
+	return tm, nil
+}
+
+func (s *Server) getTasks() *bridge.TaskManager {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tasks == nil {
+		dataDir := ""
+		if s.store != nil {
+			dataDir = s.store.DataDir()
+		}
+		if dataDir != "" {
+			if tm, err := s.newWiredTaskManager(dataDir); err == nil {
+				s.tasks = tm
+			}
+		}
+	}
+	return s.tasks
+}
+
 func (s *Server) PublishEvent(ev FileChangeEvent) {
 	if s.events != nil {
 		s.events.Publish(ev)
@@ -199,9 +247,13 @@ func (s *Server) CloseEventStreams() {
 	}
 	s.mu.RLock()
 	wh := s.webhooks
+	tm := s.tasks
 	s.mu.RUnlock()
 	if wh != nil {
 		wh.Close()
+	}
+	if tm != nil {
+		tm.Close()
 	}
 }
 
@@ -500,6 +552,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/agent-sessions/{sessionID}", s.requireHumanAuth(s.handleDisconnectAgentSession))
 	mux.HandleFunc("GET /agent/connect.ps1", s.handleAgentConnectPS1)
 	mux.HandleFunc("GET /agent/connect.sh", s.handleAgentConnectSH)
+	mux.HandleFunc("GET /agent/worker.ps1", s.handleAgentWorkerPS1)
+	mux.HandleFunc("GET /agent/worker.sh", s.handleAgentWorkerSH)
+	mux.HandleFunc("GET /api/agent-tasks/poll", s.requirePrincipal(auth.ScopeRead, s.handlePollAgentTasks))
+	mux.HandleFunc("GET /api/agent-tasks", s.requireHumanAuth(s.handleListAgentTasks))
+	mux.HandleFunc("POST /api/agent-tasks", s.requireHumanAuth(s.handleCreateAgentTask))
+	mux.HandleFunc("GET /api/agent-tasks/{id}", s.requireHumanAuth(s.handleGetAgentTask))
+	mux.HandleFunc("PATCH /api/agent-tasks/{id}", s.requireHumanAuth(s.handleUpdateAgentTask))
+	mux.HandleFunc("DELETE /api/agent-tasks/{id}", s.requireHumanAuth(s.handleDeleteAgentTask))
+	mux.HandleFunc("POST /api/agent-tasks/{id}/activate", s.requireHumanAuth(s.handleActivateAgentTask))
+	mux.HandleFunc("POST /api/agent-tasks/{id}/reopen", s.requireHumanAuth(s.handleReopenAgentTask))
+	mux.HandleFunc("POST /api/agent-tasks/{id}/comments", s.requireHumanAuth(s.handlePostAgentTaskComment))
 
 	mux.HandleFunc("GET /api/cluster", s.requireHumanAuth(s.handleGetCluster))
 	mux.HandleFunc("GET /api/users/selectable", s.requirePrincipal(auth.ScopeRead, s.handleListSelectableUsers))

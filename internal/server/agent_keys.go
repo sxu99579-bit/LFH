@@ -178,6 +178,10 @@ func (s *Server) handleCreateAgentKey(w http.ResponseWriter, r *http.Request, u 
 		RateLimitPerMin     int        `json:"rate_limit_per_min"`
 		ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 		ExpiresHours        int        `json:"expires_hours,omitempty"`
+		AvatarID            string     `json:"avatar_id,omitempty"`
+		DisplayAlias        string     `json:"display_alias,omitempty"`
+		DeviceAlias         string     `json:"device_alias,omitempty"`
+		DeviceKind          string     `json:"device_kind,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -217,6 +221,10 @@ func (s *Server) handleCreateAgentKey(w http.ResponseWriter, r *http.Request, u 
 		AllowSetVisibility:  req.AllowSetVisibility,
 		RateLimitPerMin:     req.RateLimitPerMin,
 		ExpiresAt:           exp,
+		AvatarID:            req.AvatarID,
+		DisplayAlias:        req.DisplayAlias,
+		DeviceAlias:         req.DeviceAlias,
+		DeviceKind:          req.DeviceKind,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -251,6 +259,12 @@ func (s *Server) handleUpdateAgentKey(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 	s.logAudit(r, u.Username, "agent_key_update", updated.Name, "ok", "id="+updated.ID)
+	s.PublishEvent(FileChangeEvent{
+		Kind:      "agent_profile",
+		Uploader:  updated.OwnerUsername,
+		ActorName: updated.Name,
+		NodeName:  updated.ID,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":  true,
 		"key": updated,

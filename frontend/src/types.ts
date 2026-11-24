@@ -1,6 +1,6 @@
 export type ThemeMode = 'dark' | 'light'
 
-export type NavTab = 'files' | 'clipboard' | 'plugins' | 'health' | 'settings'
+export type NavTab = 'files' | 'tasks' | 'clipboard' | 'plugins' | 'health' | 'settings'
 
 export interface User {
   id: string
@@ -314,11 +314,27 @@ export interface MountItem {
 
 export type AgentScope = 'read' | 'write' | 'share' | 'verify' | 'delete'
 
+export type AgentAvatarId =
+  | 'shiba'
+  | 'bluecat'
+  | 'panda'
+  | 'owl'
+  | 'bunny'
+  | 'fox'
+  | 'penguin'
+  | 'mecha'
+
+export type AgentDeviceKind = 'laptop' | 'desktop' | 'mac' | 'server'
+
 export interface AgentKeyItem {
   id: string
   name: string
   owner_username: string
   token_prefix: string
+  avatar_id?: AgentAvatarId
+  display_alias?: string
+  device_alias?: string
+  device_kind?: AgentDeviceKind
   scopes: AgentScope[]
   read_folders?: string[]
   write_folders?: string[]
@@ -340,6 +356,7 @@ export interface AgentPairingItem {
   client_version?: string
   hostname?: string
   os?: string
+  device_kind?: AgentDeviceKind
   source_ip?: string
   target_owner?: string
   requested_scopes: AgentScope[]
@@ -629,4 +646,74 @@ export interface TransferTask {
   status: 'queued' | 'running' | 'paused' | 'done' | 'error' | 'cancelled'
   error?: string
   fileId?: string
+}
+
+export type AgentTaskStatus = 'scheduled' | 'pending' | 'in_progress' | 'paused' | 'done' | 'cancelled'
+export type AgentTaskPriority = 'normal' | 'high' | 'urgent'
+
+export interface AgentSubtaskItem {
+  id: string
+  seq: number
+  title: string
+  description?: string
+  assigned_agent?: string
+  assigned_agent_label?: string
+  status: 'pending' | 'claimed' | 'done'
+  depends_on?: string[]
+  claimed_by_id?: string
+  claimed_by_name?: string
+  claimed_at?: string | null
+  lease_expires_at?: string | null
+  completed_at?: string | null
+  output_file?: string
+  result_summary?: string
+}
+
+export interface AgentTaskComment {
+  id: string
+  author_id?: string
+  author_name: string
+  author_role: 'agent' | 'user' | 'system'
+  mentions?: string[]
+  body: string
+  created_at: string
+}
+
+export interface AgentTaskItem {
+  id: string
+  title: string
+  description?: string
+  status: AgentTaskStatus
+  priority: AgentTaskPriority
+  owner_username: string
+  created_by: string
+  assigned_agent?: string
+  assigned_agent_label?: string
+  folder_prefix?: string
+  allow_split: boolean
+  scheduled_at?: string | null
+  claimed_by_id?: string
+  claimed_by_name?: string
+  claimed_at?: string | null
+  lease_expires_at?: string | null
+  completed_at?: string | null
+  output_files?: string[]
+  result_summary?: string
+  subtasks?: AgentSubtaskItem[]
+  comments?: AgentTaskComment[]
+  max_comment_rounds: number
+  pause_reason?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentTaskSummary {
+  total: number
+  scheduled: number
+  pending: number
+  in_progress: number
+  paused: number
+  done: number
+  claimable_for_me: number
+  mentioned_for_me: number
 }

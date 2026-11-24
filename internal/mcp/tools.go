@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"lfh/internal/auth"
+	"lfh/internal/bridge"
 )
 
 func toolCatalog() []Tool {
@@ -266,6 +267,115 @@ func toolCatalog() []Tool {
 					"state":    map[string]any{"type": "string", "enum": []string{"working", "idle", "waiting", "done", "error"}, "description": "Current execution state."},
 					"task":     map[string]any{"type": "string", "description": "Short task summary shown in UI (max 200 chars)."},
 					"progress": map[string]any{"type": "string", "description": "Optional progress text such as 2/5 or 60%."},
+				},
+			},
+		},
+		{
+			Name:        "list_tasks",
+			Description: "List AI task board items, claimable tasks/subtasks (respecting scheduled_at & @Agent assignment locks), and active @me discussion mentions.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status":         map[string]any{"type": "string", "description": "Optional status filter: all, waiting, scheduled, pending, in_progress, paused, done, cancelled."},
+					"assigned_agent": map[string]any{"type": "string", "description": "Optional Agent key ID, @alias, or name filter."},
+					"folder_prefix":  map[string]any{"type": "string", "description": "Optional target folder filter."},
+					"claimable_only": map[string]any{"type": "boolean", "description": "When true, return only tasks/subtasks immediately claimable by caller."},
+					"mentioned_me":   map[string]any{"type": "boolean", "description": "When true, return open tasks mentioning caller in unread discussion comments."},
+					"limit":          map[string]any{"type": "integer", "description": "Max tasks returned (default 200)."},
+				},
+			},
+		},
+		{
+			Name:        "claim_task",
+			Description: "Atomically claim a pending task or unlocked subtask using CAS lock semantics (rejects tasks locked to another @Agent or not yet due).",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"task_id"},
+				"properties": map[string]any{
+					"task_id":       map[string]any{"type": "string", "description": "Target task ID."},
+					"subtask_id":    map[string]any{"type": "string", "description": "Required when claiming a subtask inside a split task (e.g. sub_2)."},
+					"lease_seconds": map[string]any{"type": "integer", "description": "Execution lease duration in seconds (30..3600, default 600)."},
+				},
+			},
+		},
+		{
+			Name:        "heartbeat_task",
+			Description: "Extend the execution lease on a currently claimed task or subtask during long-running work.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"task_id"},
+				"properties": map[string]any{
+					"task_id":       map[string]any{"type": "string"},
+					"subtask_id":    map[string]any{"type": "string"},
+					"lease_seconds": map[string]any{"type": "integer"},
+				},
+			},
+		},
+		{
+			Name:        "split_task",
+			Description: "Split a complex task into 2..20 concurrent or dependency-ordered subtasks (depends_on) so multiple Agents can collaborate.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"task_id", "subtasks"},
+				"properties": map[string]any{
+					"task_id":       map[string]any{"type": "string"},
+					"note":          map[string]any{"type": "string", "description": "Optional kickoff comment (e.g. @teammate handoff instructions)."},
+					"claim_first":   map[string]any{"type": "boolean", "description": "Automatically claim subtask #1 for caller (default true)."},
+					"lease_seconds": map[string]any{"type": "integer"},
+					"subtasks": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":     "object",
+							"required": []string{"title"},
+							"properties": map[string]any{
+								"title":          map[string]any{"type": "string"},
+								"description":    map[string]any{"type": "string"},
+								"assigned_agent": map[string]any{"type": "string", "description": "Optional @alias or AgentKey ID lock."},
+								"depends_on":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "1-based subtask indices that must finish before unlocking this subtask."},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:        "post_task_comment",
+			Description: "Post a progress update or @mention collaboration message on a task thread (enforces anti-loop round limits).",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"task_id", "body"},
+				"properties": map[string]any{
+					"task_id": map[string]any{"type": "string"},
+					"body":    map[string]any{"type": "string", "description": "Comment text (supports @alias / @agent mentions)."},
+				},
+			},
+		},
+		{
+			Name:        "complete_task",
+			Description: "Check off a claimed task or subtask as done with output file paths and summary (auto-completes parent when all subtasks finish).",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"task_id"},
+				"properties": map[string]any{
+					"task_id":        map[string]any{"type": "string"},
+					"subtask_id":     map[string]any{"type": "string"},
+					"output_files":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"result_summary": map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name:        "release_task",
+			Description: "Release a claimed task or subtask back to pending (optionally pausing or reassigning to another @Agent).",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"task_id"},
+				"properties": map[string]any{
+					"task_id":        map[string]any{"type": "string"},
+					"subtask_id":     map[string]any{"type": "string"},
+					"reason":         map[string]any{"type": "string"},
+					"pause":          map[string]any{"type": "boolean"},
+					"reassign_agent": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -655,6 +765,150 @@ func (s *Server) dispatchTool(ctx context.Context, r *http.Request, p auth.Princ
 			"reported_task":     snap.ReportedTask,
 			"reported_progress": snap.ReportedProgress,
 		})
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "list_tasks":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in bridge.TaskListFilter
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		res, err := s.backend.ListTasks(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "claim_task":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in bridge.ClaimTaskInput
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		if strings.TrimSpace(in.TaskID) == "" {
+			return newToolErrorResult(NewToolError("invalid_params", "必须指定 task_id", "", nil)), true
+		}
+		res, err := s.backend.ClaimTask(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "heartbeat_task":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in HeartbeatTaskInput
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		if strings.TrimSpace(in.TaskID) == "" {
+			return newToolErrorResult(NewToolError("invalid_params", "必须指定 task_id", "", nil)), true
+		}
+		res, err := s.backend.HeartbeatTask(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "split_task":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in bridge.SplitTaskInput
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		if strings.TrimSpace(in.TaskID) == "" || len(in.Subtasks) < 2 {
+			return newToolErrorResult(NewToolError("invalid_params", "必须指定 task_id 及至少 2 个 subtasks", "", nil)), true
+		}
+		res, err := s.backend.SplitTask(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "post_task_comment":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in bridge.PostCommentInput
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		if strings.TrimSpace(in.TaskID) == "" || strings.TrimSpace(in.Body) == "" {
+			return newToolErrorResult(NewToolError("invalid_params", "必须指定 task_id 和 body", "", nil)), true
+		}
+		res, err := s.backend.PostTaskComment(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "complete_task":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in bridge.CompleteTaskInput
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		if strings.TrimSpace(in.TaskID) == "" {
+			return newToolErrorResult(NewToolError("invalid_params", "必须指定 task_id", "", nil)), true
+		}
+		res, err := s.backend.CompleteTask(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		return out, true
+
+	case "release_task":
+		if denied := requireScope(auth.ScopeRead); denied != nil {
+			return *denied, true
+		}
+		var in bridge.ReleaseTaskInput
+		if err := decodeToolArgs(rawArgs, &in); err != nil {
+			return newToolErrorResult(NewToolError("invalid_params", "参数解析失败: "+err.Error(), "", nil)), true
+		}
+		if strings.TrimSpace(in.TaskID) == "" {
+			return newToolErrorResult(NewToolError("invalid_params", "必须指定 task_id", "", nil)), true
+		}
+		res, err := s.backend.ReleaseTask(ctx, p, in)
+		if err != nil {
+			return newToolErrorResult(err), true
+		}
+		out, err := newToolJSONResult(res)
 		if err != nil {
 			return newToolErrorResult(err), true
 		}

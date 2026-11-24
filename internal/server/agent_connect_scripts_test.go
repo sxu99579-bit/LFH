@@ -34,7 +34,7 @@ func TestAgentConnectScriptsRenderAndInjectionSafety(t *testing.T) {
 		if resp.Header.Get("Cache-Control") != "no-store" {
 			t.Fatalf("%s expected Cache-Control=no-store, got %q", ep, resp.Header.Get("Cache-Control"))
 		}
-		for _, want := range []string{ts.URL, "/api/agent-pairing/request", "X-Pairing-Secret", "whoami"} {
+		for _, want := range []string{ts.URL, "/api/agent-pairing/request", "X-Pairing-Secret", "whoami", "device_kind", "NO_PROXY"} {
 			if !strings.Contains(body, want) {
 				t.Fatalf("%s missing expected marker %q", ep, want)
 			}
@@ -120,13 +120,18 @@ func TestAgentConnectScriptsSyntaxValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if shPath, lookErr := exec.LookPath("sh"); lookErr == nil {
-		// Skip WSL launcher shim on Windows if it has no distro installed; still test real POSIX sh.
-		if runtime.GOOS != "windows" || !strings.Contains(strings.ToLower(shPath), `\system32\`) {
-			cmd := exec.Command(shPath, "-n", shFile)
-			if out, sErr := cmd.CombinedOutput(); sErr != nil {
-				t.Fatalf("sh -n syntax validation failed (%s): %v\n%s", shPath, sErr, string(out))
-			}
+	shPath := ""
+	if p, lookErr := exec.LookPath("sh"); lookErr == nil && (runtime.GOOS != "windows" || !strings.Contains(strings.ToLower(p), `\system32\`)) {
+		shPath = p
+	} else if runtime.GOOS == "windows" {
+		if _, statErr := os.Stat(`C:\Program Files\Git\bin\sh.exe`); statErr == nil {
+			shPath = `C:\Program Files\Git\bin\sh.exe`
+		}
+	}
+	if shPath != "" {
+		cmd := exec.Command(shPath, "-n", shFile)
+		if out, sErr := cmd.CombinedOutput(); sErr != nil {
+			t.Fatalf("sh -n syntax validation failed (%s): %v\n%s", shPath, sErr, string(out))
 		}
 	}
 }

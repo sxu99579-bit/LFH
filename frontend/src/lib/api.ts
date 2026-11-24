@@ -1,9 +1,16 @@
 import type {
+  AgentAvatarId,
+  AgentDeviceKind,
   AgentKeyItem,
   AgentPairingItem,
   AgentPresenceItem,
   AgentPresenceSummary,
   AgentScope,
+  AgentTaskComment,
+  AgentTaskItem,
+  AgentTaskPriority,
+  AgentTaskStatus,
+  AgentTaskSummary,
   AuditEntry,
   BandwidthProbeResult,
   ClusterCapabilityView,
@@ -363,6 +370,10 @@ export const api = {
   getAgentKeys: () => apiFetch<{ keys: AgentKeyItem[] }>('/api/agent-keys'),
   createAgentKey: (payload: {
     name: string
+    avatar_id?: AgentAvatarId
+    display_alias?: string
+    device_alias?: string
+    device_kind?: AgentDeviceKind
     scopes: AgentScope[]
     read_folders: string[]
     write_folders: string[]
@@ -380,6 +391,10 @@ export const api = {
     id: string,
     payload: {
       name?: string
+      avatar_id?: AgentAvatarId
+      display_alias?: string
+      device_alias?: string
+      device_kind?: AgentDeviceKind
       scopes?: AgentScope[]
       read_folders?: string[]
       write_folders?: string[]
@@ -411,6 +426,10 @@ export const api = {
     payload: {
       name?: string
       owner_username?: string
+      avatar_id?: AgentAvatarId
+      display_alias?: string
+      device_alias?: string
+      device_kind?: AgentDeviceKind
       scopes?: AgentScope[]
       read_folders?: string[]
       write_folders?: string[]
@@ -444,6 +463,86 @@ export const api = {
     apiFetch<{ ok: boolean }>(`/api/agent-sessions/${encodeURIComponent(sessionID)}`, {
       method: 'DELETE',
     }),
+
+  listAgentTasks: (params?: {
+    status?: AgentTaskStatus | ''
+    assigned_agent?: string
+    folder_prefix?: string
+    claimable_only?: boolean
+    limit?: number
+  }) => {
+    const qs = new URLSearchParams()
+    if (params?.status) qs.set('status', params.status)
+    if (params?.assigned_agent) qs.set('assigned_agent', params.assigned_agent)
+    if (params?.folder_prefix) qs.set('folder_prefix', params.folder_prefix)
+    if (params?.claimable_only) qs.set('claimable_only', '1')
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return apiFetch<{
+      ok: boolean
+      summary: AgentTaskSummary
+      tasks: AgentTaskItem[]
+      server_time: string
+    }>(`/api/agent-tasks${suffix}`)
+  },
+  createAgentTask: (payload: {
+    title: string
+    description?: string
+    priority?: AgentTaskPriority
+    assigned_agent?: string
+    assigned_agent_label?: string
+    folder_prefix?: string
+    allow_split?: boolean
+    scheduled_at?: string
+    max_comment_rounds?: number
+  }) =>
+    apiFetch<{ ok: boolean; task: AgentTaskItem }>('/api/agent-tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateAgentTask: (
+    id: string,
+    payload: {
+      title?: string
+      description?: string
+      priority?: AgentTaskPriority
+      assigned_agent?: string
+      assigned_agent_label?: string
+      folder_prefix?: string
+      allow_split?: boolean
+      scheduled_at?: string
+      clear_schedule?: boolean
+      status?: AgentTaskStatus
+      max_comment_rounds?: number
+    }
+  ) =>
+    apiFetch<{ ok: boolean; task: AgentTaskItem }>(`/api/agent-tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  deleteAgentTask: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/agent-tasks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  activateAgentTask: (id: string) =>
+    apiFetch<{ ok: boolean; task: AgentTaskItem }>(`/api/agent-tasks/${encodeURIComponent(id)}/activate`, {
+      method: 'POST',
+    }),
+  reopenAgentTask: (id: string) =>
+    apiFetch<{ ok: boolean; task: AgentTaskItem }>(`/api/agent-tasks/${encodeURIComponent(id)}/reopen`, {
+      method: 'POST',
+    }),
+  postAgentTaskComment: (id: string, body: string) =>
+    apiFetch<{ ok: boolean; task: AgentTaskItem; comment: AgentTaskComment }>(
+      `/api/agent-tasks/${encodeURIComponent(id)}/comments`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body }),
+      }
+    ),
 
   getFileLease: (id: string) =>
     apiFetch<{ locked: boolean; lease: FileLease | null }>(`/api/files/${encodeURIComponent(id)}/lease`),
