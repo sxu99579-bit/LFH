@@ -144,6 +144,7 @@ export interface FileVersion {
   uploader: string
   device_fp?: string
   device_name?: string
+  note?: string
   update_method?: string
 }
 
@@ -173,6 +174,7 @@ export interface FileRecord {
   node_online?: boolean
   version?: number
   version_count?: number
+  version_note?: string
   update_method?: string
   versions?: FileVersion[]
 }
@@ -218,6 +220,78 @@ export interface DiscoveredNode {
   last_seen?: string
 }
 
+export interface VerifyPreset {
+  id: string
+  label: string
+  work_sub_dir?: string
+  command: string
+  args?: string[]
+  timeout_sec?: number
+  log_rel_path?: string
+}
+
+export interface VerifyResult {
+  ok: boolean
+  mount_id: string
+  mount_alias: string
+  preset_id: string
+  label: string
+  exit_code: number
+  timed_out?: boolean
+  duration_ms: number
+  tail_output: string
+  truncated?: boolean
+  log_path?: string
+  coalesced?: boolean
+  finished_at: string
+}
+
+export type WebhookEventType =
+  | 'file.uploaded'
+  | 'file.updated'
+  | 'file.batch_commit'
+  | 'file.deleted'
+  | 'verify.completed'
+  | '*'
+
+export interface WebhookRuleItem {
+  id: string
+  name: string
+  folder_prefix: string
+  events: string[]
+  target_url: string
+  has_secret: boolean
+  enabled: boolean
+  include_download_ticket?: boolean
+  created_by?: string
+  created_at: string
+  updated_at: string
+  last_status?: string
+  last_error?: string
+  last_sent_at?: string | null
+}
+
+export interface WebhookTestResult {
+  ok: boolean
+  status_code?: number
+  duration_ms: number
+  error?: string
+}
+
+export interface TransferTicketResponse {
+  ok: boolean
+  action: 'up' | 'down'
+  node_id: string
+  node_name: string
+  direct_url?: string
+  entry_url: string
+  recommended_url: string
+  expires_at: string
+  max_bytes?: number
+  single_use: boolean
+  method: string
+}
+
 export interface MountItem {
   id: string
   alias: string
@@ -231,6 +305,39 @@ export interface MountItem {
   last_sync_at?: string
   last_error?: string
   allowed_users?: string[]
+  writable?: boolean
+  shadow_backup?: boolean
+  ignore_patterns?: string[]
+  max_file_bytes?: number
+  verify_presets?: VerifyPreset[]
+}
+
+export type AgentScope = 'read' | 'write' | 'share' | 'verify' | 'delete'
+
+export interface AgentKeyItem {
+  id: string
+  name: string
+  owner_username: string
+  token_prefix: string
+  scopes: AgentScope[]
+  read_folders?: string[]
+  write_folders?: string[]
+  default_allowed_users?: string[]
+  allow_set_visibility: boolean
+  rate_limit_per_min: number
+  disabled?: boolean
+  expires_at?: string | null
+  created_at: string
+  last_used_at?: string | null
+  last_used_ip?: string
+}
+
+export interface FileLease {
+  file_id: string
+  holder_key_id: string
+  holder_name: string
+  acquired_at: string
+  expires_at: string
 }
 
 export interface MarketplaceItem {

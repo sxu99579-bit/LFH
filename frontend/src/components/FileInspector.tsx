@@ -1,34 +1,41 @@
 import { useEffect, useState } from 'react'
 import {
+  Bot,
   Cpu,
   Download,
   Edit3,
   Eye,
   History,
+  Link2,
+  ListChecks,
   Lock,
   RotateCcw,
   ShieldCheck,
   Trash2,
-  ListChecks,
+  Unlock,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import {
   canPreviewFile,
+  copyTextToClipboard,
+  extractAgentLabel,
   formatSize,
   formatStorageModeLabel,
   formatTime,
   formatUpdateMethodLabel,
   getMatchingCapabilitiesForFile,
+  isAgentDeviceName,
   isEditableTextFile,
   isMobileLayout,
 } from '@/lib/utils'
-import type { ClusterCapabilityView, FileRecord, FileVersion, PluginJob, User } from '@/types'
+import type { ClusterCapabilityView, FileLease, FileRecord, FileVersion, PluginJob, User } from '@/types'
 import { Badge, Button, Sheet, useToast } from '@/components/ui'
 
 export function FileInspector({
   file,
   user,
   capabilities,
+  writableMountIds,
   onClose,
   onOpenPreview,
   onOpenEditor,
@@ -38,6 +45,7 @@ export function FileInspector({
   file: FileRecord | null
   user: User
   capabilities: ClusterCapabilityView[]
+  writableMountIds?: Set<string>
   onClose: () => void
   onOpenPreview: (rec: FileRecord) => void
   onOpenEditor: (rec: FileRecord) => void
@@ -51,6 +59,10 @@ export function FileInspector({
     integrity_status?: string
     mime?: string
   } | null>(null)
+  const [lease, setLease] = useState<FileLease | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  const [releasingLease, setReleasingLease] = useState(false)
+  const [issuingTicket, setIssuingTicket] = useState(false)
   const [versions, setVersions] = useState<FileVersion[]>([])
   const [curVersion, setCurVersion] = useState<number>(1)
   const [runningPlugin, setRunningPlugin] = useState<string>('')
@@ -62,6 +74,8 @@ export function FileInspector({
   useEffect(() => {
     if (!file) return
     setMeta(null)
+    setLease(null)
+    setNowMs(Date.now())
     setJobResult(null)
     setEditingAccess(false)
     setAllowedDraft(Array.isArray(file.allowed_users) ? file.allowed_users : [])
@@ -78,16 +92,74 @@ export function FileInspector({
           setCurVersion(res.current_version || file.version || 1)
         })
         .catch(() => setVersions([]))
+      api
+        .getFileLease(file.id)
+        .then((res) => setLease(res.locked && res.lease ? res.lease : null))
+        .catch(() => setLease(null))
     }
   }, [file, user.role])
+
+  useEffect(() => {
+    if (!lease) return
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [lease])
 
   if (!file) return null
 
   const online = file.node_online !== false
   const canManage = user.role === 'admin' || user.username === file.uploader
   const isMount = file.storage_mode === 'mount'
+  const isWritableMount = isMount && Boolean(file.mount_id && writableMountIds?.has(file.mount_id))
   const matches = online && !file.source_missing ? getMatchingCapabilitiesForFile(capabilities, file.name) : []
   const storageTag = formatStorageModeLabel(file.storage_mode)
+  const fromAgent = isAgentDeviceName(file.device_name)
+  const leaseRemainingSec = lease
+    ? Math.max(0, Math.ceil((new Date(lease.expires_at).getTime() - nowMs) / 1000))
+    : 0
+  const activeLease = lease && leaseRemainingSec > 0 ? lease : null
+
+  const handleForceReleaseLease = async () => {
+    setReleasingLease(true)
+    try {
+      await api.releaseFileLease(file.id, true)
+      setLease(null)
+      toast('已强制解除文件软租约锁定', 'success')
+      onRefreshAll()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '解除软租约失败', 'error')
+    } finally {
+      setReleasingLease(false)
+    }
+  }
+
+  const handleCopyTransferTicket = async () => {
+    setIssuingTicket(true)
+    try {
+      const res = await api.issueTicket({
+        action: 'down',
+        file_id: file.id,
+        ttl_seconds: 600,
+        prefer_direct: true,
+      })
+      const ok = await copyTextToClipboard(res.recommended_url)
+      if (ok) {
+        const isDirect = Boolean(res.direct_url && res.recommended_url === res.direct_url)
+        toast(
+          `已复制 10 分钟临时下载短链（${isDirect ? `直连节点 ${res.node_name}` : '入口签名'}）`,
+          'success'
+        )
+      } else {
+        toast('复制下载短链失败，请检查剪贴板权限', 'error')
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '签发临时下载短链失败', 'error')
+    } finally {
+      setIssuingTicket(false)
+    }
+  }
 
   const runCompute = async (cap: ClusterCapabilityView) => {
     setRunningPlugin(cap.plugin_id)
@@ -187,7 +259,7 @@ export function FileInspector({
               <span>在线预览</span>
             </Button>
           )}
-          {isEditableTextFile(file) && (
+          {isEditableTextFile(file, writableMountIds) && (
             <Button
               variant="outline"
               size="sm"
@@ -211,15 +283,45 @@ export function FileInspector({
                 <ListChecks className="h-3.5 w-3.5" />
                 <span>队列续传</span>
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={issuingTicket}
+                onClick={() => void handleCopyTransferTicket()}
+              >
+                <Link2 className="h-3.5 w-3.5" />
+                <span>{issuingTicket ? '签发中...' : '临时下载短链'}</span>
+              </Button>
             </>
           )}
-          {canManage && !isMount && (
+          {canManage && (!isMount || isWritableMount) && (
             <Button variant="destructive" size="sm" disabled={!online} onClick={handleDeleteFile}>
               <Trash2 className="h-3.5 w-3.5" />
               <span>删除</span>
             </Button>
           )}
         </div>
+
+        {/* Active Soft Lease Banner */}
+        {activeLease && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex items-center gap-1.5 font-semibold text-amber-600 dark:text-amber-400">
+                <Lock className="h-3.5 w-3.5 shrink-0" />
+                <span>当前正被软租约锁定编辑（剩余 {leaseRemainingSec} 秒）</span>
+              </div>
+              <div className="text-[11px] text-muted-foreground truncate">
+                持锁方：{activeLease.holder_name || activeLease.holder_key_id}
+              </div>
+            </div>
+            {user.role === 'admin' && (
+              <Button size="xs" variant="outline" disabled={releasingLease} onClick={() => void handleForceReleaseLease()}>
+                <Unlock className="h-3 w-3" />
+                <span>{releasingLease ? '解锁中...' : '强制解锁'}</span>
+              </Button>
+            )}
+          </div>
+        )}
 
         {/* Distributed compute plugins */}
         {matches.length > 0 && (
@@ -297,8 +399,19 @@ export function FileInspector({
             <span className="col-span-2">{formatTime(file.uploaded_at)}</span>
             <span className="text-muted-foreground">更新方式</span>
             <span className="col-span-2">{formatUpdateMethodLabel(file.update_method, file.version)}</span>
-            <span className="text-muted-foreground">设备指纹</span>
-            <span className="col-span-2">{file.device_name || '-'} ({file.device_fp || '-'})</span>
+            <span className="text-muted-foreground">来源设备</span>
+            <span className="col-span-2 flex flex-wrap items-center gap-1">
+              {fromAgent ? (
+                <Badge variant="default">
+                  <Bot className="h-3 w-3" />
+                  <span>{extractAgentLabel(file.device_name)}</span>
+                </Badge>
+              ) : (
+                <span>
+                  {file.device_name || '-'} ({file.device_fp || '-'})
+                </span>
+              )}
+            </span>
             <span className="text-muted-foreground">SHA-256</span>
             <span className="col-span-2 break-all font-mono text-[10px]">{file.sha256 || '-'}</span>
             {user.role === 'admin' && (meta?.disk_path || file.storage_dir) && (
@@ -373,19 +486,29 @@ export function FileInspector({
             <div className="space-y-2">
               {versions.map((v) => {
                 const isCur = v.version === curVersion
+                const verFromAgent = isAgentDeviceName(v.device_name)
                 return (
                   <div
                     key={v.version}
                     className={`rounded-md border p-2 space-y-1 ${isCur ? 'border-primary/40 bg-primary/5' : 'border-border'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <Badge variant={isCur ? 'default' : 'outline'}>v{v.version}</Badge>
                         <span>{formatUpdateMethodLabel(v.update_method, v.version)}</span>
                         <span className="text-muted-foreground">· {v.uploader}</span>
+                        {verFromAgent && (
+                          <Badge variant="secondary">
+                            <Bot className="h-3 w-3" />
+                            <span>{extractAgentLabel(v.device_name)}</span>
+                          </Badge>
+                        )}
                       </div>
                       <span className="text-[11px] text-muted-foreground tabular-nums">{formatSize(v.size)}</span>
                     </div>
+                    {v.note && (
+                      <div className="text-[11px] text-foreground/85 break-words">{v.note}</div>
+                    )}
                     <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                       <span>{v.device_name || v.device_fp || '-'} · {formatTime(v.uploaded_at)}</span>
                       <div className="flex items-center gap-1">

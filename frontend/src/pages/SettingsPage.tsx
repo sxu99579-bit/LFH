@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  AlertCircle,
   CheckCircle2,
   Copy,
   Download,
@@ -7,6 +8,8 @@ import {
   History,
   KeyRound,
   Network,
+  Pencil,
+  Play,
   Plus,
   RefreshCw,
   Search,
@@ -34,6 +37,8 @@ import type {
   ThemeMode,
   UpdateStatus,
   User,
+  VerifyPreset,
+  VerifyResult,
 } from '@/types'
 import {
   Badge,
@@ -47,8 +52,11 @@ import {
   Input,
   Select,
   Switch,
+  Textarea,
   useToast,
 } from '@/components/ui'
+import { AgentBridgeTab } from '@/components/AgentBridgeTab'
+import { VerifyPresetsEditor } from '@/components/VerifyPresetsEditor'
 
 interface SettingsPageProps {
   user: User
@@ -60,7 +68,7 @@ interface SettingsPageProps {
   onOpenMountModal: () => void
 }
 
-type SettingsTab = 'general' | 'security' | 'users' | 'cluster' | 'update' | 'logs'
+type SettingsTab = 'general' | 'agent' | 'security' | 'users' | 'cluster' | 'update' | 'logs'
 
 export function SettingsPage({
   user,
@@ -118,6 +126,21 @@ export function SettingsPage({
   const [joinSecret, setJoinSecret] = useState('')
   const [joinQuota, setJoinQuota] = useState('50GB')
   const [mounts, setMounts] = useState<MountItem[]>([])
+  const [editingMount, setEditingMount] = useState<MountItem | null>(null)
+  const [editMountAlias, setEditMountAlias] = useState('')
+  const [editMountWritable, setEditMountWritable] = useState(false)
+  const [editMountShadow, setEditMountShadow] = useState(true)
+  const [editMountIgnores, setEditMountIgnores] = useState('')
+  const [editMountMaxMB, setEditMountMaxMB] = useState('50')
+  const [editMountPresets, setEditMountPresets] = useState<VerifyPreset[]>([])
+  const [savingMount, setSavingMount] = useState(false)
+  const [verifyDialog, setVerifyDialog] = useState<{
+    mount: MountItem
+    preset: VerifyPreset
+    running: boolean
+    result: VerifyResult | null
+    error: string
+  } | null>(null)
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>({})
   const [storageDrafts, setStorageDrafts] = useState<Record<string, string>>({})
   const [migrateFlags, setMigrateFlags] = useState<Record<string, boolean>>({})
@@ -192,7 +215,10 @@ export function SettingsPage({
     async (targetTab: SettingsTab) => {
       if (!isAdmin) return
       try {
-        if (targetTab === 'security') {
+        if (targetTab === 'agent') {
+          const mntRes = await api.getMounts().catch(() => ({ mounts: [] }))
+          setMounts(mntRes.mounts || [])
+        } else if (targetTab === 'security') {
           const [st, inv, intg, aud] = await Promise.all([
             api.getAdminSettings(),
             api.getInvites(),
@@ -556,6 +582,7 @@ export function SettingsPage({
 
   const allTabs: Array<{ id: SettingsTab; label: string; adminOnly?: boolean }> = [
     { id: 'general', label: '外观与账号' },
+    { id: 'agent', label: 'AI 桥梁与 MCP' },
     { id: 'security', label: '安全与邀请', adminOnly: true },
     { id: 'users', label: '用户治理', adminOnly: true },
     { id: 'cluster', label: '集群、多网卡与挂载', adminOnly: true },
@@ -591,6 +618,9 @@ export function SettingsPage({
           </button>
         ))}
       </div>
+
+      {/* ==================== TAB: AI BRIDGE & MCP ==================== */}
+      {tab === 'agent' && <AgentBridgeTab user={user} info={info} mounts={mounts} />}
 
       {/* ==================== TAB: GENERAL ==================== */}
       {tab === 'general' && (
@@ -1486,46 +1516,143 @@ export function SettingsPage({
                   {mounts.map((m) => (
                     <div
                       key={`${m.node_id}:${m.id}`}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"
+                      className="rounded-lg border border-border p-3 space-y-2"
                     >
-                      <div className="min-w-0">
-                        <div className="font-medium">
-                          {m.alias} <span className="text-muted-foreground font-mono text-[11px]">({m.dir_path})</span>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5 font-medium">
+                            <span>{m.alias}</span>
+                            <Badge variant={m.writable ? 'success' : 'secondary'}>
+                              {m.writable ? '可写工作区' : '只读挂载'}
+                            </Badge>
+                            {m.writable && m.shadow_backup && <Badge variant="outline">Shadow 备份</Badge>}
+                            {m.ignore_patterns && m.ignore_patterns.length > 0 && (
+                              <Badge variant="outline">{m.ignore_patterns.length} 项忽略</Badge>
+                            )}
+                            {m.verify_presets && m.verify_presets.length > 0 && (
+                              <Badge variant="default">{m.verify_presets.length} 项校验预设</Badge>
+                            )}
+                          </div>
+                          <div className="text-[11px] font-mono text-muted-foreground mt-0.5 break-all">
+                            {m.dir_path}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground mt-0.5">
+                            节点：{m.node_name || m.node_id} · {m.file_count ?? 0} 个文件 ({formatSize(m.total_bytes)})
+                            {m.writable && m.max_file_bytes ? ` · 单文件上限 ${Math.round(m.max_file_bytes / (1024 * 1024))} MB` : ''}
+                          </div>
                         </div>
-                        <div className="text-[11px] text-muted-foreground mt-0.5">
-                          节点：{m.node_name || m.node_id} · {m.file_count ?? 0} 个文件 ({formatSize(m.total_bytes)})
+                        <div className="flex items-center gap-1.5">
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={() => {
+                              setEditingMount(m)
+                              setEditMountAlias(m.alias || '')
+                              setEditMountWritable(Boolean(m.writable))
+                              setEditMountShadow(m.writable ? Boolean(m.shadow_backup ?? true) : true)
+                              setEditMountIgnores(
+                                m.ignore_patterns && m.ignore_patterns.length > 0
+                                  ? m.ignore_patterns.join(', ')
+                                  : 'node_modules, .git, dist, build, .next, .nuxt, target, vendor, __pycache__, .venv, .idea, .vscode, .DS_Store, *.log'
+                              )
+                              setEditMountMaxMB(
+                                String(m.max_file_bytes ? Math.max(1, Math.round(m.max_file_bytes / (1024 * 1024))) : 50)
+                              )
+                              setEditMountPresets(
+                                m.verify_presets
+                                  ? m.verify_presets.map((p) => ({
+                                      ...p,
+                                      args: p.args ? [...p.args] : [],
+                                    }))
+                                  : []
+                              )
+                            }}
+                          >
+                            <Pencil className="h-3 w-3" />
+                            <span>配置</span>
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={async () => {
+                              const res = await api.syncMount(m.node_id, m.id)
+                              toast(
+                                `扫描完成：新增 ${res.result?.added ?? 0}，更新 ${res.result?.updated ?? 0}`,
+                                'success'
+                              )
+                              await loadAdminTab('cluster')
+                              await onRefreshAll()
+                            }}
+                          >
+                            立即扫描
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            className="text-destructive"
+                            onClick={async () => {
+                              if (!window.confirm(`确定取消挂载 ${m.alias} 吗？（原磁盘文件完整保留）`)) return
+                              await api.removeMount(m.node_id, m.id)
+                              await loadAdminTab('cluster')
+                              await onRefreshAll()
+                            }}
+                          >
+                            取消挂载
+                          </Button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          onClick={async () => {
-                            const res = await api.syncMount(m.node_id, m.id)
-                            toast(
-                              `扫描完成：新增 ${res.result?.added ?? 0}，更新 ${res.result?.updated ?? 0}`,
-                              'success'
-                            )
-                            await loadAdminTab('cluster')
-                            await onRefreshAll()
-                          }}
-                        >
-                          立即扫描
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="ghost"
-                          className="text-destructive"
-                          onClick={async () => {
-                            if (!window.confirm(`确定取消挂载 ${m.alias} 吗？（原磁盘文件完整保留）`)) return
-                            await api.removeMount(m.node_id, m.id)
-                            await loadAdminTab('cluster')
-                            await onRefreshAll()
-                          }}
-                        >
-                          取消挂载
-                        </Button>
-                      </div>
+                      {m.verify_presets && m.verify_presets.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
+                          <span className="text-[11px] text-muted-foreground">快捷构建校验：</span>
+                          {m.verify_presets.map((preset) => (
+                            <Button
+                              key={preset.id}
+                              size="xs"
+                              variant="outline"
+                              disabled={Boolean(verifyDialog?.running)}
+                              onClick={async () => {
+                                setVerifyDialog({
+                                  mount: m,
+                                  preset,
+                                  running: true,
+                                  result: null,
+                                  error: '',
+                                })
+                                try {
+                                  const res = await api.triggerMountVerify(m.id, preset.id)
+                                  setVerifyDialog({
+                                    mount: m,
+                                    preset,
+                                    running: false,
+                                    result: res,
+                                    error: '',
+                                  })
+                                  toast(
+                                    res.ok
+                                      ? `校验通过 (${preset.label || preset.id}, ${res.duration_ms}ms)`
+                                      : `校验失败 (exit=${res.exit_code}, ${res.duration_ms}ms)`,
+                                    res.ok ? 'success' : 'error'
+                                  )
+                                  void onRefreshAll()
+                                } catch (err) {
+                                  const msg = err instanceof Error ? err.message : '执行构建校验失败'
+                                  setVerifyDialog({
+                                    mount: m,
+                                    preset,
+                                    running: false,
+                                    result: null,
+                                    error: msg,
+                                  })
+                                  toast(msg, 'error')
+                                }
+                              }}
+                            >
+                              <Play className="h-3 w-3 text-primary" />
+                              <span>{preset.label || preset.id}</span>
+                            </Button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1927,6 +2054,230 @@ export function SettingsPage({
             </Button>
           </div>
         </form>
+      </Dialog>
+
+      {/* Edit Mount Config Modal */}
+      <Dialog
+        open={Boolean(editingMount)}
+        onClose={() => setEditingMount(null)}
+        size="lg"
+        title={`挂载工作区配置 — ${editingMount?.alias || ''}`}
+        description={editingMount?.dir_path}
+      >
+        <div className="space-y-3 text-xs">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <label className="font-medium">虚拟目录别名</label>
+              <Input value={editMountAlias} onChange={(e) => setEditMountAlias(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <label className="font-medium">单文件写穿上限 (MB)</label>
+              <Input
+                type="number"
+                min={1}
+                max={1024}
+                value={editMountMaxMB}
+                onChange={(e) => setEditMountMaxMB(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between rounded-lg border border-border p-3">
+            <div>
+              <div className="font-medium">启用可写项目工作区 (Writable)</div>
+              <div className="text-[11px] text-muted-foreground">
+                开启后允许有写权限的 Agent / 网页在线编辑原子写穿该目录源码
+              </div>
+            </div>
+            <Switch checked={editMountWritable} onCheckedChange={setEditMountWritable} />
+          </div>
+
+          {editMountWritable && (
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <div>
+                <div className="font-medium">Shadow 版本自动备份</div>
+                <div className="text-[11px] text-muted-foreground">
+                  每次写入或补丁覆盖前保留旧版本快照至 uploads/，支持一键回滚写回宿主机
+                </div>
+              </div>
+              <Switch checked={editMountShadow} onCheckedChange={setEditMountShadow} />
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <label className="font-medium block">忽略目录/文件规则（逗号或换行分隔）</label>
+            <Textarea
+              value={editMountIgnores}
+              onChange={(e) => setEditMountIgnores(e.target.value)}
+              className="min-h-[72px] font-mono text-xs"
+            />
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                { label: '全栈默认', list: 'node_modules, .git, dist, build, .next, .nuxt, target, vendor, __pycache__, .venv, .idea, .vscode, .DS_Store, *.log' },
+                { label: 'Node / 前端', list: 'node_modules, dist, .next, .nuxt, coverage, *.log' },
+                { label: 'Go 工程', list: 'bin, dist, vendor, *.exe, *.test' },
+                { label: 'Python / 数据', list: '__pycache__, .venv, venv, .pytest_cache, *.pyc' },
+                { label: 'Java / Rust', list: 'target, build, .gradle, *.class' },
+              ].map((tpl) => (
+                <Button
+                  key={tpl.label}
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => setEditMountIgnores(tpl.list)}
+                >
+                  套用：{tpl.label}
+                </Button>
+              ))}
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              安全底线：服务端硬编码禁止写入 `.git`、`.ssh`、`.env`（允许 `.env.example`）、私钥后缀及符号链接越界路径。
+            </div>
+          </div>
+
+          <VerifyPresetsEditor value={editMountPresets} onChange={setEditMountPresets} />
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-border">
+            <Button variant="outline" size="sm" onClick={() => setEditingMount(null)}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              disabled={savingMount}
+              onClick={async () => {
+                if (!editingMount) return
+                const cleanedPresets: VerifyPreset[] = []
+                for (const p of editMountPresets) {
+                  const id = p.id.trim()
+                  const cmd = p.command.trim()
+                  if (!id && !cmd) continue
+                  if (!id || !cmd) {
+                    toast('每个校验预设都必须填写 ID 与可执行命令', 'error')
+                    return
+                  }
+                  cleanedPresets.push({
+                    id,
+                    label: (p.label || id).trim(),
+                    work_sub_dir: p.work_sub_dir?.trim() || undefined,
+                    command: cmd,
+                    args: (p.args || []).map((a) => a.trim()).filter(Boolean),
+                    timeout_sec: p.timeout_sec ? Math.max(1, Math.min(300, Number(p.timeout_sec))) : 60,
+                    log_rel_path: p.log_rel_path?.trim() || undefined,
+                  })
+                }
+                setSavingMount(true)
+                try {
+                  const ignorePatterns = Array.from(
+                    new Set(
+                      editMountIgnores
+                        .split(/[\n,;]+/)
+                        .map((s) => s.trim())
+                        .filter(Boolean)
+                    )
+                  )
+                  const maxBytes = Math.max(1, Number(editMountMaxMB || 50)) * 1024 * 1024
+                  await api.updateMount(editingMount.node_id, editingMount.id, {
+                    alias: editMountAlias.trim() || undefined,
+                    writable: editMountWritable,
+                    shadow_backup: editMountShadow,
+                    ignore_patterns: ignorePatterns,
+                    max_file_bytes: maxBytes,
+                    verify_presets: cleanedPresets,
+                  })
+                  toast('挂载工作区配置已更新并触发扫描', 'success')
+                  setEditingMount(null)
+                  await loadAdminTab('cluster')
+                  await onRefreshAll()
+                } catch (err) {
+                  toast(err instanceof Error ? err.message : '更新挂载配置失败', 'error')
+                } finally {
+                  setSavingMount(false)
+                }
+              }}
+            >
+              {savingMount ? '保存中...' : '保存配置'}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* Live Mount Verify Output Dialog */}
+      <Dialog
+        open={Boolean(verifyDialog)}
+        onClose={() => {
+          if (!verifyDialog?.running) setVerifyDialog(null)
+        }}
+        size="lg"
+        title={`工作区构建校验 — ${verifyDialog?.preset.label || verifyDialog?.preset.id || ''}`}
+        description={
+          verifyDialog
+            ? `${verifyDialog.mount.alias} · ${verifyDialog.preset.command} ${(verifyDialog.preset.args || []).join(' ')}`
+            : ''
+        }
+      >
+        {verifyDialog && (
+          <div className="space-y-3 text-xs">
+            {verifyDialog.running ? (
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 p-4">
+                <RefreshCw className="h-4 w-4 animate-spin text-primary" />
+                <span>正在节点 {verifyDialog.mount.node_name || verifyDialog.mount.node_id} 上执行受控构建校验...</span>
+              </div>
+            ) : verifyDialog.error ? (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-destructive">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span className="break-all">{verifyDialog.error}</span>
+              </div>
+            ) : verifyDialog.result ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {verifyDialog.result.ok ? (
+                      <Badge variant="success" className="inline-flex items-center gap-1">
+                        <CheckCircle2 className="h-3 w-3" />
+                        <span>校验通过</span>
+                      </Badge>
+                    ) : verifyDialog.result.timed_out ? (
+                      <Badge variant="warning">执行超时终止</Badge>
+                    ) : (
+                      <Badge variant="destructive">校验失败 (exit={verifyDialog.result.exit_code})</Badge>
+                    )}
+                    <Badge variant="outline" className="tabular-nums">
+                      {verifyDialog.result.duration_ms} ms
+                    </Badge>
+                    {verifyDialog.result.coalesced && <Badge variant="secondary">单飞合流复用</Badge>}
+                    {verifyDialog.result.truncated && <Badge variant="outline">已截断至末尾 128KB</Badge>}
+                    {verifyDialog.result.log_path && (
+                      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                        {verifyDialog.result.log_path}
+                      </code>
+                    )}
+                  </div>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={async () => {
+                      const ok = await copyTextToClipboard(verifyDialog.result?.tail_output || '')
+                      toast(ok ? '已复制构建输出' : '复制失败', ok ? 'success' : 'error')
+                    }}
+                  >
+                    <Copy className="h-3 w-3" />
+                    <span>复制输出</span>
+                  </Button>
+                </div>
+
+                <pre className="max-h-96 overflow-auto rounded-lg border border-border bg-muted/40 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all">
+                  {verifyDialog.result.tail_output || '(无标准输出或错误输出)'}
+                </pre>
+              </div>
+            ) : null}
+
+            <div className="flex justify-end pt-2 border-t border-border">
+              <Button size="sm" variant="outline" disabled={verifyDialog.running} onClick={() => setVerifyDialog(null)}>
+                关闭
+              </Button>
+            </div>
+          </div>
+        )}
       </Dialog>
     </div>
   )

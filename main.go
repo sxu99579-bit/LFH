@@ -197,6 +197,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("init file store failed: %v", err)
 	}
+	defer func() {
+		_ = store.Close()
+	}()
 
 	var quotaBytes int64
 	if quotaSet {
@@ -337,6 +340,7 @@ func main() {
 				go func() {
 					<-drainDone
 					cancel()
+					_ = store.Close()
 					os.Exit(0)
 				}()
 				return nil

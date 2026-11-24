@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react'
 import {
   Archive,
+  Bot,
   Code2,
   Cpu,
   Download,
@@ -36,11 +37,13 @@ import {
   canPreviewFile,
   categoryNames,
   cn,
+  extractAgentLabel,
   formatSize,
   formatStorageModeLabel,
   formatTime,
   getFileExt,
   getMatchingCapabilitiesForFile,
+  isAgentDeviceName,
   isEditableTextFile,
 } from '@/lib/utils'
 import { Badge, Button, Card, Input, Select, useToast } from '@/components/ui'
@@ -52,6 +55,7 @@ interface FilesPageProps {
   nodes: NodeStatus[]
   capabilities: ClusterCapabilityView[]
   selectableUsers: Array<{ username: string; role: string }>
+  writableMountIds?: Set<string>
   isMobile: boolean
   loading: boolean
   searchQuery: string
@@ -273,6 +277,7 @@ export function FilesPage({
   nodes,
   capabilities,
   selectableUsers,
+  writableMountIds,
   isMobile,
   loading,
   searchQuery,
@@ -658,10 +663,11 @@ export function FilesPage({
               <tbody className="divide-y divide-border">
                 {files.map((rec) => {
                   const previewable = canPreviewFile(rec)
-                  const editable = isEditableTextFile(rec)
+                  const editable = isEditableTextFile(rec, writableMountIds)
                   const matchingCaps = getMatchingCapabilitiesForFile(capabilities, rec.name)
                   const storageLabel = formatStorageModeLabel(rec.storage_mode)
                   const restricted = rec.allowed_users && rec.allowed_users.length > 0
+                  const fromAgent = isAgentDeviceName(rec.device_name)
                   return (
                     <tr
                       key={rec.id}
@@ -721,8 +727,15 @@ export function FilesPage({
                       </td>
                       <td className="px-3 py-2.5 max-w-[180px]">
                         <div className="truncate text-foreground">{rec.uploader}</div>
-                        {rec.device_name && (
-                          <div className="truncate text-[11px] text-muted-foreground">{rec.device_name}</div>
+                        {fromAgent ? (
+                          <Badge variant="default" className="mt-0.5 max-w-full">
+                            <Bot className="h-3 w-3 shrink-0" />
+                            <span className="truncate">{extractAgentLabel(rec.device_name)}</span>
+                          </Badge>
+                        ) : (
+                          rec.device_name && (
+                            <div className="truncate text-[11px] text-muted-foreground">{rec.device_name}</div>
+                          )
                         )}
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-muted-foreground tabular-nums">
@@ -798,9 +811,10 @@ export function FilesPage({
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {files.map((rec) => {
             const previewable = canPreviewFile(rec)
-            const editable = isEditableTextFile(rec)
+            const editable = isEditableTextFile(rec, writableMountIds)
             const matchingCaps = getMatchingCapabilitiesForFile(capabilities, rec.name)
             const storageLabel = formatStorageModeLabel(rec.storage_mode)
+            const fromAgent = isAgentDeviceName(rec.device_name)
             return (
               <Card
                 key={rec.id}
@@ -835,6 +849,12 @@ export function FilesPage({
                         v{rec.version || 1}
                       </Badge>
                       {storageLabel && <Badge variant="default">{storageLabel}</Badge>}
+                      {fromAgent && (
+                        <Badge variant="default" className="max-w-full">
+                          <Bot className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{extractAgentLabel(rec.device_name)}</span>
+                        </Badge>
+                      )}
                       {matchingCaps.length > 0 && <Badge variant="default">可调插件</Badge>}
                     </div>
                   </div>

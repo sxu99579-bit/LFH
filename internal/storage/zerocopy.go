@@ -1,11 +1,15 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -13,21 +17,166 @@ import (
 	"time"
 )
 
-const maxZeroCopyWalkFiles = 10000
+const (
+	maxZeroCopyWalkFiles           = 10000
+	DefaultMountMaxFileBytes int64 = 50 * 1024 * 1024
+)
 
-// MountEntry describes a host directory exposed through zero-copy virtual mount.
+// DefaultProjectIgnorePatterns returns common dependency/build artifact directories ignored for mounted project workspaces.
+func DefaultProjectIgnorePatterns() []string {
+	return []string{
+		"node_modules",
+		".git",
+		"dist",
+		"build",
+		".next",
+		".nuxt",
+		"target",
+		"vendor",
+		"__pycache__",
+		".venv",
+		".idea",
+		".vscode",
+		".DS_Store",
+	}
+}
+
+// VerifyPreset defines an admin-configured, non-shell workspace build/test command.
+type VerifyPreset struct {
+	ID         string   `json:"id"`
+	Label      string   `json:"label"`
+	WorkSubDir string   `json:"work_sub_dir,omitempty"`
+	Command    string   `json:"command"`
+	Args       []string `json:"args,omitempty"`
+	TimeoutSec int      `json:"timeout_sec,omitempty"`
+	LogRelPath string   `json:"log_rel_path,omitempty"`
+}
+
+// NormalizeVerifyPresets validates preset IDs, subdirs, non-empty commands, timeouts, and safe log paths.
+func NormalizeVerifyPresets(raw []VerifyPreset) ([]VerifyPreset, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]VerifyPreset, 0, len(raw))
+	for i, p := range raw {
+		id := strings.TrimSpace(p.ID)
+		if id == "" || len(id) > 64 {
+			return nil, fmt.Errorf("verify_presets[%d] id 长度必须在 1-64 字符之间", i)
+		}
+		for _, r := range id {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+				return nil, fmt.Errorf("verify_presets[%d] id 仅允许字母、数字、- 和 _", i)
+			}
+		}
+		lowID := strings.ToLower(id)
+		if seen[lowID] {
+			return nil, fmt.Errorf("verify_presets 存在重复 ID: %s", id)
+		}
+		seen[lowID] = true
+
+		cmd := strings.TrimSpace(p.Command)
+		if cmd == "" || strings.ContainsRune(cmd, '\x00') || strings.ContainsAny(cmd, "\r\n") {
+			return nil, fmt.Errorf("verify_presets[%s] command 无效", id)
+		}
+		label := strings.TrimSpace(p.Label)
+		if label == "" {
+			label = id
+		}
+
+		sub := strings.TrimSpace(strings.ReplaceAll(p.WorkSubDir, "\\", "/"))
+		sub = strings.Trim(sub, "/")
+		if sub != "" {
+			cleanSub, err := cleanMountRelPath(sub)
+			if err != nil {
+				return nil, fmt.Errorf("verify_presets[%s] work_sub_dir 无效: %w", id, err)
+			}
+			sub = cleanSub
+		}
+
+		logRel := strings.TrimSpace(strings.ReplaceAll(p.LogRelPath, "\\", "/"))
+		logRel = strings.Trim(logRel, "/")
+		if logRel == "" {
+			logRel = ".lfh-logs/" + id + ".log"
+		} else {
+			cleanLog, err := cleanMountRelPath(logRel)
+			if err != nil {
+				return nil, fmt.Errorf("verify_presets[%s] log_rel_path 无效: %w", id, err)
+			}
+			logRel = cleanLog
+		}
+		if isHardcodedBlockedMountPath(logRel) {
+			return nil, fmt.Errorf("verify_presets[%s] log_rel_path 命中受保护路径黑名单", id)
+		}
+
+		timeoutSec := p.TimeoutSec
+		if timeoutSec <= 0 {
+			timeoutSec = 60
+		}
+		if timeoutSec > 300 {
+			timeoutSec = 300
+		}
+
+		args := make([]string, 0, len(p.Args))
+		for _, a := range p.Args {
+			if strings.ContainsRune(a, '\x00') {
+				return nil, fmt.Errorf("verify_presets[%s] args 包含非法空字符", id)
+			}
+			args = append(args, a)
+		}
+
+		out = append(out, VerifyPreset{
+			ID:         id,
+			Label:      label,
+			WorkSubDir: sub,
+			Command:    cmd,
+			Args:       args,
+			TimeoutSec: timeoutSec,
+			LogRelPath: logRel,
+		})
+	}
+	return out, nil
+}
+
+// MountEntry describes a host directory exposed through zero-copy virtual mount (and optional writable workspace).
 type MountEntry struct {
-	ID           string    `json:"id"`
-	DirPath      string    `json:"dir_path"`
-	Alias        string    `json:"alias"`
-	AllowedUsers []string  `json:"allowed_users,omitempty"`
-	AddedBy      string    `json:"added_by,omitempty"`
-	Status       string    `json:"status"` // ok, missing
-	FileCount    int       `json:"file_count"`
-	TotalBytes   int64     `json:"total_bytes"`
-	LastSyncAt   time.Time `json:"last_sync_at"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastError    string    `json:"last_error,omitempty"`
+	ID             string         `json:"id"`
+	DirPath        string         `json:"dir_path"`
+	Alias          string         `json:"alias"`
+	AllowedUsers   []string       `json:"allowed_users,omitempty"`
+	AddedBy        string         `json:"added_by,omitempty"`
+	Status         string         `json:"status"` // ok, missing
+	FileCount      int            `json:"file_count"`
+	TotalBytes     int64          `json:"total_bytes"`
+	Writable       bool           `json:"writable,omitempty"`
+	ShadowBackup   bool           `json:"shadow_backup,omitempty"`
+	IgnorePatterns []string       `json:"ignore_patterns,omitempty"`
+	MaxFileBytes   int64          `json:"max_file_bytes,omitempty"`
+	VerifyPresets  []VerifyPreset `json:"verify_presets,omitempty"`
+	LastSyncAt     time.Time      `json:"last_sync_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+	LastError      string         `json:"last_error,omitempty"`
+}
+
+// AddMountOptions configures writable project workspace behavior when registering a directory mount.
+type AddMountOptions struct {
+	Writable       bool           `json:"writable,omitempty"`
+	ShadowBackup   *bool          `json:"shadow_backup,omitempty"`
+	IgnorePatterns []string       `json:"ignore_patterns,omitempty"`
+	IgnoreSet      bool           `json:"ignore_set,omitempty"`
+	MaxFileBytes   int64          `json:"max_file_bytes,omitempty"`
+	VerifyPresets  []VerifyPreset `json:"verify_presets,omitempty"`
+}
+
+// UpdateMountOptions selectively updates writable/ignore settings on an existing mount.
+type UpdateMountOptions struct {
+	Alias          *string         `json:"alias,omitempty"`
+	AllowedUsers   *[]string       `json:"allowed_users,omitempty"`
+	Writable       *bool           `json:"writable,omitempty"`
+	ShadowBackup   *bool           `json:"shadow_backup,omitempty"`
+	IgnorePatterns *[]string       `json:"ignore_patterns,omitempty"`
+	MaxFileBytes   *int64          `json:"max_file_bytes,omitempty"`
+	VerifyPresets  *[]VerifyPreset `json:"verify_presets,omitempty"`
 }
 
 // ImportSummary reports metrics from a zero-copy local path import operation.
@@ -102,14 +251,210 @@ func isSubOrSamePath(candidate, root string) bool {
 
 func shouldSkipZeroCopyDir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case ".git", "$recycle.bin", "system volume information":
+	case "node_modules", ".git", "dist", "build", ".next", ".nuxt", "target", "__pycache__", ".venv", "$recycle.bin", "system volume information":
 		return true
 	default:
 		return false
 	}
 }
 
+func normalizeIgnorePatterns(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		p := strings.TrimSpace(strings.ReplaceAll(item, "\\", "/"))
+		p = strings.Trim(p, "/")
+		if p == "" {
+			continue
+		}
+		key := strings.ToLower(p)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func effectiveMaxFileBytes(m MountEntry) int64 {
+	if m.MaxFileBytes > 0 {
+		return m.MaxFileBytes
+	}
+	return DefaultMountMaxFileBytes
+}
+
+func cleanMountRelPath(raw string) (string, error) {
+	s := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	s = strings.TrimPrefix(s, "/")
+	if s == "" {
+		return "", errors.New("目标文件相对路径不能为空")
+	}
+	if strings.ContainsRune(s, '\x00') {
+		return "", errors.New("路径包含非法空字符")
+	}
+	if len(s) >= 2 && s[1] == ':' && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+		return "", errors.New("禁止使用包含盘符的绝对路径")
+	}
+	parts := strings.Split(s, "/")
+	clean := make([]string, 0, len(parts))
+	for _, seg := range parts {
+		seg = strings.TrimSpace(seg)
+		if seg == "" || seg == "." {
+			return "", errors.New("相对路径包含无效空段或点路径")
+		}
+		if seg == ".." {
+			return "", errors.New("禁止通过 .. 跨越挂载目录边界")
+		}
+		clean = append(clean, seg)
+	}
+	return strings.Join(clean, "/"), nil
+}
+
+// isHardcodedBlockedMountPath enforces server-side security boundaries for writable workspaces
+// regardless of custom IgnorePatterns settings.
+func isHardcodedBlockedMountPath(relSlash string) bool {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(relSlash, "\\", "/"))
+	trimmed = strings.Trim(trimmed, "/")
+	if trimmed == "" {
+		return true
+	}
+	parts := strings.Split(trimmed, "/")
+	for _, seg := range parts {
+		low := strings.ToLower(strings.TrimSpace(seg))
+		if low == "" || low == "." || low == ".." || low == ".git" || low == ".ssh" {
+			return true
+		}
+	}
+	base := strings.ToLower(strings.TrimSpace(parts[len(parts)-1]))
+	if strings.HasPrefix(base, ".lfh_tmp_") {
+		return true
+	}
+	if base == ".env" {
+		return true
+	}
+	if strings.HasPrefix(base, ".env.") {
+		switch base {
+		case ".env.example", ".env.sample", ".env.template":
+		default:
+			return true
+		}
+	}
+	ext := strings.ToLower(path.Ext(base))
+	switch ext {
+	case ".pem", ".key", ".p12", ".pfx", ".jks":
+		return true
+	}
+	if base == "id_rsa" || base == "id_ed25519" || base == "id_ecdsa" ||
+		strings.HasPrefix(base, "id_rsa.") || strings.HasPrefix(base, "id_ed25519.") || strings.HasPrefix(base, "id_ecdsa.") {
+		return true
+	}
+	return false
+}
+
+func matchesIgnorePatterns(relSlash, baseName string, patterns []string) bool {
+	lowBase := strings.ToLower(strings.TrimSpace(baseName))
+	if strings.HasPrefix(lowBase, ".lfh_tmp_") {
+		return true
+	}
+	if len(patterns) == 0 {
+		return false
+	}
+	cleanRel := strings.Trim(strings.ToLower(strings.ReplaceAll(relSlash, "\\", "/")), "/")
+	segs := strings.Split(cleanRel, "/")
+	for _, rawPat := range patterns {
+		pat := strings.ToLower(strings.Trim(strings.TrimSpace(strings.ReplaceAll(rawPat, "\\", "/")), "/"))
+		if pat == "" {
+			continue
+		}
+		if strings.Contains(pat, "/") {
+			if ok, _ := path.Match(pat, cleanRel); ok || cleanRel == pat || strings.HasPrefix(cleanRel, pat+"/") {
+				return true
+			}
+			continue
+		}
+		if ok, _ := path.Match(pat, lowBase); ok {
+			return true
+		}
+		for _, seg := range segs {
+			if seg == "" {
+				continue
+			}
+			if seg == pat {
+				return true
+			}
+			if ok, _ := path.Match(pat, seg); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func verifyNoSymlinkPath(mountRoot, targetAbs string) error {
+	cleanRoot := filepath.Clean(mountRoot)
+	cleanTarget := filepath.Clean(targetAbs)
+	if !isSubOrSamePath(cleanTarget, cleanRoot) || sameOSPath(cleanTarget, cleanRoot) {
+		return errors.New("目标路径超出挂载目录范围")
+	}
+	rootInfo, err := os.Lstat(cleanRoot)
+	if err != nil {
+		return fmt.Errorf("无法访问挂载根目录: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return errors.New("挂载根目录无效或包含符号链接")
+	}
+
+	rel, err := filepath.Rel(cleanRoot, cleanTarget)
+	if err != nil {
+		return errors.New("无法解析挂载相对路径")
+	}
+	cur := cleanRoot
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		cur = filepath.Join(cur, part)
+		fi, lErr := os.Lstat(cur)
+		if os.IsNotExist(lErr) {
+			break
+		}
+		if lErr != nil {
+			return lErr
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return errors.New("安全策略禁止通过符号链接写入挂载目录")
+		}
+		if i == len(parts)-1 && fi.IsDir() {
+			return errors.New("目标路径已是目录，无法作为文件写入")
+		}
+	}
+	return nil
+}
+
+func verifyParentRealPathInsideMount(mountRoot, parentAbs string) error {
+	realRoot, err := filepath.EvalSymlinks(filepath.Clean(mountRoot))
+	if err != nil {
+		return err
+	}
+	realParent, err := filepath.EvalSymlinks(filepath.Clean(parentAbs))
+	if err != nil {
+		return err
+	}
+	if !isSubOrSamePath(realParent, realRoot) {
+		return errors.New("安全策略禁止符号链接逃逸挂载根目录")
+	}
+	return nil
+}
+
 func collectLocalFiles(root string, maxFiles int) (isDir bool, items []walkedLocalFile, skipped int, err error) {
+	return collectLocalFilesWithIgnore(root, maxFiles, nil, false)
+}
+
+func collectLocalFilesWithIgnore(root string, maxFiles int, ignorePatterns []string, skipSensitive bool) (isDir bool, items []walkedLocalFile, skipped int, err error) {
 	info, statErr := os.Stat(root)
 	if statErr != nil {
 		return false, nil, 0, fmt.Errorf("无法访问路径 %s: %w", root, statErr)
@@ -143,10 +488,37 @@ func collectLocalFiles(root string, maxFiles int) (isDir bool, items []walkedLoc
 			}
 			return nil
 		}
-		if d.IsDir() {
-			if p != root && shouldSkipZeroCopyDir(d.Name()) {
-				return filepath.SkipDir
+		var relSlash string
+		if p != root {
+			rel, relErr := filepath.Rel(root, p)
+			if relErr != nil {
+				skipped++
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
+			relSlash = filepath.ToSlash(rel)
+		}
+		if d.IsDir() {
+			if p != root {
+				lowName := strings.ToLower(strings.TrimSpace(d.Name()))
+				if shouldSkipZeroCopyDir(d.Name()) || matchesIgnorePatterns(relSlash, d.Name(), ignorePatterns) ||
+					(skipSensitive && (lowName == ".git" || lowName == ".ssh")) {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if strings.HasPrefix(strings.ToLower(d.Name()), ".lfh_tmp_") {
+			return nil
+		}
+		if matchesIgnorePatterns(relSlash, d.Name(), ignorePatterns) {
+			skipped++
+			return nil
+		}
+		if skipSensitive && isHardcodedBlockedMountPath(relSlash) {
+			skipped++
 			return nil
 		}
 		if len(items) >= maxFiles {
@@ -157,14 +529,9 @@ func collectLocalFiles(root string, maxFiles int) (isDir bool, items []walkedLoc
 			skipped++
 			return nil
 		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			skipped++
-			return nil
-		}
 		items = append(items, walkedLocalFile{
 			fullPath: p,
-			relSlash: filepath.ToSlash(rel),
+			relSlash: relSlash,
 			name:     d.Name(),
 			size:     fi.Size(),
 			modTime:  fi.ModTime(),
@@ -199,6 +566,7 @@ func (s *Store) loadMountsLocked() {
 		m.DirPath = filepath.Clean(m.DirPath)
 		m.Alias = SanitizeFolderPath(m.Alias)
 		m.AllowedUsers = NormalizeAllowedUsers(m.AllowedUsers)
+		m.IgnorePatterns = normalizeIgnorePatterns(m.IgnorePatterns)
 		if m.Status == "" {
 			m.Status = "ok"
 		}
@@ -597,6 +965,11 @@ func (s *Store) ListMounts() []MountEntry {
 
 // AddMount registers a host directory as a read-only zero-copy mount and runs its initial scan.
 func (s *Store) AddMount(dirPath, alias, addedBy string, allowedUsers []string) (MountEntry, int, error) {
+	return s.AddMountWithOptions(dirPath, alias, addedBy, allowedUsers, AddMountOptions{})
+}
+
+// AddMountWithOptions registers a host directory mount with optional writable workspace settings.
+func (s *Store) AddMountWithOptions(dirPath, alias, addedBy string, allowedUsers []string, opts AddMountOptions) (MountEntry, int, error) {
 	cleanDir, err := cleanLocalAbsPath(dirPath)
 	if err != nil {
 		return MountEntry{}, 0, err
@@ -625,6 +998,25 @@ func (s *Store) AddMount(dirPath, alias, addedBy string, allowedUsers []string) 
 		cleanAlias = SanitizeFolderPath(base)
 	}
 
+	ignorePatterns := normalizeIgnorePatterns(opts.IgnorePatterns)
+	if !opts.IgnoreSet && opts.Writable && len(ignorePatterns) == 0 {
+		ignorePatterns = DefaultProjectIgnorePatterns()
+	}
+	shadowBackup := false
+	if opts.ShadowBackup != nil {
+		shadowBackup = *opts.ShadowBackup
+	} else if opts.Writable {
+		shadowBackup = true
+	}
+	maxFileBytes := opts.MaxFileBytes
+	if maxFileBytes <= 0 && opts.Writable {
+		maxFileBytes = DefaultMountMaxFileBytes
+	}
+	verifyPresets, vErr := NormalizeVerifyPresets(opts.VerifyPresets)
+	if vErr != nil {
+		return MountEntry{}, 0, vErr
+	}
+
 	s.mu.Lock()
 	for _, existing := range s.mounts {
 		if sameOSPath(existing.DirPath, cleanDir) {
@@ -633,13 +1025,18 @@ func (s *Store) AddMount(dirPath, alias, addedBy string, allowedUsers []string) 
 		}
 	}
 	entry := MountEntry{
-		ID:           "mnt-" + newID(),
-		DirPath:      cleanDir,
-		Alias:        cleanAlias,
-		AllowedUsers: NormalizeAllowedUsers(allowedUsers),
-		AddedBy:      strings.TrimSpace(addedBy),
-		Status:       "ok",
-		CreatedAt:    time.Now(),
+		ID:             "mnt-" + newID(),
+		DirPath:        cleanDir,
+		Alias:          cleanAlias,
+		AllowedUsers:   NormalizeAllowedUsers(allowedUsers),
+		AddedBy:        strings.TrimSpace(addedBy),
+		Status:         "ok",
+		Writable:       opts.Writable,
+		ShadowBackup:   shadowBackup,
+		IgnorePatterns: ignorePatterns,
+		MaxFileBytes:   maxFileBytes,
+		VerifyPresets:  verifyPresets,
+		CreatedAt:      time.Now(),
 	}
 	if entry.AddedBy == "" {
 		entry.AddedBy = "admin"
@@ -662,27 +1059,162 @@ func (s *Store) AddMount(dirPath, alias, addedBy string, allowedUsers []string) 
 	return latest, res.Added, nil
 }
 
-// RemoveMount removes a directory mount and purges its indexed FileRecords without deleting disk files.
+// UpdateMount updates mount settings (such as Writable, ShadowBackup, IgnorePatterns) and re-syncs the mount index.
+func (s *Store) UpdateMount(mountID string, opts UpdateMountOptions) (MountEntry, MountSyncResult, error) {
+	id := strings.TrimSpace(mountID)
+	s.mu.Lock()
+	cur, ok := s.mounts[id]
+	if !ok {
+		s.mu.Unlock()
+		return MountEntry{}, MountSyncResult{}, errors.New("挂载目录不存在")
+	}
+	prev := cur
+	wasWritable := cur.Writable
+	if opts.Alias != nil {
+		cleanAlias := SanitizeFolderPath(*opts.Alias)
+		if cleanAlias == "" {
+			s.mu.Unlock()
+			return MountEntry{}, MountSyncResult{}, errors.New("挂载别名不能为空")
+		}
+		cur.Alias = cleanAlias
+	}
+	if opts.AllowedUsers != nil {
+		cur.AllowedUsers = NormalizeAllowedUsers(*opts.AllowedUsers)
+	}
+	if opts.Writable != nil {
+		cur.Writable = *opts.Writable
+	}
+	if opts.ShadowBackup != nil {
+		cur.ShadowBackup = *opts.ShadowBackup
+	} else if !wasWritable && cur.Writable {
+		cur.ShadowBackup = true
+	}
+	if opts.IgnorePatterns != nil {
+		cur.IgnorePatterns = normalizeIgnorePatterns(*opts.IgnorePatterns)
+	} else if !wasWritable && cur.Writable && len(cur.IgnorePatterns) == 0 {
+		cur.IgnorePatterns = DefaultProjectIgnorePatterns()
+	}
+	if opts.MaxFileBytes != nil {
+		if *opts.MaxFileBytes <= 0 {
+			cur.MaxFileBytes = DefaultMountMaxFileBytes
+		} else {
+			cur.MaxFileBytes = *opts.MaxFileBytes
+		}
+	} else if cur.Writable && cur.MaxFileBytes <= 0 {
+		cur.MaxFileBytes = DefaultMountMaxFileBytes
+	}
+	if opts.VerifyPresets != nil {
+		cleanPresets, vErr := NormalizeVerifyPresets(*opts.VerifyPresets)
+		if vErr != nil {
+			s.mu.Unlock()
+			return MountEntry{}, MountSyncResult{}, vErr
+		}
+		cur.VerifyPresets = cleanPresets
+	}
+
+	s.mounts[id] = cur
+	if err := s.saveMountsLocked(); err != nil {
+		s.mounts[id] = prev
+		s.mu.Unlock()
+		return MountEntry{}, MountSyncResult{}, err
+	}
+	s.mu.Unlock()
+
+	res, syncErr := s.SyncMount(id)
+	s.mu.RLock()
+	latest := s.mounts[id]
+	s.mu.RUnlock()
+	if syncErr != nil {
+		return latest, res, syncErr
+	}
+	return latest, res, nil
+}
+
+// GetMount looks up a mount configuration entry by mountID.
+func (s *Store) GetMount(mountID string) (MountEntry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m, ok := s.mounts[strings.TrimSpace(mountID)]
+	return m, ok
+}
+
+// FindMountByFolderPath locates the configured mount owning folderPath and returns the relative subpath inside it.
+func (s *Store) FindMountByFolderPath(folderPath string) (MountEntry, string, bool) {
+	clean := SanitizeFolderPath(folderPath)
+	if clean == "" {
+		return MountEntry{}, "", false
+	}
+	lowClean := strings.ToLower(clean)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var best MountEntry
+	var bestRel string
+	bestAliasLen := -1
+	for _, m := range s.mounts {
+		alias := SanitizeFolderPath(m.Alias)
+		if alias == "" {
+			continue
+		}
+		lowAlias := strings.ToLower(alias)
+		if lowClean == lowAlias {
+			if len(alias) > bestAliasLen {
+				best = m
+				bestRel = ""
+				bestAliasLen = len(alias)
+			}
+			continue
+		}
+		if strings.HasPrefix(lowClean, lowAlias+"/") && len(alias) > bestAliasLen {
+			best = m
+			bestRel = clean[len(alias)+1:]
+			bestAliasLen = len(alias)
+		}
+	}
+	if bestAliasLen < 0 {
+		return MountEntry{}, "", false
+	}
+	return best, bestRel, true
+}
+
+// RemoveMount removes a directory mount, cleans its Shadow history blobs in uploads/, without deleting host source files.
 func (s *Store) RemoveMount(mountID string) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.mounts[mountID]; !ok {
+		s.mu.Unlock()
 		return 0, errors.New("挂载目录不存在")
 	}
 	delete(s.mounts, mountID)
 	removed := 0
+	var shadowPaths []string
+	var removedIDs []string
 	for id, rec := range s.records {
 		if rec.MountID == mountID {
+			for _, v := range rec.Versions {
+				shadowPaths = append(shadowPaths, s.versionDiskPathLocked(rec, v))
+			}
+			removedIDs = append(removedIDs, id)
 			delete(s.records, id)
 			removed++
 		}
 	}
 	if err := s.saveMountsLocked(); err != nil {
+		s.mu.Unlock()
 		return removed, err
 	}
 	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
 		return removed, err
 	}
+	s.mu.Unlock()
+
+	for _, sp := range shadowPaths {
+		if sp != "" {
+			_ = os.Remove(sp)
+		}
+	}
+	s.clearLeases(removedIDs)
 	return removed, nil
 }
 
@@ -737,7 +1269,7 @@ func (s *Store) SyncMount(mountID string) (MountSyncResult, error) {
 		return res, nil
 	}
 
-	_, items, _, walkErr := collectLocalFiles(mount.DirPath, maxZeroCopyWalkFiles)
+	_, items, _, walkErr := collectLocalFilesWithIgnore(mount.DirPath, maxZeroCopyWalkFiles, mount.IgnorePatterns, mount.Writable)
 	walkedByPath := make(map[string]walkedLocalFile, len(items))
 	var totalBytes int64
 	for _, it := range items {
@@ -750,9 +1282,9 @@ func (s *Store) SyncMount(mountID string) (MountSyncResult, error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	cur, exists := s.mounts[mountID]
 	if !exists {
+		s.mu.Unlock()
 		return MountSyncResult{}, errors.New("挂载目录不存在")
 	}
 
@@ -762,6 +1294,8 @@ func (s *Store) SyncMount(mountID string) (MountSyncResult, error) {
 	res.FileCount = len(items)
 	res.TotalBytes = totalBytes
 
+	var removedIDs []string
+	var shadowPathsToRemove []string
 	for id, rec := range s.records {
 		if rec.MountID != mountID {
 			continue
@@ -771,6 +1305,10 @@ func (s *Store) SyncMount(mountID string) (MountSyncResult, error) {
 			key = strings.ToLower(key)
 		}
 		if _, keep := walkedByPath[key]; !keep {
+			for _, v := range rec.Versions {
+				shadowPathsToRemove = append(shadowPathsToRemove, s.versionDiskPathLocked(rec, v))
+			}
+			removedIDs = append(removedIDs, id)
 			delete(s.records, id)
 			res.Removed++
 			continue
@@ -786,6 +1324,16 @@ func (s *Store) SyncMount(mountID string) (MountSyncResult, error) {
 			rec := s.records[id]
 			modDiff := rec.UploadedAt.Unix() != it.modTime.Unix()
 			if rec.SourceMissing || rec.Size != it.size || modDiff || rec.FolderPath != folderPath || rec.Name != name {
+				if rec.Size != it.size || modDiff {
+					if rec.Version <= 0 {
+						rec.Version = 1
+					}
+					rec.Version++
+					rec.VersionCount = 1 + len(rec.Versions)
+					rec.SHA256 = ""
+					rec.UpdateMethod = MethodMountSync
+					rec.VersionNote = "宿主机文件变更同步"
+				}
 				rec.Name = name
 				rec.FolderPath = folderPath
 				rec.Ext = ext
@@ -842,17 +1390,645 @@ func (s *Store) SyncMount(mountID string) (MountSyncResult, error) {
 
 	if res.Added > 0 || res.Updated > 0 || res.Removed > 0 {
 		if err := s.saveLocked(); err != nil {
+			s.mu.Unlock()
 			s.RecordWriteError()
 			return res, err
 		}
 	}
 	if metaChanged || res.Added > 0 || res.Updated > 0 || res.Removed > 0 {
 		if err := s.saveMountsLocked(); err != nil {
+			s.mu.Unlock()
 			s.RecordWriteError()
 			return res, err
 		}
 	}
+	s.mu.Unlock()
+
+	for _, sp := range shadowPathsToRemove {
+		if sp != "" {
+			_ = os.Remove(sp)
+		}
+	}
+	s.clearLeases(removedIDs)
 	return res, nil
+}
+
+func (s *Store) recomputeMountStatsLocked(mountID string) {
+	m, ok := s.mounts[mountID]
+	if !ok {
+		return
+	}
+	var cnt int
+	var total int64
+	for _, rec := range s.records {
+		if rec.MountID == mountID && !rec.SourceMissing {
+			cnt++
+			total += rec.Size
+		}
+	}
+	m.FileCount = cnt
+	m.TotalBytes = total
+	m.LastSyncAt = time.Now()
+	s.mounts[mountID] = m
+}
+
+// backupFileToShadowBlob creates an independent copy of srcPath inside activeDir so future in-place host writes never mutate history.
+func backupFileToShadowBlob(srcPath, activeDir, ext string) (string, int64, string, error) {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return "", 0, "", err
+	}
+	defer src.Close()
+	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		return "", 0, "", err
+	}
+	storedName := newID() + ext
+	dstPath := filepath.Join(activeDir, storedName)
+	n, shaHex, err := writeBlobAndHash(dstPath, src)
+	if err != nil {
+		_ = os.Remove(dstPath)
+		return "", 0, "", err
+	}
+	return storedName, n, shaHex, nil
+}
+
+// atomicWriteFile streams up to maxBytes into a same-directory temp file, fsyncs, and atomically replaces dstPath.
+func atomicWriteFile(dstPath string, r io.Reader, maxBytes int64) (int64, string, os.FileInfo, error) {
+	dir := filepath.Dir(dstPath)
+	tmp, err := os.CreateTemp(dir, ".lfh_tmp_*")
+	if err != nil {
+		return 0, "", nil, err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	h := sha256.New()
+	reader := r
+	if maxBytes > 0 {
+		reader = io.LimitReader(r, maxBytes+1)
+	}
+	n, copyErr := io.Copy(tmp, io.TeeReader(reader, h))
+	if copyErr != nil {
+		_ = tmp.Close()
+		cleanup()
+		return 0, "", nil, copyErr
+	}
+	if maxBytes > 0 && n > maxBytes {
+		_ = tmp.Close()
+		cleanup()
+		return 0, "", nil, fmt.Errorf("文件大小超过可写工作区单文件上限 (%d 字节)", maxBytes)
+	}
+	if syncErr := tmp.Sync(); syncErr != nil {
+		_ = tmp.Close()
+		cleanup()
+		return 0, "", nil, syncErr
+	}
+	if closeErr := tmp.Close(); closeErr != nil {
+		cleanup()
+		return 0, "", nil, closeErr
+	}
+
+	var renameErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		renameErr = os.Rename(tmpPath, dstPath)
+		if renameErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if renameErr != nil {
+		cleanup()
+		return 0, "", nil, renameErr
+	}
+	fi, statErr := os.Stat(dstPath)
+	if statErr != nil {
+		return n, hex.EncodeToString(h.Sum(nil)), nil, nil
+	}
+	return n, hex.EncodeToString(h.Sum(nil)), fi, nil
+}
+
+// WriteMountFile safely writes through a file into a writable mounted workspace directory
+// using striped path locking, optimistic version & lease checks, Shadow backup, and temp+rename.
+func (s *Store) WriteMountFile(mountID, relSlash, note, method, uploader string, allowedUsers []string, dev DeviceInfo, r io.Reader, conc WriteConcurrencyOptions) (FileRecord, error) {
+	cleanRel, err := cleanMountRelPath(relSlash)
+	if err != nil {
+		return FileRecord{}, err
+	}
+	s.mu.RLock()
+	mount, ok := s.mounts[strings.TrimSpace(mountID)]
+	s.mu.RUnlock()
+	if !ok {
+		return FileRecord{}, errors.New("挂载目录不存在")
+	}
+	if !mount.Writable {
+		return FileRecord{}, errors.New("该挂载目录未开启可写工作区权限")
+	}
+	folderPath := folderPathForWalkedItem(mount.Alias, cleanRel, true)
+	fileName := sanitizeFilename(path.Base(cleanRel))
+	unlock := s.lockPath(folderPath, fileName)
+	defer unlock()
+
+	return s.writeMountFileUnderLock(mount.ID, cleanRel, note, method, uploader, allowedUsers, dev, r, conc)
+}
+
+func (s *Store) writeMountFileUnderLock(mountID, relSlash, note, method, uploader string, allowedUsers []string, dev DeviceInfo, r io.Reader, conc WriteConcurrencyOptions) (FileRecord, error) {
+	if conc.ExpectedVersion != nil && *conc.ExpectedVersion < 0 {
+		return FileRecord{}, errors.New("expected_version 不能为负数")
+	}
+	cleanRel, err := cleanMountRelPath(relSlash)
+	if err != nil {
+		return FileRecord{}, err
+	}
+	if isHardcodedBlockedMountPath(cleanRel) {
+		return FileRecord{}, errors.New("安全策略禁止读写 .git / .ssh / .env 或私钥等敏感文件")
+	}
+
+	s.mu.RLock()
+	mount, ok := s.mounts[strings.TrimSpace(mountID)]
+	s.mu.RUnlock()
+	if !ok {
+		return FileRecord{}, errors.New("挂载目录不存在")
+	}
+	if !mount.Writable {
+		return FileRecord{}, errors.New("该挂载目录未开启可写工作区权限")
+	}
+	baseName := sanitizeFilename(path.Base(cleanRel))
+	if matchesIgnorePatterns(cleanRel, baseName, mount.IgnorePatterns) {
+		return FileRecord{}, errors.New("目标路径命中挂载目录忽略规则，禁止写入")
+	}
+
+	absPath := filepath.Clean(filepath.Join(mount.DirPath, filepath.FromSlash(cleanRel)))
+	if err := verifyNoSymlinkPath(mount.DirPath, absPath); err != nil {
+		return FileRecord{}, err
+	}
+
+	folderPath := folderPathForWalkedItem(mount.Alias, cleanRel, true)
+	ext := strings.ToLower(filepath.Ext(baseName))
+
+	s.mu.RLock()
+	var existing *FileRecord
+	for _, cur := range s.records {
+		if cur.MountID == mount.ID && (sameOSPath(cur.SourcePath, absPath) || (cur.FolderPath == folderPath && strings.EqualFold(cur.Name, baseName))) {
+			cp := cur
+			existing = &cp
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	if existing != nil {
+		if leaseErr := s.CheckLeaseForWrite(existing.ID, conc.ActorKeyID, conc.ForceLease); leaseErr != nil {
+			return FileRecord{}, leaseErr
+		}
+	}
+	if err := checkExpectedVersion(existing, folderPath, baseName, conc.ExpectedVersion); err != nil {
+		return FileRecord{}, err
+	}
+
+	// If file exists untracked on disk and caller asserted create-only (expected_version=0), reject cleanly.
+	_, diskStatErr := os.Stat(absPath)
+	diskExists := diskStatErr == nil
+	if existing == nil && diskExists && conc.ExpectedVersion != nil && *conc.ExpectedVersion == 0 {
+		return FileRecord{}, &ConflictError{
+			Path:            logicalFilePath(folderPath, baseName),
+			ExpectedVersion: 0,
+			CurrentVersion:  1,
+		}
+	}
+
+	// Read incoming payload (up to maxBytes + 1) BEFORE touching disk so failed limit/lease/version leaves disk untouched.
+	maxBytes := effectiveMaxFileBytes(mount)
+	var dataBuf []byte
+	if maxBytes > 0 {
+		dataBuf, err = io.ReadAll(io.LimitReader(r, maxBytes+1))
+		if err != nil {
+			s.RecordReadError()
+			return FileRecord{}, err
+		}
+		if int64(len(dataBuf)) > maxBytes {
+			return FileRecord{}, fmt.Errorf("文件大小超过可写工作区单文件上限 (%d 字节)", maxBytes)
+		}
+	} else {
+		dataBuf, err = io.ReadAll(r)
+		if err != nil {
+			s.RecordReadError()
+			return FileRecord{}, err
+		}
+	}
+
+	// Create parent directories safely and verify realpath containment against symlinks.
+	parentDir := filepath.Dir(absPath)
+	if mkErr := os.MkdirAll(parentDir, 0755); mkErr != nil {
+		s.RecordWriteError()
+		return FileRecord{}, mkErr
+	}
+	if symErr := verifyNoSymlinkPath(mount.DirPath, absPath); symErr != nil {
+		return FileRecord{}, symErr
+	}
+	if realErr := verifyParentRealPathInsideMount(mount.DirPath, parentDir); realErr != nil {
+		return FileRecord{}, realErr
+	}
+
+	// Shadow backup existing host file into uploads/ before overwriting.
+	var shadowSnap *FileVersion
+	activeDir := s.UploadDir()
+	if diskExists && mount.ShadowBackup {
+		shadowStored, shadowSize, shadowSHA, bErr := backupFileToShadowBlob(absPath, activeDir, ext)
+		if bErr != nil {
+			s.RecordWriteError()
+			return FileRecord{}, fmt.Errorf("创建 Shadow 版本备份失败: %w", bErr)
+		}
+		snapVer := 1
+		snapUploader := uploader
+		snapTime := time.Now()
+		snapMethod := MethodMountSync
+		snapNote := "写穿前自动备份"
+		var snapDev DeviceInfo
+		if existing != nil {
+			if existing.Version > 0 {
+				snapVer = existing.Version
+			}
+			snapUploader = existing.Uploader
+			snapTime = existing.UploadedAt
+			snapMethod = DefaultUpdateMethod(existing.UpdateMethod, snapVer)
+			snapNote = existing.VersionNote
+			snapDev = DeviceInfo{
+				FP:     existing.DeviceFP,
+				Name:   existing.DeviceName,
+				IP:     existing.DeviceIP,
+				Detail: existing.DeviceDetail,
+			}
+		} else if st, stErr := os.Stat(absPath); stErr == nil {
+			snapTime = st.ModTime()
+		}
+		shadowSnap = &FileVersion{
+			Version:      snapVer,
+			StoredName:   shadowStored,
+			Size:         shadowSize,
+			Uploader:     snapUploader,
+			UploadedAt:   snapTime,
+			DeviceFP:     snapDev.FP,
+			DeviceName:   snapDev.Name,
+			DeviceIP:     snapDev.IP,
+			DeviceDetail: snapDev.Detail,
+			StorageDir:   activeDir,
+			SHA256:       shadowSHA,
+			Note:         snapNote,
+			UpdateMethod: snapMethod,
+		}
+	}
+
+	if existing != nil {
+		if leaseErr := s.CheckLeaseForWrite(existing.ID, conc.ActorKeyID, conc.ForceLease); leaseErr != nil {
+			if shadowSnap != nil {
+				_ = os.Remove(filepath.Join(activeDir, shadowSnap.StoredName))
+			}
+			return FileRecord{}, leaseErr
+		}
+	}
+
+	n, shaHex, fi, writeErr := atomicWriteFile(absPath, strings.NewReader(string(dataBuf)), maxBytes)
+	if writeErr != nil {
+		if shadowSnap != nil {
+			_ = os.Remove(filepath.Join(activeDir, shadowSnap.StoredName))
+		}
+		s.RecordWriteError()
+		return FileRecord{}, writeErr
+	}
+
+	fileMod := time.Now()
+	if fi != nil {
+		fileMod = fi.ModTime()
+	}
+	cleanNote := strings.TrimSpace(note)
+	normAllowed := NormalizeAllowedUsers(allowedUsers)
+
+	s.mu.Lock()
+	curMount, mStill := s.mounts[mount.ID]
+	if !mStill {
+		s.mu.Unlock()
+		return FileRecord{}, errors.New("挂载目录已移除")
+	}
+
+	var recID string
+	for id, cur := range s.records {
+		if cur.MountID == curMount.ID && (sameOSPath(cur.SourcePath, absPath) || (cur.FolderPath == folderPath && strings.EqualFold(cur.Name, baseName))) {
+			recID = id
+			break
+		}
+	}
+	var curPtr *FileRecord
+	if recID != "" {
+		cp := s.records[recID]
+		curPtr = &cp
+	}
+	if verErr := checkExpectedVersion(curPtr, folderPath, baseName, conc.ExpectedVersion); verErr != nil {
+		s.mu.Unlock()
+		return FileRecord{}, verErr
+	}
+
+	var rec FileRecord
+	if recID != "" {
+		rec = s.records[recID]
+		curVer := rec.Version
+		if curVer <= 0 {
+			curVer = 1
+		}
+		maxVer := curVer
+		for _, v := range rec.Versions {
+			if v.Version > maxVer {
+				maxVer = v.Version
+			}
+		}
+		if shadowSnap != nil {
+			shadowSnap.Version = curVer
+			rec.Versions = append([]FileVersion{*shadowSnap}, rec.Versions...)
+			sort.Slice(rec.Versions, func(i, j int) bool {
+				return rec.Versions[i].Version > rec.Versions[j].Version
+			})
+		}
+		rec.Name = baseName
+		rec.FolderPath = folderPath
+		rec.Ext = ext
+		rec.Category = ClassifyExt(ext)
+		rec.Size = n
+		rec.StoredName = ""
+		rec.StorageDir = ""
+		rec.StorageMode = StorageModeMount
+		rec.SourcePath = absPath
+		rec.SourceMissing = false
+		rec.MountID = curMount.ID
+		rec.SHA256 = shaHex
+		rec.IntegrityStatus = "ok"
+		verifiedNow := time.Now()
+		rec.LastVerifiedAt = &verifiedNow
+		rec.Version = maxVer + 1
+		rec.VersionCount = 1 + len(rec.Versions)
+		rec.VersionNote = cleanNote
+		if strings.TrimSpace(method) == "" {
+			method = MethodUploadOverwrite
+		}
+		rec.UpdateMethod = strings.TrimSpace(method)
+		rec.Uploader = uploader
+		rec.UploadedAt = fileMod
+		rec.MonthKey = fileMod.Format("2006-01")
+		rec.DateKey = fileMod.Format("2006-01-02")
+		rec.DeviceFP = strings.TrimSpace(dev.FP)
+		rec.DeviceName = strings.TrimSpace(dev.Name)
+		rec.DeviceIP = strings.TrimSpace(dev.IP)
+		rec.DeviceDetail = strings.TrimSpace(dev.Detail)
+		if len(normAllowed) > 0 {
+			rec.AllowedUsers = normAllowed
+		} else if len(rec.AllowedUsers) == 0 && len(curMount.AllowedUsers) > 0 {
+			rec.AllowedUsers = curMount.AllowedUsers
+		}
+		rec.NodeOnline = true
+		s.records[recID] = rec
+	} else {
+		newRecID := newID()
+		var versions []FileVersion
+		nextVer := 1
+		if shadowSnap != nil {
+			versions = []FileVersion{*shadowSnap}
+			nextVer = 2
+		}
+		effAllowed := normAllowed
+		if len(effAllowed) == 0 && len(curMount.AllowedUsers) > 0 {
+			effAllowed = curMount.AllowedUsers
+		}
+		verifiedNow := time.Now()
+		if strings.TrimSpace(method) == "" {
+			method = MethodInitialUpload
+		}
+		rec = FileRecord{
+			ID:              newRecID,
+			Name:            baseName,
+			FolderPath:      folderPath,
+			Size:            n,
+			Ext:             ext,
+			Category:        ClassifyExt(ext),
+			Uploader:        uploader,
+			UploadedAt:      fileMod,
+			MonthKey:        fileMod.Format("2006-01"),
+			DateKey:         fileMod.Format("2006-01-02"),
+			DeviceFP:        strings.TrimSpace(dev.FP),
+			DeviceName:      strings.TrimSpace(dev.Name),
+			DeviceIP:        strings.TrimSpace(dev.IP),
+			DeviceDetail:    strings.TrimSpace(dev.Detail),
+			AllowedUsers:    effAllowed,
+			StorageMode:     StorageModeMount,
+			SourcePath:      absPath,
+			MountID:         curMount.ID,
+			SHA256:          shaHex,
+			IntegrityStatus: "ok",
+			LastVerifiedAt:  &verifiedNow,
+			Version:         nextVer,
+			VersionCount:    1 + len(versions),
+			VersionNote:     cleanNote,
+			UpdateMethod:    strings.TrimSpace(method),
+			Versions:        versions,
+			NodeOnline:      true,
+		}
+		s.records[newRecID] = rec
+	}
+
+	s.recomputeMountStatsLocked(curMount.ID)
+	if err := s.appendWALUpsertLocked(rec); err != nil {
+		s.mu.Unlock()
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	if err := s.saveMountsLocked(); err != nil {
+		s.mu.Unlock()
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	s.mu.Unlock()
+	s.AddUploadBytes(n)
+	return rec, nil
+}
+
+func (s *Store) restoreMountVersionUnderLock(id string, targetVer int, note, actor string, dev DeviceInfo, conc WriteConcurrencyOptions) (FileRecord, error) {
+	s.mu.RLock()
+	rec, ok := s.records[id]
+	var mount MountEntry
+	var mOK bool
+	if ok {
+		mount, mOK = s.mounts[rec.MountID]
+	}
+	s.mu.RUnlock()
+	if !ok {
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	if !mOK || !mount.Writable {
+		return FileRecord{}, errors.New("仅开启可写工作区的挂载目录支持版本回滚写回")
+	}
+	if err := checkExpectedVersion(&rec, rec.FolderPath, rec.Name, conc.ExpectedVersion); err != nil {
+		return FileRecord{}, err
+	}
+	curVer := rec.Version
+	if curVer <= 0 {
+		curVer = 1
+	}
+	if targetVer == curVer {
+		if strings.TrimSpace(note) != "" {
+			s.mu.Lock()
+			if cur, exists := s.records[id]; exists {
+				cur.VersionNote = strings.TrimSpace(note)
+				s.records[id] = cur
+				_ = s.appendWALUpsertLocked(cur)
+				rec = cur
+			}
+			s.mu.Unlock()
+		}
+		return rec, nil
+	}
+
+	var target FileVersion
+	found := false
+	for _, v := range rec.Versions {
+		if v.Version == targetVer {
+			target = v
+			found = true
+			break
+		}
+	}
+	if !found {
+		return FileRecord{}, fmt.Errorf("未找到历史版本 v%d", targetVer)
+	}
+	vPath := s.versionDiskPathLocked(rec, target)
+	if _, err := os.Stat(vPath); err != nil {
+		s.RecordReadError()
+		return FileRecord{}, fmt.Errorf("历史版本 v%d 的 Shadow 备份已丢失", targetVer)
+	}
+
+	rel, relErr := filepath.Rel(mount.DirPath, rec.SourcePath)
+	if relErr != nil {
+		return FileRecord{}, relErr
+	}
+	cleanRel, cleanErr := cleanMountRelPath(filepath.ToSlash(rel))
+	if cleanErr != nil {
+		return FileRecord{}, cleanErr
+	}
+	if isHardcodedBlockedMountPath(cleanRel) {
+		return FileRecord{}, errors.New("安全策略禁止回滚写入受保护文件")
+	}
+	if symErr := verifyNoSymlinkPath(mount.DirPath, rec.SourcePath); symErr != nil {
+		return FileRecord{}, symErr
+	}
+	if realErr := verifyParentRealPathInsideMount(mount.DirPath, filepath.Dir(rec.SourcePath)); realErr != nil {
+		return FileRecord{}, realErr
+	}
+
+	// Backup active host file before overwriting with historical snapshot.
+	activeDir := s.UploadDir()
+	var shadowSnap *FileVersion
+	if mount.ShadowBackup {
+		if _, stErr := os.Stat(rec.SourcePath); stErr == nil {
+			shadowStored, shadowSize, shadowSHA, bErr := backupFileToShadowBlob(rec.SourcePath, activeDir, rec.Ext)
+			if bErr != nil {
+				s.RecordWriteError()
+				return FileRecord{}, fmt.Errorf("创建回滚前 Shadow 备份失败: %w", bErr)
+			}
+			shadowSnap = &FileVersion{
+				Version:      curVer,
+				StoredName:   shadowStored,
+				Size:         shadowSize,
+				Uploader:     rec.Uploader,
+				UploadedAt:   rec.UploadedAt,
+				DeviceFP:     rec.DeviceFP,
+				DeviceName:   rec.DeviceName,
+				DeviceIP:     rec.DeviceIP,
+				DeviceDetail: rec.DeviceDetail,
+				StorageDir:   activeDir,
+				SHA256:       shadowSHA,
+				Note:         rec.VersionNote,
+				UpdateMethod: DefaultUpdateMethod(rec.UpdateMethod, curVer),
+			}
+		}
+	}
+
+	vf, openErr := os.Open(vPath)
+	if openErr != nil {
+		if shadowSnap != nil {
+			_ = os.Remove(filepath.Join(activeDir, shadowSnap.StoredName))
+		}
+		s.RecordReadError()
+		return FileRecord{}, openErr
+	}
+	n, shaHex, fi, writeErr := atomicWriteFile(rec.SourcePath, vf, effectiveMaxFileBytes(mount))
+	_ = vf.Close()
+	if writeErr != nil {
+		if shadowSnap != nil {
+			_ = os.Remove(filepath.Join(activeDir, shadowSnap.StoredName))
+		}
+		s.RecordWriteError()
+		return FileRecord{}, writeErr
+	}
+
+	fileMod := time.Now()
+	if fi != nil {
+		fileMod = fi.ModTime()
+	}
+
+	s.mu.Lock()
+	latest, exists := s.records[id]
+	if !exists {
+		s.mu.Unlock()
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	maxVer := curVer
+	for _, v := range latest.Versions {
+		if v.Version > maxVer {
+			maxVer = v.Version
+		}
+	}
+	if shadowSnap != nil {
+		latest.Versions = append([]FileVersion{*shadowSnap}, latest.Versions...)
+		sort.Slice(latest.Versions, func(i, j int) bool {
+			return latest.Versions[i].Version > latest.Versions[j].Version
+		})
+	}
+	latest.Version = maxVer + 1
+	latest.VersionCount = 1 + len(latest.Versions)
+	latest.Size = n
+	latest.SHA256 = shaHex
+	latest.IntegrityStatus = "ok"
+	latest.SourceMissing = false
+	verifiedNow := time.Now()
+	latest.LastVerifiedAt = &verifiedNow
+	latest.UpdateMethod = MethodVersionRestore
+	if strings.TrimSpace(actor) != "" {
+		latest.Uploader = strings.TrimSpace(actor)
+	}
+	latest.UploadedAt = fileMod
+	latest.MonthKey = fileMod.Format("2006-01")
+	latest.DateKey = fileMod.Format("2006-01-02")
+	if strings.TrimSpace(dev.FP) != "" || strings.TrimSpace(dev.Name) != "" || strings.TrimSpace(dev.IP) != "" {
+		latest.DeviceFP = strings.TrimSpace(dev.FP)
+		latest.DeviceName = strings.TrimSpace(dev.Name)
+		latest.DeviceIP = strings.TrimSpace(dev.IP)
+		latest.DeviceDetail = strings.TrimSpace(dev.Detail)
+	}
+	if strings.TrimSpace(note) != "" {
+		latest.VersionNote = strings.TrimSpace(note)
+	} else {
+		latest.VersionNote = fmt.Sprintf("回滚至 v%d (%s)", targetVer, target.Note)
+	}
+	s.records[id] = latest
+	s.recomputeMountStatsLocked(mount.ID)
+	if err := s.appendWALUpsertLocked(latest); err != nil {
+		s.mu.Unlock()
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	if err := s.saveMountsLocked(); err != nil {
+		s.mu.Unlock()
+		s.RecordWriteError()
+		return FileRecord{}, err
+	}
+	s.mu.Unlock()
+	return latest, nil
 }
 
 // SyncAllMounts scans every configured directory mount and reports aggregate changes.

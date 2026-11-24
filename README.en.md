@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.23.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.24.0</code>
 </p>
 
 ---
@@ -28,6 +28,11 @@ Ships as a single binary with zero database setup required—ready for both Dock
 
 ## Key Features
 
+- **Multi-Agent File Bridge & Native MCP Server**:
+  - **Zero-Trust `AgentKey` Credentials**: Issue scoped `lfh_ag_` API keys (stored solely as SHA-256 hashes on disk) with granular `read / write / share / verify / delete` permissions, folder prefix allowlists, visibility enforcement, and rate limits, paired with one-click Cursor / Antigravity / Claude Code CLI / cURL snippet generation in **Settings -> Agent Bridge**;
+  - **Writable Workspace Mounts & Safe Concurrency**: Mounted directories can opt into `Writable` mode with automatic `Shadow` version backups, customizable ignore filters, and hardcoded sensitive-path guards (`.git`, `.ssh`, `.env`, etc.); protected by striped file locks, optimistic CAS checks (`expected_version`), soft edit leases (`/api/files/{id}/lease`), search-and-replace / unified diff patching (`/api/files/{id}/patch`), and atomic multi-file commits (`/api/files/batch-commit`);
+  - **Pure Go Streamable HTTP `/mcp` (17 Tools)**: Embedded MCP server exposing workspace discovery, targeted line-range reads, patching, atomic commits, leases, long-poll `wait_for_changes`, `issue_transfer_ticket`, and `trigger_workspace_verify`;
+  - **Presigned Direct-to-Worker Tickets, Webhooks, Controlled Verify & WAL Compaction**: Issue HMAC-signed `/s/ticket` links (automatically routing LAN/Tailscale transfers directly to Worker nodes without Entry proxying); automate external notifications with prefix-filtered Webhooks (`X-LFH-Signature-256`, `1s/4s/12s` retry, synchronous test button); run non-shell allowlisted build/test verify presets with single-flight coalescing, 128 KB tail capture, and `.lfh-logs/` persistence backed by sequential `files.wal` snapshot compaction.
 - **Distributed Compute Plugin System & Marketplace**:
   - Install and toggle plugins per cluster node (built-in **OCR Vision**, **Auto Organizer**, and **PDF to Word (.docx)**, plus extensible `plugin.json` external command runners);
   - Heartbeats automatically aggregate node capabilities cluster-wide so any user can trigger plugins hosted anywhere on the LAN, while the scheduler routes jobs by data locality, concurrency slots, and CPU load and saves output artifacts into `插件产物/`.

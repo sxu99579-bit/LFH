@@ -29,8 +29,10 @@ import (
 	"time"
 
 	"lfh/internal/auth"
+	"lfh/internal/bridge"
 	"lfh/internal/clipboard"
 	"lfh/internal/cluster"
+	"lfh/internal/mcp"
 	"lfh/internal/plugins"
 	"lfh/internal/preview"
 	"lfh/internal/security"
@@ -56,8 +58,13 @@ type Server struct {
 	events       *EventHub
 	updater      *updater.Manager
 	limiter      *security.LoginLimiter
-	audit        *security.AuditLogger
-	plugins      *plugins.Manager
+	audit                *security.AuditLogger
+	plugins              *plugins.Manager
+	webhooks             *bridge.WebhookManager
+	verifyRunner         *bridge.VerifyRunner
+	ticketGuard          *bridge.TicketReplayGuard
+	ticketFallbackSecret string
+	mcpHandler           http.Handler
 	jobsMu       sync.RWMutex
 	jobs         []plugins.PluginJob
 	jobsPath     string
@@ -79,21 +86,30 @@ func New(authMgr *auth.Manager, store *storage.Store, clusterMgr *cluster.Manage
 	if err != nil {
 		return nil, err
 	}
+	wh, err := bridge.NewWebhookManager(store.DataDir())
+	if err != nil {
+		return nil, err
+	}
 	if clusterMgr != nil {
 		clusterMgr.SetPluginManager(pm)
 	}
 	srv := &Server{
-		auth:     authMgr,
-		store:    store,
-		cluster:  clusterMgr,
-		events:   NewEventHub(),
-		limiter:  security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
-		audit:    auditLog,
-		plugins:  pm,
-		jobsPath: filepath.Join(store.DataDir(), "plugin-jobs.json"),
-		webFS:    sub,
-		port:     port,
+		auth:         authMgr,
+		store:        store,
+		cluster:      clusterMgr,
+		events:       NewEventHub(),
+		limiter:      security.NewLoginLimiter(8, 5*time.Minute, 5*time.Minute),
+		audit:        auditLog,
+		plugins:      pm,
+		webhooks:     wh,
+		verifyRunner: bridge.NewVerifyRunner(),
+		ticketGuard:  bridge.NewTicketReplayGuard(),
+		jobsPath:     filepath.Join(store.DataDir(), "plugin-jobs.json"),
+		webFS:        sub,
+		port:         port,
 	}
+	srv.events.SetOnPublish(srv.dispatchWebhookForFileEvent)
+	srv.mcpHandler = mcp.NewServer(newServerMCPBackend(srv), version.Version)
 	srv.loadPluginJobs()
 	return srv, nil
 }
@@ -130,6 +146,15 @@ func (s *Server) getUpdater() *updater.Manager {
 	return s.updater
 }
 
+func (s *Server) getMCPHandler() http.Handler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mcpHandler == nil {
+		s.mcpHandler = mcp.NewServer(newServerMCPBackend(s), version.Version)
+	}
+	return s.mcpHandler
+}
+
 func (s *Server) PublishEvent(ev FileChangeEvent) {
 	if s.events != nil {
 		s.events.Publish(ev)
@@ -148,6 +173,12 @@ func (s *Server) PublishUpgrading(newVersion string) {
 func (s *Server) CloseEventStreams() {
 	if s.events != nil {
 		s.events.Close()
+	}
+	s.mu.RLock()
+	wh := s.webhooks
+	s.mu.RUnlock()
+	if wh != nil {
+		wh.Close()
 	}
 }
 
@@ -369,6 +400,9 @@ func sanitizeExposeHost(raw string) (string, error) {
 }
 
 func (s *Server) Handler() http.Handler {
+	if s.events != nil {
+		s.events.SetOnPublish(s.dispatchWebhookForFileEvent)
+	}
 	mux := http.NewServeMux()
 
 	// Internal node-to-node cluster endpoints (HMAC signed)
@@ -380,20 +414,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/cluster/files/{id}/meta", s.requireClusterAuth(s.handleClusterMeta))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/archive-entry", s.requireClusterAuth(s.handleClusterArchiveEntry))
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}", s.requireClusterAuth(s.handleClusterDelete))
+	mux.HandleFunc("POST /internal/cluster/files/batch-commit", s.requireClusterAuth(s.handleClusterBatchCommit))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/access", s.requireClusterAuth(s.handleClusterUpdateAccess))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/edit", s.requireClusterAuth(s.handleClusterEditFile))
+	mux.HandleFunc("POST /internal/cluster/files/{id}/patch", s.requireClusterAuth(s.handleClusterPatchFile))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/versions", s.requireClusterAuth(s.handleClusterNewVersion))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/versions/{ver}/download", s.requireClusterAuth(s.handleClusterDownloadVersion))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/versions/{ver}/restore", s.requireClusterAuth(s.handleClusterRestoreVersion))
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}/versions/{ver}", s.requireClusterAuth(s.handleClusterDeleteVersion))
+	mux.HandleFunc("GET /internal/cluster/files/{id}/lease", s.requireClusterAuth(s.handleClusterGetFileLease))
+	mux.HandleFunc("POST /internal/cluster/files/{id}/lease", s.requireClusterAuth(s.handleClusterAcquireFileLease))
+	mux.HandleFunc("DELETE /internal/cluster/files/{id}/lease", s.requireClusterAuth(s.handleClusterReleaseFileLease))
 	mux.HandleFunc("POST /internal/cluster/quota", s.requireClusterAuth(s.handleClusterSetQuota))
 	mux.HandleFunc("POST /internal/cluster/storage-dir", s.requireClusterAuth(s.handleClusterSetStorageDir))
 	mux.HandleFunc("POST /internal/cluster/clipboard", s.requireClusterAuth(s.handleClusterSetClipboard))
 	mux.HandleFunc("POST /internal/cluster/import-local", s.requireClusterAuth(s.handleClusterImportLocal))
 	mux.HandleFunc("GET /internal/cluster/mounts", s.requireClusterAuth(s.handleClusterListMounts))
 	mux.HandleFunc("POST /internal/cluster/mounts", s.requireClusterAuth(s.handleClusterAddMount))
+	mux.HandleFunc("PATCH /internal/cluster/mounts/{id}", s.requireClusterAuth(s.handleClusterUpdateMount))
 	mux.HandleFunc("DELETE /internal/cluster/mounts/{id}", s.requireClusterAuth(s.handleClusterRemoveMount))
 	mux.HandleFunc("POST /internal/cluster/mounts/{id}/sync", s.requireClusterAuth(s.handleClusterSyncMount))
+	mux.HandleFunc("POST /internal/cluster/mounts/{mountID}/verify/{presetID}", s.requireClusterAuth(s.handleClusterTriggerVerify))
+	mux.HandleFunc("POST /internal/cluster/bridge-event", s.requireClusterAuth(s.handleClusterBridgeEvent))
 	mux.HandleFunc("POST /internal/cluster/plugins/install", s.requireClusterAuth(s.handleClusterPluginInstall))
 	mux.HandleFunc("POST /internal/cluster/plugins/toggle", s.requireClusterAuth(s.handleClusterPluginToggle))
 	mux.HandleFunc("DELETE /internal/cluster/plugins/{id}", s.requireClusterAuth(s.handleClusterPluginUninstall))
@@ -417,13 +459,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.handleMe)
-	mux.HandleFunc("POST /api/password", s.requireAuth(s.handleChangePassword))
-	mux.HandleFunc("GET /api/token", s.requireAuth(s.handleGetToken))
-	mux.HandleFunc("POST /api/token", s.requireAuth(s.handleRegenerateToken))
-	mux.HandleFunc("DELETE /api/token", s.requireAuth(s.handleRevokeToken))
+	mux.HandleFunc("POST /api/password", s.requireHumanAuth(s.handleChangePassword))
+	mux.HandleFunc("GET /api/token", s.requireHumanAuth(s.handleGetToken))
+	mux.HandleFunc("POST /api/token", s.requireHumanAuth(s.handleRegenerateToken))
+	mux.HandleFunc("DELETE /api/token", s.requireHumanAuth(s.handleRevokeToken))
+	mux.HandleFunc("GET /api/agent-keys", s.requireHumanAuth(s.handleListAgentKeys))
+	mux.HandleFunc("POST /api/agent-keys", s.requireHumanAuth(s.handleCreateAgentKey))
+	mux.HandleFunc("PATCH /api/agent-keys/{id}", s.requireHumanAuth(s.handleUpdateAgentKey))
+	mux.HandleFunc("POST /api/agent-keys/{id}/toggle", s.requireHumanAuth(s.handleToggleAgentKey))
+	mux.HandleFunc("DELETE /api/agent-keys/{id}", s.requireHumanAuth(s.handleDeleteAgentKey))
 
-	mux.HandleFunc("GET /api/cluster", s.requireAuth(s.handleGetCluster))
-	mux.HandleFunc("GET /api/users/selectable", s.requireAuth(s.handleListSelectableUsers))
+	mux.HandleFunc("GET /api/cluster", s.requireHumanAuth(s.handleGetCluster))
+	mux.HandleFunc("GET /api/users/selectable", s.requirePrincipal(auth.ScopeRead, s.handleListSelectableUsers))
 	mux.HandleFunc("GET /api/admin/cluster/discovered", s.requireAdmin(s.handleAdminClusterDiscovered))
 	mux.HandleFunc("POST /api/admin/cluster/discover", s.requireAdmin(s.handleAdminClusterDiscover))
 	mux.HandleFunc("POST /api/admin/cluster/adopt-peer", s.requireAdmin(s.handleAdminClusterAdoptPeer))
@@ -441,8 +488,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/files/import-local", s.requireAdmin(s.handleAdminImportLocal))
 	mux.HandleFunc("GET /api/admin/mounts", s.requireAdmin(s.handleAdminListMounts))
 	mux.HandleFunc("POST /api/admin/mounts", s.requireAdmin(s.handleAdminAddMount))
+	mux.HandleFunc("PATCH /api/admin/mounts/{nodeID}/{mountID}", s.requireAdmin(s.handleAdminUpdateMount))
 	mux.HandleFunc("DELETE /api/admin/mounts/{nodeID}/{mountID}", s.requireAdmin(s.handleAdminRemoveMount))
 	mux.HandleFunc("POST /api/admin/mounts/{nodeID}/{mountID}/sync", s.requireAdmin(s.handleAdminSyncMount))
+	mux.HandleFunc("GET /api/admin/webhooks", s.requireAdmin(s.handleAdminListWebhooks))
+	mux.HandleFunc("POST /api/admin/webhooks", s.requireAdmin(s.handleAdminCreateWebhook))
+	mux.HandleFunc("PATCH /api/admin/webhooks/{id}", s.requireAdmin(s.handleAdminUpdateWebhook))
+	mux.HandleFunc("DELETE /api/admin/webhooks/{id}", s.requireAdmin(s.handleAdminDeleteWebhook))
+	mux.HandleFunc("POST /api/admin/webhooks/{id}/test", s.requireAdmin(s.handleAdminTestWebhook))
 	mux.HandleFunc("GET /api/admin/settings", s.requireAdmin(s.handleGetAdminSettings))
 	mux.HandleFunc("POST /api/admin/settings", s.requireAdmin(s.handleUpdateAdminSettings))
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.handleListUsers))
@@ -469,34 +522,48 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/plugins/install", s.requireAdmin(s.handleAdminPluginInstall))
 	mux.HandleFunc("POST /api/admin/plugins/toggle", s.requireAdmin(s.handleAdminPluginToggle))
 	mux.HandleFunc("DELETE /api/admin/plugins/{nodeID}/{pluginID}", s.requireAdmin(s.handleAdminPluginUninstall))
-	mux.HandleFunc("GET /api/plugins/capabilities", s.requireAuth(s.handlePluginCapabilities))
-	mux.HandleFunc("GET /api/plugins/jobs", s.requireAuth(s.handleListPluginJobs))
-	mux.HandleFunc("POST /api/plugins/jobs", s.requireAuth(s.handleRunPluginJob))
+	mux.HandleFunc("GET /api/plugins/capabilities", s.requireHumanAuth(s.handlePluginCapabilities))
+	mux.HandleFunc("GET /api/plugins/jobs", s.requireHumanAuth(s.handleListPluginJobs))
+	mux.HandleFunc("POST /api/plugins/jobs", s.requireHumanAuth(s.handleRunPluginJob))
 
-	mux.HandleFunc("GET /api/files", s.requireAuth(s.handleListFiles))
-	mux.HandleFunc("GET /api/summary", s.requireAuth(s.handleSummary))
-	mux.HandleFunc("GET /api/events", s.requireAuth(s.handleEvents))
-	mux.HandleFunc("POST /api/upload", s.requireAuth(s.handleUpload))
-	mux.HandleFunc("POST /api/shortcut/upload", s.requireAuth(s.handleShortcutUpload))
-	mux.HandleFunc("POST /api/uploads/init", s.requireAuth(s.handleUploadInit))
-	mux.HandleFunc("PUT /api/uploads/{uploadID}/chunk/{index}", s.requireAuth(s.handleUploadChunk))
-	mux.HandleFunc("POST /api/uploads/{uploadID}/complete", s.requireAuth(s.handleUploadComplete))
-	mux.HandleFunc("DELETE /api/uploads/{uploadID}", s.requireAuth(s.handleUploadCancel))
-	mux.HandleFunc("POST /api/files/create-txt", s.requireAuth(s.handleCreateTxtFile))
-	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.handleDownload))
-	mux.HandleFunc("GET /api/files/{id}/raw", s.requireAuth(s.handleRaw))
-	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.handlePreview))
-	mux.HandleFunc("GET /api/files/{id}/meta", s.requireAuth(s.handleFileMeta))
-	mux.HandleFunc("GET /api/files/{id}/archive-entry", s.requireAuth(s.handleArchiveEntry))
-	mux.HandleFunc("POST /api/files/{id}/access", s.requireAuth(s.handleUpdateFileAccess))
-	mux.HandleFunc("POST /api/files/{id}/edit", s.requireAuth(s.handleEditFile))
-	mux.HandleFunc("GET /api/files/{id}/versions", s.requireAuth(s.handleGetFileVersions))
-	mux.HandleFunc("POST /api/files/{id}/versions", s.requireAuth(s.handleUploadFileVersion))
-	mux.HandleFunc("GET /api/files/{id}/versions/{ver}/download", s.requireAuth(s.handleDownloadFileVersion))
-	mux.HandleFunc("POST /api/files/{id}/versions/{ver}/restore", s.requireAuth(s.handleRestoreFileVersion))
-	mux.HandleFunc("DELETE /api/files/{id}/versions/{ver}", s.requireAuth(s.handleDeleteFileVersion))
-	mux.HandleFunc("POST /api/files/{id}/extract", s.requireAuth(s.handleExtractArchive))
-	mux.HandleFunc("DELETE /api/files/{id}", s.requireAuth(s.handleDelete))
+	mux.HandleFunc("GET /api/files", s.requirePrincipal(auth.ScopeRead, s.handleListFiles))
+	mux.HandleFunc("GET /api/summary", s.requirePrincipal(auth.ScopeRead, s.handleSummary))
+	mux.HandleFunc("GET /api/events", s.requirePrincipal(auth.ScopeRead, s.handleEvents))
+	mux.HandleFunc("POST /api/upload", s.requirePrincipal(auth.ScopeWrite, s.handleUpload))
+	mux.HandleFunc("POST /api/shortcut/upload", s.requirePrincipal(auth.ScopeWrite, s.handleShortcutUpload))
+	mux.HandleFunc("POST /api/uploads/init", s.requirePrincipal(auth.ScopeWrite, s.handleUploadInit))
+	mux.HandleFunc("PUT /api/uploads/{uploadID}/chunk/{index}", s.requirePrincipal(auth.ScopeWrite, s.handleUploadChunk))
+	mux.HandleFunc("POST /api/uploads/{uploadID}/complete", s.requirePrincipal(auth.ScopeWrite, s.handleUploadComplete))
+	mux.HandleFunc("DELETE /api/uploads/{uploadID}", s.requirePrincipal(auth.ScopeWrite, s.handleUploadCancel))
+	mux.HandleFunc("POST /api/files/create-txt", s.requirePrincipal(auth.ScopeWrite, s.handleCreateTxtFile))
+	mux.HandleFunc("GET /api/files/{id}/download", s.requirePrincipal(auth.ScopeRead, s.handleDownload))
+	mux.HandleFunc("GET /api/files/{id}/raw", s.requirePrincipal(auth.ScopeRead, s.handleRaw))
+	mux.HandleFunc("GET /api/files/{id}/preview", s.requirePrincipal(auth.ScopeRead, s.handlePreview))
+	mux.HandleFunc("GET /api/files/{id}/meta", s.requirePrincipal(auth.ScopeRead, s.handleFileMeta))
+	mux.HandleFunc("GET /api/files/{id}/archive-entry", s.requirePrincipal(auth.ScopeRead, s.handleArchiveEntry))
+	mux.HandleFunc("POST /api/files/{id}/access", s.requirePrincipal(auth.ScopeShare, s.handleUpdateFileAccess))
+	mux.HandleFunc("POST /api/files/{id}/edit", s.requirePrincipal(auth.ScopeWrite, s.handleEditFile))
+	mux.HandleFunc("POST /api/files/{id}/patch", s.requirePrincipal(auth.ScopeWrite, s.handlePatchFile))
+	mux.HandleFunc("POST /api/files/batch-commit", s.requirePrincipal(auth.ScopeWrite, s.handleBatchCommit))
+	mux.HandleFunc("GET /api/files/{id}/lease", s.requirePrincipal(auth.ScopeRead, s.handleGetFileLease))
+	mux.HandleFunc("POST /api/files/{id}/lease", s.requirePrincipal(auth.ScopeWrite, s.handleAcquireFileLease))
+	mux.HandleFunc("DELETE /api/files/{id}/lease", s.requirePrincipal(auth.ScopeWrite, s.handleReleaseFileLease))
+	mux.HandleFunc("GET /api/files/{id}/versions", s.requirePrincipal(auth.ScopeRead, s.handleGetFileVersions))
+	mux.HandleFunc("POST /api/files/{id}/versions", s.requirePrincipal(auth.ScopeWrite, s.handleUploadFileVersion))
+	mux.HandleFunc("GET /api/files/{id}/versions/{ver}/download", s.requirePrincipal(auth.ScopeRead, s.handleDownloadFileVersion))
+	mux.HandleFunc("POST /api/files/{id}/versions/{ver}/restore", s.requirePrincipal(auth.ScopeWrite, s.handleRestoreFileVersion))
+	mux.HandleFunc("DELETE /api/files/{id}/versions/{ver}", s.requirePrincipal(auth.ScopeDelete, s.handleDeleteFileVersion))
+	mux.HandleFunc("POST /api/files/{id}/extract", s.requirePrincipal(auth.ScopeWrite, s.handleExtractArchive))
+	mux.HandleFunc("DELETE /api/files/{id}", s.requirePrincipal(auth.ScopeDelete, s.handleDelete))
+
+	mcpH := s.getMCPHandler()
+	mux.Handle("POST /mcp", mcpH)
+	mux.Handle("GET /mcp", mcpH)
+	mux.Handle("DELETE /mcp", mcpH)
+
+	mux.HandleFunc("/s/ticket", s.handleServeTicket)
+	mux.HandleFunc("POST /api/tickets", s.requirePrincipal("", s.handleIssueTicket))
+	mux.HandleFunc("POST /api/mounts/{mountID}/verify/{presetID}", s.requirePrincipal(auth.ScopeVerify, s.handleTriggerVerify))
 
 	fileServer := http.FileServer(http.FS(s.webFS))
 	mux.HandleFunc("GET /mobile", s.handleServeMobileHTML)
@@ -526,6 +593,7 @@ func (s *Server) Handler() http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") ||
+			r.URL.Path == "/s/ticket" ||
 			r.URL.Path == "/api/info" ||
 			r.URL.Path == "/api/cluster/adopt" ||
 			r.URL.Path == "/worker" ||
@@ -595,16 +663,20 @@ func (s *Server) requireAuth(next authedHandler) http.HandlerFunc {
 
 func (s *Server) requireAdmin(next authedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		u, ok := s.auth.CurrentUser(r)
-		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请先登录"})
+		p, err := s.auth.CurrentPrincipal(r)
+		if err != nil {
+			writePrincipalAuthError(w, err)
 			return
 		}
-		if u.Role != "admin" {
+		if p.IsAgent {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥禁止访问管理员接口"})
+			return
+		}
+		if p.User.Role != "admin" {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅管理员可执行此操作"})
 			return
 		}
-		next(w, r, u)
+		next(w, r, p.User)
 	}
 }
 
@@ -661,16 +733,19 @@ func (s *Server) handleClusterUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fh := headers[0]
-	if err := s.cluster.CanAcceptLocal(fh.Size); err != nil {
-		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-		return
+	folderPath := storage.SanitizeFolderPath(r.FormValue("folder_path"))
+	_, _, inLocalMount := s.store.FindMountByFolderPath(folderPath)
+	if !inLocalMount {
+		if err := s.cluster.CanAcceptLocal(fh.Size); err != nil {
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	uploader := truncateRunes(strings.TrimSpace(r.FormValue("uploader")), 64)
 	if uploader == "" {
 		uploader = "unknown"
 	}
-	folderPath := storage.SanitizeFolderPath(r.FormValue("folder_path"))
 	dev := storage.DeviceInfo{
 		FP:     truncateRunes(strings.TrimSpace(r.FormValue("device_fp")), 64),
 		Name:   truncateRunes(strings.TrimSpace(r.FormValue("device_name")), 80),
@@ -685,10 +760,20 @@ func (s *Server) handleClusterUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	allowedUsers := parseAllowedUsersForm(r.MultipartForm.Value["allowed_users"])
 	versionNote := strings.TrimSpace(r.FormValue("version_note"))
-	rec, saveErr := s.store.SaveUploadWithVersionNote(fh.Filename, folderPath, versionNote, uploader, allowedUsers, dev, f)
+	expectedVer, verErr := parseOptionalIntString(r.FormValue("expected_version"))
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := storage.WriteConcurrencyOptions{
+		ExpectedVersion: expectedVer,
+		ActorKeyID:      strings.TrimSpace(r.FormValue("actor_key_id")),
+		ForceLease:      parseBoolFlag(r.FormValue("force_lease")),
+	}
+	rec, saveErr := s.store.SaveUploadWithConcurrency(fh.Filename, folderPath, versionNote, uploader, allowedUsers, dev, f, conc)
 	_ = f.Close()
 	if saveErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存文件失败: " + saveErr.Error()})
+		writeStorageActionError(w, saveErr, http.StatusInternalServerError)
 		return
 	}
 
@@ -723,8 +808,25 @@ func (s *Server) handleClusterArchiveEntry(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleClusterDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.store.Delete(id); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	expectedVer, verErr := parseOptionalIntString(r.Header.Get("X-Expected-Version"))
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := storage.WriteConcurrencyOptions{
+		ExpectedVersion: expectedVer,
+		ActorKeyID:      strings.TrimSpace(r.Header.Get("X-Actor-Key-ID")),
+		ForceLease:      parseBoolFlag(r.Header.Get("X-Force-Lease")),
+	}
+	if err := s.store.DeleteWithConcurrency(id, conc); err != nil {
+		if writeConcurrencyError(w, err) {
+			return
+		}
+		if strings.Contains(err.Error(), "不存在") {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeStorageActionError(w, err, http.StatusInternalServerError)
 		return
 	}
 	s.cluster.TriggerHeartbeat()
@@ -742,6 +844,16 @@ func (s *Server) handleClusterNewVersion(w http.ResponseWriter, r *http.Request)
 		uploader = "unknown"
 	}
 	note := r.FormValue("note")
+	expectedVer, verErr := parseOptionalIntString(r.FormValue("expected_version"))
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := storage.WriteConcurrencyOptions{
+		ExpectedVersion: expectedVer,
+		ActorKeyID:      strings.TrimSpace(r.FormValue("actor_key_id")),
+		ForceLease:      parseBoolFlag(r.FormValue("force_lease")),
+	}
 	dev := storage.DeviceInfo{
 		FP:     r.FormValue("device_fp"),
 		Name:   r.FormValue("device_name"),
@@ -753,9 +865,12 @@ func (s *Server) handleClusterNewVersion(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未收到文件"})
 		return
 	}
-	if err := s.cluster.CanAcceptLocal(fh.Size); err != nil {
-		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-		return
+	curRec, _, curExists := s.store.Get(id)
+	if !curExists || curRec.StorageMode != storage.StorageModeMount {
+		if err := s.cluster.CanAcceptLocal(fh.Size); err != nil {
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	f, err := fh.Open()
 	if err != nil {
@@ -763,10 +878,10 @@ func (s *Server) handleClusterNewVersion(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取上传文件失败"})
 		return
 	}
-	rec, saveErr := s.store.SaveNewVersion(id, fh.Filename, note, uploader, dev, f)
+	rec, saveErr := s.store.SaveNewVersionWithConcurrency(id, fh.Filename, note, storage.MethodVersionUpload, uploader, dev, f, conc)
 	_ = f.Close()
 	if saveErr != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": saveErr.Error()})
+		writeStorageActionError(w, saveErr, http.StatusBadRequest)
 		return
 	}
 	rec.NodeID = s.cluster.NodeID()
@@ -780,13 +895,16 @@ func (s *Server) handleClusterNewVersion(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleClusterEditFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		Content      string `json:"content"`
-		Note         string `json:"note"`
-		Uploader     string `json:"uploader"`
-		DeviceFP     string `json:"device_fp"`
-		DeviceName   string `json:"device_name"`
-		DeviceIP     string `json:"device_ip"`
-		DeviceDetail string `json:"device_detail"`
+		Content         string `json:"content"`
+		Note            string `json:"note"`
+		Uploader        string `json:"uploader"`
+		DeviceFP        string `json:"device_fp"`
+		DeviceName      string `json:"device_name"`
+		DeviceIP        string `json:"device_ip"`
+		DeviceDetail    string `json:"device_detail"`
+		ExpectedVersion *int   `json:"expected_version"`
+		ActorKeyID      string `json:"actor_key_id"`
+		ForceLease      bool   `json:"force_lease"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析编辑内容失败"})
@@ -801,9 +919,11 @@ func (s *Server) handleClusterEditFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "该文件类型不支持在线文本编辑"})
 		return
 	}
-	if err := s.cluster.CanAcceptLocal(int64(len(req.Content))); err != nil {
-		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-		return
+	if rec.StorageMode != storage.StorageModeMount {
+		if err := s.cluster.CanAcceptLocal(int64(len(req.Content))); err != nil {
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	uploader := strings.TrimSpace(req.Uploader)
 	if uploader == "" {
@@ -815,9 +935,14 @@ func (s *Server) handleClusterEditFile(w http.ResponseWriter, r *http.Request) {
 		IP:     req.DeviceIP,
 		Detail: req.DeviceDetail,
 	}
-	updated, err := s.store.SaveEditedText(id, req.Content, req.Note, uploader, dev)
+	conc := storage.WriteConcurrencyOptions{
+		ExpectedVersion: req.ExpectedVersion,
+		ActorKeyID:      strings.TrimSpace(req.ActorKeyID),
+		ForceLease:      req.ForceLease,
+	}
+	updated, err := s.store.SaveEditedTextWithConcurrency(id, req.Content, req.Note, uploader, dev, conc)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeStorageActionError(w, err, http.StatusBadRequest)
 		return
 	}
 	updated.NodeID = s.cluster.NodeID()
@@ -846,12 +971,15 @@ func (s *Server) handleClusterRestoreVersion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		Note         string `json:"note"`
-		Uploader     string `json:"uploader"`
-		DeviceFP     string `json:"device_fp"`
-		DeviceName   string `json:"device_name"`
-		DeviceIP     string `json:"device_ip"`
-		DeviceDetail string `json:"device_detail"`
+		Note            string `json:"note"`
+		Uploader        string `json:"uploader"`
+		DeviceFP        string `json:"device_fp"`
+		DeviceName      string `json:"device_name"`
+		DeviceIP        string `json:"device_ip"`
+		DeviceDetail    string `json:"device_detail"`
+		ExpectedVersion *int   `json:"expected_version"`
+		ActorKeyID      string `json:"actor_key_id"`
+		ForceLease      bool   `json:"force_lease"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	dev := storage.DeviceInfo{
@@ -860,9 +988,14 @@ func (s *Server) handleClusterRestoreVersion(w http.ResponseWriter, r *http.Requ
 		IP:     req.DeviceIP,
 		Detail: req.DeviceDetail,
 	}
-	rec, err := s.store.RestoreVersionByUser(id, ver, req.Note, req.Uploader, dev)
+	conc := storage.WriteConcurrencyOptions{
+		ExpectedVersion: req.ExpectedVersion,
+		ActorKeyID:      strings.TrimSpace(req.ActorKeyID),
+		ForceLease:      req.ForceLease,
+	}
+	rec, err := s.store.RestoreVersionWithConcurrency(id, ver, req.Note, req.Uploader, dev, conc)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeStorageActionError(w, err, http.StatusBadRequest)
 		return
 	}
 	rec.NodeID = s.cluster.NodeID()
@@ -1054,16 +1187,33 @@ func (s *Server) handleClusterListMounts(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleClusterAddMount(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DirPath      string   `json:"dir_path"`
-		Alias        string   `json:"alias"`
-		AddedBy      string   `json:"added_by"`
-		AllowedUsers []string `json:"allowed_users"`
+		DirPath        string                 `json:"dir_path"`
+		Alias          string                 `json:"alias"`
+		AddedBy        string                 `json:"added_by"`
+		AllowedUsers   []string               `json:"allowed_users"`
+		Writable       bool                   `json:"writable"`
+		ShadowBackup   *bool                  `json:"shadow_backup"`
+		IgnorePatterns *[]string              `json:"ignore_patterns"`
+		IgnoreSet      bool                   `json:"ignore_set"`
+		MaxFileBytes   int64                  `json:"max_file_bytes"`
+		VerifyPresets  []storage.VerifyPreset `json:"verify_presets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	entry, added, err := s.store.AddMount(req.DirPath, req.Alias, req.AddedBy, req.AllowedUsers)
+	opts := storage.AddMountOptions{
+		Writable:      req.Writable,
+		ShadowBackup:  req.ShadowBackup,
+		IgnoreSet:     req.IgnoreSet,
+		MaxFileBytes:  req.MaxFileBytes,
+		VerifyPresets: req.VerifyPresets,
+	}
+	if req.IgnorePatterns != nil {
+		opts.IgnorePatterns = *req.IgnorePatterns
+		opts.IgnoreSet = true
+	}
+	entry, added, err := s.store.AddMountWithOptions(req.DirPath, req.Alias, req.AddedBy, req.AllowedUsers, opts)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1703,11 +1853,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	u, ok := s.auth.CurrentUser(r)
-	if !ok {
+	p, err := s.auth.CurrentPrincipal(r)
+	if err != nil {
+		if errors.Is(err, auth.ErrRateLimited) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 		return
 	}
+	u := p.User
+	isHumanAdmin := u.Role == "admin" && !p.IsAgent
 	settings := s.auth.Settings()
 	_, activeAddrs, primaryURL := s.allConfiguredAddrs()
 	entryURL := s.cluster.EntryURL()
@@ -1735,13 +1891,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			"allowed_exts": settings.AllowedExts,
 			"blocked_exts": settings.BlockedExts,
 		},
-		"pool": s.cluster.PoolSummaryForRole(u.Role == "admin"),
+		"pool": s.cluster.PoolSummaryForRole(isHumanAdmin),
 	}
-	if u.Role == "admin" {
+	if isHumanAdmin {
 		resp["pending_users"] = s.auth.PendingCount()
 		if up := s.getUpdater(); up != nil {
 			resp["update_status"] = up.Status()
 		}
+	}
+	if p.IsAgent && p.AgentKey != nil {
+		resp["is_agent"] = true
+		resp["agent_key"] = p.AgentKey
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -2829,7 +2989,7 @@ func (s *Server) handleAdminClusterUpgradeNodes(w http.ResponseWriter, r *http.R
 	})
 }
 
-func (s *Server) handleListSelectableUsers(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleListSelectableUsers(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users": s.auth.ListActiveUsers(),
 	})
@@ -2946,16 +3106,36 @@ func (s *Server) handleAdminListMounts(w http.ResponseWriter, r *http.Request, u
 
 func (s *Server) handleAdminAddMount(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	var req struct {
-		NodeID       string   `json:"node_id"`
-		DirPath      string   `json:"dir_path"`
-		Alias        string   `json:"alias"`
-		AllowedUsers []string `json:"allowed_users"`
+		NodeID         string                 `json:"node_id"`
+		DirPath        string                 `json:"dir_path"`
+		Alias          string                 `json:"alias"`
+		AllowedUsers   []string               `json:"allowed_users"`
+		Writable       bool                   `json:"writable"`
+		ShadowBackup   *bool                  `json:"shadow_backup"`
+		IgnorePatterns *[]string              `json:"ignore_patterns"`
+		MaxFileBytes   int64                  `json:"max_file_bytes"`
+		VerifyPresets  []storage.VerifyPreset `json:"verify_presets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	entry, added, err := s.cluster.AddNodeMount(req.NodeID, req.DirPath, req.Alias, u.Username, req.AllowedUsers)
+	cleanAllowed, userErr := s.auth.ValidateExistingUsers(req.AllowedUsers)
+	if userErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
+		return
+	}
+	opts := storage.AddMountOptions{
+		Writable:      req.Writable,
+		ShadowBackup:  req.ShadowBackup,
+		MaxFileBytes:  req.MaxFileBytes,
+		VerifyPresets: req.VerifyPresets,
+	}
+	if req.IgnorePatterns != nil {
+		opts.IgnorePatterns = *req.IgnorePatterns
+		opts.IgnoreSet = true
+	}
+	entry, added, err := s.cluster.AddNodeMountWithOptions(req.NodeID, req.DirPath, req.Alias, u.Username, cleanAllowed, opts)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -3415,9 +3595,23 @@ func (s *Server) findAccessibleFile(id string, u auth.PublicUser) (rec storage.F
 	return rPeer, "", p, false, http.StatusOK, ""
 }
 
-func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) filterAccessibleForPrincipal(records []storage.FileRecord, p auth.Principal) []storage.FileRecord {
+	accessible := storage.FilterAccessibleRecords(records, p.User.Username, p.User.Role)
+	if !p.IsAgent {
+		return accessible
+	}
+	out := make([]storage.FileRecord, 0, len(accessible))
+	for _, rec := range accessible {
+		if p.CanReadFolder(rec.FolderPath) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	q := r.URL.Query()
-	accessible := storage.FilterAccessibleRecords(s.cluster.AllClusterFiles(), u.Username, u.Role)
+	accessible := s.filterAccessibleForPrincipal(s.cluster.AllClusterFiles(), p)
 	list := storage.FilterRecords(
 		accessible,
 		q.Get("category"),
@@ -3427,12 +3621,12 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, u auth.
 		q.Get("node"),
 		q.Get("q"),
 	)
-	writeJSON(w, http.StatusOK, map[string]any{"files": s.sanitizeRecordsForUser(list, u)})
+	writeJSON(w, http.StatusOK, map[string]any{"files": s.sanitizeRecordsForPrincipal(list, p)})
 }
 
-func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	q := r.URL.Query()
-	accessible := storage.FilterAccessibleRecords(s.cluster.AllClusterFiles(), u.Username, u.Role)
+	accessible := s.filterAccessibleForPrincipal(s.cluster.AllClusterFiles(), p)
 	sum := storage.SummarizeRecords(
 		accessible,
 		q.Get("category"),
@@ -3442,7 +3636,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, u auth.Pu
 	writeJSON(w, http.StatusOK, sum)
 }
 
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析上传表单失败: " + err.Error()})
 		return
@@ -3463,29 +3658,42 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 	}
 
 	rawAllowed := parseAllowedUsersForm(r.MultipartForm.Value["allowed_users"])
-	allowedUsers, userErr := s.auth.ValidateExistingUsers(rawAllowed)
+	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(rawAllowed)
+	if resolveErr != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": resolveErr.Error()})
+		return
+	}
+	allowedUsers, userErr := s.auth.ValidateExistingUsers(resolvedAllowed)
 	if userErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
 		return
 	}
 
-	dev := extractDeviceInfo(r)
+	dev := extractDeviceInfoForPrincipal(r, p)
+	expectedVer, verErr := resolveExpectedVersion(nil, r.FormValue("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, parseBoolFlag(r.FormValue("force_lease")))
+	versionNote := strings.TrimSpace(r.FormValue("version_note"))
+	if versionNote == "" {
+		versionNote = strings.TrimSpace(r.FormValue("note"))
+	}
+
 	targetPref := strings.TrimSpace(r.FormValue("target_node"))
-	if targetPref == "" || u.Role != "admin" {
+	if targetPref == "" || u.Role != "admin" || p.IsAgent {
 		targetPref = "auto"
 	}
 	relPaths := r.MultipartForm.Value["relative_paths"]
 	fallbackFolder := storage.SanitizeFolderPath(r.FormValue("folder_path"))
 
-	for _, fh := range headers {
+	folders := make([]string, len(headers))
+	for i, fh := range headers {
 		if err := s.auth.CheckUploadAllowed(fh.Filename); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-	}
-
-	uploaded := make([]storage.FileRecord, 0, len(headers))
-	for i, fh := range headers {
 		folderPath := fallbackFolder
 		if i < len(relPaths) && strings.TrimSpace(relPaths[i]) != "" {
 			cleanRel := strings.ReplaceAll(strings.TrimSpace(relPaths[i]), "\\", "/")
@@ -3496,26 +3704,51 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 				}
 			}
 		}
+		if p.IsAgent && !p.CanWriteFolder(folderPath) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入目录: " + folderPath})
+			return
+		}
+		folders[i] = folderPath
+	}
 
-		effectiveTargetPref := targetPref
-		if effectiveTargetPref == "auto" {
-			cleanBase := filepath.Base(strings.TrimSpace(fh.Filename))
-			for _, existing := range s.cluster.AllClusterFiles() {
-				if existing.NodeOnline && existing.NodeID != "" &&
-					strings.EqualFold(existing.Name, cleanBase) &&
-					existing.FolderPath == folderPath {
-					if _, err := s.cluster.SelectUploadTarget(existing.NodeID, fh.Size); err == nil {
-						effectiveTargetPref = existing.NodeID
+	uploaded := make([]storage.FileRecord, 0, len(headers))
+	for i, fh := range headers {
+		folderPath := folders[i]
+
+		mountView, _, mountPeer, inMount := s.cluster.FindMountByFolderPath(folderPath)
+		var target cluster.NodeStatus
+		if inMount {
+			if mountView.IsSelf {
+				target = cluster.NodeStatus{IsSelf: true}
+			} else {
+				if !mountPeer.Online {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "挂载所在存储节点当前离线"})
+					return
+				}
+				target = mountPeer
+			}
+		} else {
+			effectiveTargetPref := targetPref
+			if effectiveTargetPref == "auto" {
+				cleanBase := filepath.Base(strings.TrimSpace(fh.Filename))
+				for _, existing := range s.cluster.AllClusterFiles() {
+					if existing.NodeOnline && existing.NodeID != "" &&
+						strings.EqualFold(existing.Name, cleanBase) &&
+						existing.FolderPath == folderPath {
+						if _, err := s.cluster.SelectUploadTarget(existing.NodeID, fh.Size); err == nil {
+							effectiveTargetPref = existing.NodeID
+						}
+						break
 					}
-					break
 				}
 			}
-		}
 
-		target, err := s.cluster.SelectUploadTarget(effectiveTargetPref, fh.Size)
-		if err != nil {
-			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-			return
+			var err error
+			target, err = s.cluster.SelectUploadTarget(effectiveTargetPref, fh.Size)
+			if err != nil {
+				writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 
 		f, err := fh.Open()
@@ -3525,15 +3758,17 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 		}
 
 		if target.IsSelf {
-			if capErr := s.cluster.CanAcceptLocal(fh.Size); capErr != nil {
-				_ = f.Close()
-				writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": capErr.Error()})
-				return
+			if !inMount {
+				if capErr := s.cluster.CanAcceptLocal(fh.Size); capErr != nil {
+					_ = f.Close()
+					writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": capErr.Error()})
+					return
+				}
 			}
-			rec, saveErr := s.store.SaveUploadWithOptions(fh.Filename, folderPath, u.Username, allowedUsers, dev, f)
+			rec, saveErr := s.store.SaveUploadWithConcurrency(fh.Filename, folderPath, versionNote, u.Username, allowedUsers, dev, f, conc)
 			_ = f.Close()
 			if saveErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存文件失败: " + saveErr.Error()})
+				writeStorageActionError(w, saveErr, http.StatusInternalServerError)
 				return
 			}
 			rec.NodeID = s.cluster.NodeID()
@@ -3542,17 +3777,20 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, u auth.Pub
 			rec.NodeOnline = true
 			uploaded = append(uploaded, rec)
 		} else {
-			rec, proxyErr := s.cluster.ProxyUpload(target, fh.Filename, folderPath, f, u.Username, allowedUsers, dev)
+			rec, proxyErr := s.cluster.ProxyUploadWithConcurrency(target, fh.Filename, folderPath, f, u.Username, allowedUsers, dev, conc)
 			_ = f.Close()
 			if proxyErr != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": proxyErr.Error()})
+				writeStorageActionError(w, proxyErr, http.StatusBadGateway)
 				return
 			}
 			uploaded = append(uploaded, rec)
 		}
 	}
-	s.publishRecordChange("upload", u.Username, uploaded, allowedUsers)
-	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": s.sanitizeRecordsForUser(uploaded, u)})
+	if p.IsAgent && len(uploaded) > 0 {
+		s.logAudit(r, u.Username, "agent_file_upload", uploaded[0].Name, "ok", fmt.Sprintf("%s count=%d", p.ActorLabel(), len(uploaded)))
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), uploaded, allowedUsers)
+	writeJSON(w, http.StatusCreated, map[string]any{"uploaded": s.sanitizeRecordsForPrincipal(uploaded, p)})
 }
 
 func (s *Server) resolveUploadTargetPref(filename, folderPath, requestedPref string, size int64, role string) string {
@@ -3585,30 +3823,68 @@ func (s *Server) dispatchUploadStream(
 	dev storage.DeviceInfo,
 	r io.Reader,
 ) (storage.FileRecord, int, string) {
-	effectivePref := s.resolveUploadTargetPref(filename, folderPath, targetPref, size, u.Role)
-	target, err := s.cluster.SelectUploadTarget(effectivePref, size)
+	rec, code, err := s.dispatchUploadStreamWithConcurrency(auth.Principal{User: u}, filename, folderPath, versionNote, size, targetPref, allowedUsers, dev, r, storage.WriteConcurrencyOptions{})
 	if err != nil {
-		return storage.FileRecord{}, http.StatusInsufficientStorage, err.Error()
+		return storage.FileRecord{}, code, err.Error()
+	}
+	return rec, code, ""
+}
+
+func (s *Server) dispatchUploadStreamWithConcurrency(
+	p auth.Principal,
+	filename, folderPath, versionNote string,
+	size int64,
+	targetPref string,
+	allowedUsers []string,
+	dev storage.DeviceInfo,
+	r io.Reader,
+	conc storage.WriteConcurrencyOptions,
+) (storage.FileRecord, int, error) {
+	u := p.User
+	role := u.Role
+	if p.IsAgent {
+		role = "user"
+	}
+	mountView, _, mountPeer, inMount := s.cluster.FindMountByFolderPath(folderPath)
+	var target cluster.NodeStatus
+	if inMount {
+		if mountView.IsSelf {
+			target = cluster.NodeStatus{IsSelf: true}
+		} else {
+			if !mountPeer.Online {
+				return storage.FileRecord{}, http.StatusServiceUnavailable, errors.New("挂载所在存储节点当前离线")
+			}
+			target = mountPeer
+		}
+	} else {
+		effectivePref := s.resolveUploadTargetPref(filename, folderPath, targetPref, size, role)
+		var err error
+		target, err = s.cluster.SelectUploadTarget(effectivePref, size)
+		if err != nil {
+			return storage.FileRecord{}, http.StatusInsufficientStorage, err
+		}
 	}
 	if target.IsSelf {
-		if capErr := s.cluster.CanAcceptLocal(size); capErr != nil {
-			return storage.FileRecord{}, http.StatusInsufficientStorage, capErr.Error()
+		if !inMount {
+			if capErr := s.cluster.CanAcceptLocal(size); capErr != nil {
+				return storage.FileRecord{}, http.StatusInsufficientStorage, capErr
+			}
 		}
-		rec, saveErr := s.store.SaveUploadWithVersionNote(filename, folderPath, versionNote, u.Username, allowedUsers, dev, r)
+		rec, saveErr := s.store.SaveUploadWithConcurrency(filename, folderPath, versionNote, u.Username, allowedUsers, dev, r, conc)
 		if saveErr != nil {
-			return storage.FileRecord{}, http.StatusInternalServerError, "保存文件失败: " + saveErr.Error()
+			return storage.FileRecord{}, http.StatusInternalServerError, saveErr
 		}
 		rec.NodeID = s.cluster.NodeID()
 		rec.NodeName = s.cluster.NodeName()
 		rec.NodeOS = runtime.GOOS
 		rec.NodeOnline = true
-		return rec, http.StatusCreated, ""
+		return rec, http.StatusCreated, nil
 	}
-	rec, proxyErr := s.cluster.ProxyUpload(target, filename, folderPath, r, u.Username, allowedUsers, dev)
+	rec, proxyErr := s.cluster.ProxyUploadWithConcurrency(target, filename, folderPath, r, u.Username, allowedUsers, dev, conc)
 	if proxyErr != nil {
-		return storage.FileRecord{}, http.StatusBadGateway, proxyErr.Error()
+		return storage.FileRecord{}, http.StatusBadGateway, proxyErr
 	}
-	return rec, http.StatusCreated, ""
+	return rec, http.StatusCreated, nil
 }
 
 func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
@@ -3709,16 +3985,32 @@ func extractShortcutDeviceInfo(r *http.Request) storage.DeviceInfo {
 	}
 }
 
-func (s *Server) handleShortcutUpload(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleShortcutUpload(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	ctHeader := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	if strings.HasPrefix(ctHeader, "multipart/form-data") {
-		s.handleUpload(w, r, u)
+		s.handleUpload(w, r, p)
 		return
 	}
 
-	dev := extractShortcutDeviceInfo(r)
+	dev := applyAgentDeviceInfo(extractShortcutDeviceInfo(r), p)
 	q := r.URL.Query()
 	folderPath := storage.SanitizeFolderPath(q.Get("folder"))
+	if p.IsAgent && !p.CanWriteFolder(folderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
+		return
+	}
+	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(nil)
+	if resolveErr != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": resolveErr.Error()})
+		return
+	}
+	allowedUsers, userErr := s.auth.ValidateExistingUsers(resolvedAllowed)
+	if userErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
+		return
+	}
+
 	rawName := strings.TrimSpace(q.Get("name"))
 	if rawName == "" {
 		rawName = decodeHeaderValue(r.Header.Get("X-Filename"))
@@ -3775,20 +4067,31 @@ func (s *Server) handleShortcutUpload(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 
-	rec, code, msg := s.dispatchUploadStream(u, cleanBase, folderPath, "快捷指令上传", sz, "auto", nil, dev, tmp)
-	if code != http.StatusCreated {
-		writeJSON(w, code, map[string]string{"error": msg})
+	expectedVer, verErr := resolveExpectedVersion(nil, q.Get("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
 		return
 	}
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, nil)
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, parseBoolFlag(q.Get("force_lease")))
+
+	rec, code, dispatchErr := s.dispatchUploadStreamWithConcurrency(p, cleanBase, folderPath, "快捷指令上传", sz, "auto", allowedUsers, dev, tmp, conc)
+	if code != http.StatusCreated {
+		writeStorageActionError(w, dispatchErr, code)
+		return
+	}
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_upload", rec.Name, "ok", p.ActorLabel())
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{rec}, allowedUsers)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"ok":      true,
-		"file":    s.sanitizeRecordForUser(rec, u),
+		"file":    s.sanitizeRecordForPrincipal(rec, p),
 		"message": "已上传: " + rec.Name,
 	})
 }
 
-func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	var req struct {
 		Name         string   `json:"name"`
 		FolderPath   string   `json:"folder_path"`
@@ -3811,33 +4114,45 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, u auth
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	allowedUsers, userErr := s.auth.ValidateExistingUsers(req.AllowedUsers)
+	folderPath := storage.SanitizeFolderPath(req.FolderPath)
+	if p.IsAgent && !p.CanWriteFolder(folderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
+		return
+	}
+	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(req.AllowedUsers)
+	if resolveErr != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": resolveErr.Error()})
+		return
+	}
+	allowedUsers, userErr := s.auth.ValidateExistingUsers(resolvedAllowed)
 	if userErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
 		return
 	}
-	folderPath := storage.SanitizeFolderPath(req.FolderPath)
-	dev := extractDeviceInfo(r)
+	dev := extractDeviceInfoForPrincipal(r, p)
 	targetPref := strings.TrimSpace(req.TargetNode)
-	if targetPref == "" || u.Role != "admin" {
+	if targetPref == "" || u.Role != "admin" || p.IsAgent {
 		targetPref = "auto"
 	}
 
 	// Instant upload (deduplicated copy) if an intact local file already matches file_sha256.
-	if cleanSHA := strings.TrimSpace(req.FileSHA256); cleanSHA != "" {
-		if matchRec, matchPath, ok := s.store.FindBySHA256(cleanSHA); ok && matchRec.Size == req.FileSize {
-			if f, openErr := os.Open(matchPath); openErr == nil {
-				rec, statusCode, errMsg := s.dispatchUploadStream(u, name, folderPath, "SHA-256 秒传", req.FileSize, targetPref, allowedUsers, dev, f)
-				_ = f.Close()
-				if statusCode == http.StatusCreated {
-					s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, allowedUsers)
-					writeJSON(w, http.StatusCreated, map[string]any{
-						"instant": true,
-						"file":    s.sanitizeRecordForUser(rec, u),
-					})
-					return
+	// Skip cross-folder SHA-256 probing for scoped Agents.
+	if !p.IsAgent {
+		if cleanSHA := strings.TrimSpace(req.FileSHA256); cleanSHA != "" {
+			if matchRec, matchPath, ok := s.store.FindBySHA256(cleanSHA); ok && matchRec.Size == req.FileSize {
+				if f, openErr := os.Open(matchPath); openErr == nil {
+					rec, statusCode, errMsg := s.dispatchUploadStream(u, name, folderPath, "SHA-256 秒传", req.FileSize, targetPref, allowedUsers, dev, f)
+					_ = f.Close()
+					if statusCode == http.StatusCreated {
+						s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, allowedUsers)
+						writeJSON(w, http.StatusCreated, map[string]any{
+							"instant": true,
+							"file":    s.sanitizeRecordForPrincipal(rec, p),
+						})
+						return
+					}
+					_ = errMsg
 				}
-				_ = errMsg
 			}
 		}
 	}
@@ -3867,7 +4182,8 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, u auth
 	})
 }
 
-func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	uploadID := r.PathValue("uploadID")
 	index, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil || index < 0 {
@@ -3879,8 +4195,12 @@ func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, u aut
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	if sess.Uploader != u.Username && u.Role != "admin" {
+	if sess.Uploader != u.Username && (u.Role != "admin" || p.IsAgent) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该上传会话"})
+		return
+	}
+	if p.IsAgent && !p.CanWriteFolder(sess.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
 		return
 	}
 	expectedSHA := strings.TrimSpace(r.Header.Get("X-Chunk-SHA256"))
@@ -3896,15 +4216,20 @@ func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request, u aut
 	})
 }
 
-func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	uploadID := r.PathValue("uploadID")
 	sess, err := s.store.GetUploadSession(uploadID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	if sess.Uploader != u.Username && u.Role != "admin" {
+	if sess.Uploader != u.Username && (u.Role != "admin" || p.IsAgent) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该上传会话"})
+		return
+	}
+	if p.IsAgent && !p.CanWriteFolder(sess.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
 		return
 	}
 
@@ -3926,49 +4251,71 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 	targetPref := sess.TargetNode
-	if strings.TrimSpace(req.TargetNode) != "" && u.Role == "admin" {
+	if p.IsAgent {
+		targetPref = "auto"
+	} else if strings.TrimSpace(req.TargetNode) != "" && u.Role == "admin" {
 		targetPref = strings.TrimSpace(req.TargetNode)
 	}
-	rec, statusCode, errMsg := s.dispatchUploadStream(u, sess.Name, sess.FolderPath, req.VersionNote, sess.FileSize, targetPref, sess.AllowedUsers, sess.Dev, f)
+	dev := sess.Dev
+	if p.IsAgent {
+		dev = applyAgentDeviceInfo(dev, p)
+	}
+	rec, statusCode, dispatchErr := s.dispatchUploadStreamWithConcurrency(p, sess.Name, sess.FolderPath, req.VersionNote, sess.FileSize, targetPref, sess.AllowedUsers, dev, f, storage.WriteConcurrencyOptions{})
 	_ = f.Close()
 	if statusCode != http.StatusCreated {
 		_ = os.Remove(mergedPath)
-		writeJSON(w, statusCode, map[string]string{"error": errMsg})
+		writeStorageActionError(w, dispatchErr, statusCode)
 		return
 	}
 	s.store.CleanupUploadSession(uploadID)
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{rec}, sess.AllowedUsers)
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_upload", rec.Name, "ok", p.ActorLabel())
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{rec}, sess.AllowedUsers)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"ok":   true,
-		"file": s.sanitizeRecordForUser(rec, u),
+		"file": s.sanitizeRecordForPrincipal(rec, p),
 	})
 }
 
-func (s *Server) handleUploadCancel(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUploadCancel(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	uploadID := r.PathValue("uploadID")
 	sess, err := s.store.GetUploadSession(uploadID)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
-	if sess.Uploader != u.Username && u.Role != "admin" {
+	if sess.Uploader != u.Username && (u.Role != "admin" || p.IsAgent) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该上传会话"})
+		return
+	}
+	if p.IsAgent && !p.CanWriteFolder(sess.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权操作该目录的上传会话"})
 		return
 	}
 	s.store.CleanupUploadSession(uploadID)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) handleCreateTxtFile(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleCreateTxtFile(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	var req struct {
-		Name         string   `json:"name"`
-		FolderPath   string   `json:"folder_path"`
-		Content      string   `json:"content"`
-		AllowedUsers []string `json:"allowed_users"`
-		TargetNode   string   `json:"target_node"`
+		Name            string   `json:"name"`
+		FolderPath      string   `json:"folder_path"`
+		Content         string   `json:"content"`
+		AllowedUsers    []string `json:"allowed_users"`
+		TargetNode      string   `json:"target_node"`
+		ExpectedVersion *int     `json:"expected_version"`
+		ForceLease      bool     `json:"force_lease"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	expectedVer, verErr := resolveExpectedVersion(req.ExpectedVersion, r.URL.Query().Get("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
 		return
 	}
 	rawName := filepath.Base(strings.TrimSpace(req.Name))
@@ -3991,66 +4338,44 @@ func (s *Server) handleCreateTxtFile(w http.ResponseWriter, r *http.Request, u a
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	cleanAllowed, userErr := s.auth.ValidateExistingUsers(storage.NormalizeAllowedUsers(req.AllowedUsers))
+	folderPath := storage.SanitizeFolderPath(req.FolderPath)
+	if p.IsAgent && !p.CanWriteFolder(folderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
+		return
+	}
+	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(req.AllowedUsers)
+	if resolveErr != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": resolveErr.Error()})
+		return
+	}
+	cleanAllowed, userErr := s.auth.ValidateExistingUsers(storage.NormalizeAllowedUsers(resolvedAllowed))
 	if userErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": userErr.Error()})
 		return
 	}
-	folderPath := storage.SanitizeFolderPath(req.FolderPath)
-	dev := extractDeviceInfo(r)
+	dev := extractDeviceInfoForPrincipal(r, p)
 	contentBytes := []byte(req.Content)
 	sz := int64(len(contentBytes))
 
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, req.ForceLease)
 	targetPref := strings.TrimSpace(req.TargetNode)
-	if targetPref == "" || u.Role != "admin" {
+	if targetPref == "" || u.Role != "admin" || p.IsAgent {
 		targetPref = "auto"
 	}
-	if targetPref == "auto" {
-		for _, existing := range s.cluster.AllClusterFiles() {
-			if existing.NodeOnline && existing.NodeID != "" &&
-				strings.EqualFold(existing.Name, rawName) &&
-				existing.FolderPath == folderPath {
-				if _, err := s.cluster.SelectUploadTarget(existing.NodeID, sz); err == nil {
-					targetPref = existing.NodeID
-				}
-				break
-			}
-		}
-	}
 
-	target, err := s.cluster.SelectUploadTarget(targetPref, sz)
-	if err != nil {
-		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+	saved, statusCode, dispatchErr := s.dispatchUploadStreamWithConcurrency(p, rawName, folderPath, "新建 TXT 文件", sz, targetPref, cleanAllowed, dev, bytes.NewReader(contentBytes), conc)
+	if statusCode != http.StatusCreated {
+		writeStorageActionError(w, dispatchErr, statusCode)
 		return
 	}
 
-	var saved storage.FileRecord
-	if target.IsSelf {
-		if capErr := s.cluster.CanAcceptLocal(sz); capErr != nil {
-			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": capErr.Error()})
-			return
-		}
-		saved, err = s.store.SaveUploadWithVersionNote(rawName, folderPath, "新建 TXT 文件", u.Username, cleanAllowed, dev, bytes.NewReader(contentBytes))
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建文件失败: " + err.Error()})
-			return
-		}
-		saved.NodeID = s.cluster.NodeID()
-		saved.NodeName = s.cluster.NodeName()
-		saved.NodeOS = runtime.GOOS
-		saved.NodeOnline = true
-	} else {
-		saved, err = s.cluster.ProxyUpload(target, rawName, folderPath, bytes.NewReader(contentBytes), u.Username, cleanAllowed, dev)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_upload", saved.Name, "ok", p.ActorLabel())
 	}
-
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{saved}, cleanAllowed)
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{saved}, cleanAllowed)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"ok":   true,
-		"file": s.sanitizeRecordForUser(saved, u),
+		"file": s.sanitizeRecordForPrincipal(saved, p),
 	})
 }
 
@@ -4094,9 +4419,9 @@ func (s *Server) HandleCapturedClipboard(item clipboard.Item) {
 	s.publishRecordChange("upload", uploader, []storage.FileRecord{rec}, nil)
 }
 
-func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
-	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		if status == http.StatusNotFound {
 			http.NotFound(w, r)
@@ -4112,9 +4437,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, u auth.P
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/download")
 }
 
-func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
-	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		if status == http.StatusNotFound {
 			http.NotFound(w, r)
@@ -4130,9 +4455,9 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request, u auth.Public
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/raw")
 }
 
-func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
-	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
@@ -4144,14 +4469,14 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, u auth.Pu
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/preview")
 }
 
-func (s *Server) handleFileMeta(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleFileMeta(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
-	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
-	includePath := u.Role == "admin"
+	includePath := p.User.Role == "admin" && !p.IsAgent
 	if isLocal {
 		s.serveFileMeta(w, id, includePath)
 		return
@@ -4163,9 +4488,9 @@ func (s *Server) handleFileMeta(w http.ResponseWriter, r *http.Request, u auth.P
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/meta?include_path="+flag)
 }
 
-func (s *Server) handleArchiveEntry(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleArchiveEntry(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
-	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
@@ -4177,15 +4502,20 @@ func (s *Server) handleArchiveEntry(w http.ResponseWriter, r *http.Request, u au
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/archive-entry")
 }
 
-func (s *Server) handleUpdateFileAccess(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUpdateFileAccess(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
-	rec, _, _, _, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, _, _, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
 	if u.Role != "admin" && rec.Uploader != u.Username {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅上传者或管理员可修改文件可见权限"})
+		return
+	}
+	if p.IsAgent && !p.CanShareFolder(rec.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前 Agent 密钥无权修改该文件的可见成员"})
 		return
 	}
 	var req struct {
@@ -4195,7 +4525,16 @@ func (s *Server) handleUpdateFileAccess(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	cleanUsers, err := s.auth.ValidateExistingUsers(req.AllowedUsers)
+	candidates := req.AllowedUsers
+	if p.IsAgent && len(storage.NormalizeAllowedUsers(candidates)) > 0 {
+		resolved, resolveErr := p.ResolveAllowedUsers(candidates)
+		if resolveErr != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": resolveErr.Error()})
+			return
+		}
+		candidates = resolved
+	}
+	cleanUsers, err := s.auth.ValidateExistingUsers(candidates)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -4205,13 +4544,19 @@ func (s *Server) handleUpdateFileAccess(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	s.logAudit(r, u.Username, "file_access", rec.Name, "ok", strings.Join(cleanUsers, ","))
+	detail := strings.Join(cleanUsers, ",")
+	if p.IsAgent {
+		detail = strings.TrimSpace(p.ActorLabel() + " " + detail)
+	}
+	s.logAudit(r, u.Username, "file_access", rec.Name, "ok", detail)
 	s.events.Publish(FileChangeEvent{
-		Kind:     "access",
-		Uploader: u.Username,
-		Count:    1,
+		Kind:        "access",
+		Uploader:    u.Username,
+		ActorName:   p.ActorLabel(),
+		Count:       1,
+		FolderPaths: []string{storage.SanitizeFolderPath(rec.FolderPath)},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"file": s.sanitizeRecordForUser(updated, u)})
+	writeJSON(w, http.StatusOK, map[string]any{"file": s.sanitizeRecordForPrincipal(updated, p)})
 }
 
 func archiveBaseFolderName(name string) string {
@@ -4227,13 +4572,25 @@ func archiveBaseFolderName(name string) string {
 	return base
 }
 
-func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
-	rec, localPath, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	rec, localPath, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
+	if !preview.IsArchiveName(rec.Name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "仅支持在线解压 .zip / .tar / .tar.gz / .tgz / .gz 格式"})
+		return
+	}
+
+	archiveFolder := storage.SanitizeFolderPath(archiveBaseFolderName(rec.Name))
+	if p.IsAgent && !p.CanWriteFolder(archiveFolder) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权将压缩包解压到目标目录: " + archiveFolder})
+		return
+	}
+
 	var cleanup func()
 	if !isLocal {
 		tmpPath, fn, err := s.cluster.FetchPeerFileToTemp(peer, id)
@@ -4248,15 +4605,9 @@ func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u 
 		defer cleanup()
 	}
 
-	if !preview.IsArchiveName(rec.Name) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "仅支持在线解压 .zip / .tar / .tar.gz / .tgz / .gz 格式"})
-		return
-	}
-
-	dev := extractDeviceInfo(r)
-	archiveFolder := storage.SanitizeFolderPath(archiveBaseFolderName(rec.Name))
+	dev := extractDeviceInfoForPrincipal(r, p)
 	targetPref := strings.TrimSpace(r.URL.Query().Get("target_node"))
-	if targetPref == "" || u.Role != "admin" {
+	if targetPref == "" || u.Role != "admin" || p.IsAgent {
 		targetPref = "auto"
 	}
 
@@ -4270,6 +4621,10 @@ func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u 
 			dir = ""
 		}
 		targetFolder := storage.SanitizeFolderPath(archiveFolder + "/" + dir)
+		if p.IsAgent && !p.CanWriteFolder(targetFolder) {
+			skipped = append(skipped, relPath+" (目录无写入权限)")
+			return nil
+		}
 
 		if err := s.auth.CheckUploadAllowed(base); err != nil {
 			skipped = append(skipped, relPath+" ("+err.Error()+")")
@@ -4310,16 +4665,17 @@ func (s *Server) handleExtractArchive(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 
-	s.publishRecordChange("extract", u.Username, extracted, rec.AllowedUsers)
+	s.publishRecordChangeWithActor("extract", u.Username, p.ActorLabel(), extracted, rec.AllowedUsers)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"extracted": s.sanitizeRecordsForUser(extracted, u),
+		"extracted": s.sanitizeRecordsForPrincipal(extracted, p),
 		"skipped":   skipped,
 	})
 }
 
-func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
-	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
@@ -4328,18 +4684,37 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.Pub
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅上传者或管理员可删除该文件"})
 		return
 	}
+	if p.IsAgent && !p.CanDeleteFolder(rec.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权删除该目录文件"})
+		return
+	}
+	expectedVer, verErr := resolveExpectedVersion(nil, r.URL.Query().Get("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, parseBoolFlag(r.URL.Query().Get("force_lease")))
+
+	action := "file_delete"
+	detailPrefix := ""
+	if p.IsAgent {
+		action = "agent_file_delete"
+		detailPrefix = p.ActorLabel() + " "
+	}
 
 	if isLocal {
-		if err := s.store.Delete(id); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		if err := s.store.DeleteWithConcurrency(id, conc); err != nil {
+			writeStorageActionError(w, err, http.StatusInternalServerError)
 			return
 		}
-		s.logAudit(r, u.Username, "file_delete", rec.Name, "ok", s.cluster.NodeName())
+		s.logAudit(r, u.Username, action, rec.Name, "ok", detailPrefix+s.cluster.NodeName())
 		s.events.Publish(FileChangeEvent{
 			Kind:         "delete",
 			Uploader:     rec.Uploader,
+			ActorName:    p.ActorLabel(),
 			Count:        1,
 			FileNames:    []string{rec.Name},
+			FolderPaths:  []string{storage.SanitizeFolderPath(rec.FolderPath)},
 			NodeName:     s.cluster.NodeName(),
 			AllowedUsers: rec.AllowedUsers,
 		})
@@ -4347,27 +4722,34 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, u auth.Pub
 		return
 	}
 
-	if err := s.cluster.ProxyDelete(peer, id); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+	if err := s.cluster.ProxyDeleteWithConcurrency(peer, id, conc); err != nil {
+		writeStorageActionError(w, err, http.StatusBadGateway)
 		return
 	}
-	s.logAudit(r, u.Username, "file_delete", rec.Name, "ok", rec.NodeName)
+	s.logAudit(r, u.Username, action, rec.Name, "ok", detailPrefix+rec.NodeName)
 	s.events.Publish(FileChangeEvent{
 		Kind:         "delete",
 		Uploader:     rec.Uploader,
+		ActorName:    p.ActorLabel(),
 		Count:        1,
 		FileNames:    []string{rec.Name},
+		FolderPaths:  []string{storage.SanitizeFolderPath(rec.FolderPath)},
 		NodeName:     rec.NodeName,
 		AllowedUsers: rec.AllowedUsers,
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
-	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if p.IsAgent && !p.CanWriteFolder(rec.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权修改该目录文件"})
 		return
 	}
 	if !preview.IsTextPreviewExt(rec.Ext) {
@@ -4375,25 +4757,35 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, u auth.P
 		return
 	}
 	var req struct {
-		Content string `json:"content"`
-		Note    string `json:"note"`
+		Content         string `json:"content"`
+		Note            string `json:"note"`
+		ExpectedVersion *int   `json:"expected_version"`
+		ForceLease      bool   `json:"force_lease"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析编辑内容失败"})
 		return
 	}
-	dev := extractDeviceInfo(r)
+	expectedVer, verErr := resolveExpectedVersion(req.ExpectedVersion, r.URL.Query().Get("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, req.ForceLease)
+	dev := extractDeviceInfoForPrincipal(r, p)
 	note := strings.TrimSpace(req.Note)
 	var updated storage.FileRecord
 	var err error
 	if isLocal {
-		if err := s.cluster.CanAcceptLocal(int64(len(req.Content))); err != nil {
-			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-			return
+		if rec.StorageMode != storage.StorageModeMount {
+			if err := s.cluster.CanAcceptLocal(int64(len(req.Content))); err != nil {
+				writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+				return
+			}
 		}
-		updated, err = s.store.SaveEditedText(id, req.Content, note, u.Username, dev)
+		updated, err = s.store.SaveEditedTextWithConcurrency(id, req.Content, note, u.Username, dev, conc)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeStorageActionError(w, err, http.StatusBadRequest)
 			return
 		}
 		updated.NodeID = s.cluster.NodeID()
@@ -4405,27 +4797,30 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, u auth.P
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "文件所在存储节点当前离线"})
 			return
 		}
-		updated, err = s.cluster.ProxyEditFile(peer, id, req.Content, note, u.Username, dev)
+		updated, err = s.cluster.ProxyEditFileWithConcurrency(peer, id, req.Content, note, u.Username, dev, conc)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			writeStorageActionError(w, err, http.StatusBadGateway)
 			return
 		}
 	}
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{updated}, rec.AllowedUsers)
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_edit", updated.Name, "ok", fmt.Sprintf("%s v%d", p.ActorLabel(), updated.Version))
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{updated}, rec.AllowedUsers)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":   true,
-		"file": s.sanitizeRecordForUser(updated, u),
+		"file": s.sanitizeRecordForPrincipal(updated, p),
 	})
 }
 
-func (s *Server) handleGetFileVersions(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleGetFileVersions(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
-	rec, _, _, _, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, _, _, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
-	clean := s.sanitizeRecordForUser(rec, u)
+	clean := s.sanitizeRecordForPrincipal(rec, p)
 	curVer := clean.Version
 	if curVer <= 0 {
 		curVer = 1
@@ -4458,11 +4853,16 @@ func (s *Server) handleGetFileVersions(w http.ResponseWriter, r *http.Request, u
 	})
 }
 
-func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
-	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
+		return
+	}
+	if p.IsAgent && !p.CanWriteFolder(rec.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权更新该目录文件版本"})
 		return
 	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -4470,6 +4870,12 @@ func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	note := strings.TrimSpace(r.FormValue("note"))
+	expectedVer, verErr := resolveExpectedVersion(nil, r.FormValue("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, parseBoolFlag(r.FormValue("force_lease")))
 	fh, err := firstMultipartFile(r, "file", "files")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择要上传的新版本文件"})
@@ -4479,7 +4885,7 @@ func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	dev := extractDeviceInfo(r)
+	dev := extractDeviceInfoForPrincipal(r, p)
 	f, err := fh.Open()
 	if err != nil {
 		s.store.RecordReadError()
@@ -4490,13 +4896,15 @@ func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request,
 
 	var updated storage.FileRecord
 	if isLocal {
-		if err := s.cluster.CanAcceptLocal(fh.Size); err != nil {
-			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-			return
+		if rec.StorageMode != storage.StorageModeMount {
+			if err := s.cluster.CanAcceptLocal(fh.Size); err != nil {
+				writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
+				return
+			}
 		}
-		updated, err = s.store.SaveNewVersion(id, fh.Filename, note, u.Username, dev, f)
+		updated, err = s.store.SaveNewVersionWithConcurrency(id, fh.Filename, note, storage.MethodVersionUpload, u.Username, dev, f, conc)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeStorageActionError(w, err, http.StatusBadRequest)
 			return
 		}
 		updated.NodeID = s.cluster.NodeID()
@@ -4508,28 +4916,31 @@ func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request,
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "文件所在存储节点当前离线"})
 			return
 		}
-		updated, err = s.cluster.ProxyNewVersion(peer, id, fh.Filename, note, f, u.Username, dev)
+		updated, err = s.cluster.ProxyNewVersionWithConcurrency(peer, id, fh.Filename, note, f, u.Username, dev, conc)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			writeStorageActionError(w, err, http.StatusBadGateway)
 			return
 		}
 	}
 
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{updated}, rec.AllowedUsers)
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_version_upload", updated.Name, "ok", fmt.Sprintf("%s v%d", p.ActorLabel(), updated.Version))
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{updated}, rec.AllowedUsers)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"ok":   true,
-		"file": s.sanitizeRecordForUser(updated, u),
+		"file": s.sanitizeRecordForPrincipal(updated, p),
 	})
 }
 
-func (s *Server) handleDownloadFileVersion(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleDownloadFileVersion(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	id := r.PathValue("id")
 	ver, err := strconv.Atoi(r.PathValue("ver"))
 	if err != nil || ver <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "版本号无效"})
 		return
 	}
-	_, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	_, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
@@ -4545,14 +4956,15 @@ func (s *Server) handleDownloadFileVersion(w http.ResponseWriter, r *http.Reques
 	s.cluster.ProxyGet(w, r, peer, fmt.Sprintf("/internal/cluster/files/%s/versions/%d/download", id, ver))
 }
 
-func (s *Server) handleRestoreFileVersion(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleRestoreFileVersion(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
 	ver, err := strconv.Atoi(r.PathValue("ver"))
 	if err != nil || ver <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "版本号无效"})
 		return
 	}
-	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
@@ -4561,17 +4973,32 @@ func (s *Server) handleRestoreFileVersion(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅文件上传者或管理员可切换/回滚文件版本"})
 		return
 	}
-	var req struct {
-		Note string `json:"note"`
+	if p.IsAgent && !p.CanWriteFolder(rec.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权回滚该目录文件"})
+		return
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	dev := extractDeviceInfo(r)
+	var req struct {
+		Note            string `json:"note"`
+		ExpectedVersion *int   `json:"expected_version"`
+		ForceLease      bool   `json:"force_lease"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	expectedVer, verErr := resolveExpectedVersion(req.ExpectedVersion, r.URL.Query().Get("expected_version"), r)
+	if verErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": verErr.Error()})
+		return
+	}
+	conc := concurrencyOptionsForPrincipal(p, expectedVer, req.ForceLease)
+	dev := extractDeviceInfoForPrincipal(r, p)
 
 	var updated storage.FileRecord
 	if isLocal {
-		updated, err = s.store.RestoreVersionByUser(id, ver, req.Note, u.Username, dev)
+		updated, err = s.store.RestoreVersionWithConcurrency(id, ver, req.Note, u.Username, dev, conc)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeStorageActionError(w, err, http.StatusBadRequest)
 			return
 		}
 		updated.NodeID = s.cluster.NodeID()
@@ -4583,33 +5010,41 @@ func (s *Server) handleRestoreFileVersion(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "文件所在存储节点当前离线"})
 			return
 		}
-		updated, err = s.cluster.ProxyRestoreVersion(peer, id, ver, req.Note, u.Username, dev)
+		updated, err = s.cluster.ProxyRestoreVersionWithConcurrency(peer, id, ver, req.Note, u.Username, dev, conc)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			writeStorageActionError(w, err, http.StatusBadGateway)
 			return
 		}
 	}
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{updated}, rec.AllowedUsers)
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_version_restore", updated.Name, "ok", fmt.Sprintf("%s v%d", p.ActorLabel(), ver))
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{updated}, rec.AllowedUsers)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":   true,
-		"file": s.sanitizeRecordForUser(updated, u),
+		"file": s.sanitizeRecordForPrincipal(updated, p),
 	})
 }
 
-func (s *Server) handleDeleteFileVersion(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleDeleteFileVersion(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	id := r.PathValue("id")
 	ver, err := strconv.Atoi(r.PathValue("ver"))
 	if err != nil || ver <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "版本号无效"})
 		return
 	}
-	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFile(id, u)
+	rec, _, peer, isLocal, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
 	if u.Role != "admin" && rec.Uploader != u.Username {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅文件上传者或管理员可删除历史版本"})
+		return
+	}
+	if p.IsAgent && !p.CanDeleteFolder(rec.FolderPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权删除该目录文件历史版本"})
 		return
 	}
 	var updated storage.FileRecord
@@ -4634,14 +5069,21 @@ func (s *Server) handleDeleteFileVersion(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	s.publishRecordChange("upload", u.Username, []storage.FileRecord{updated}, rec.AllowedUsers)
+	if p.IsAgent {
+		s.logAudit(r, u.Username, "agent_file_version_delete", updated.Name, "ok", fmt.Sprintf("%s v%d", p.ActorLabel(), ver))
+	}
+	s.publishRecordChangeWithActor("upload", u.Username, p.ActorLabel(), []storage.FileRecord{updated}, rec.AllowedUsers)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":   true,
-		"file": s.sanitizeRecordForUser(updated, u),
+		"file": s.sanitizeRecordForPrincipal(updated, p),
 	})
 }
 
 func (s *Server) publishRecordChange(kind, uploader string, recs []storage.FileRecord, allowedUsers []string) {
+	s.publishRecordChangeWithActor(kind, uploader, "", recs, allowedUsers)
+}
+
+func (s *Server) publishRecordChangeWithActor(kind, uploader, actorName string, recs []storage.FileRecord, allowedUsers []string) {
 	if len(recs) == 0 {
 		return
 	}
@@ -4658,14 +5100,17 @@ func (s *Server) publishRecordChange(kind, uploader string, recs []storage.FileR
 	s.events.Publish(FileChangeEvent{
 		Kind:         kind,
 		Uploader:     uploader,
+		ActorName:    actorName,
 		Count:        len(recs),
 		FileNames:    names,
+		FolderPaths:  collectEventFolderPaths(recs),
 		NodeName:     nodeName,
 		AllowedUsers: allowedUsers,
 	})
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	u := p.User
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前连接不支持流式推送"})
@@ -4694,6 +5139,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, u auth.Pub
 		case ev := <-ch:
 			if len(ev.AllowedUsers) > 0 && !storage.CanUserAccess(storage.FileRecord{Uploader: ev.Uploader, AllowedUsers: ev.AllowedUsers}, u.Username, u.Role) {
 				continue
+			}
+			if p.IsAgent {
+				if len(ev.FolderPaths) == 0 {
+					continue
+				}
+				allAllowed := true
+				for _, fp := range ev.FolderPaths {
+					if !p.CanReadFolder(fp) {
+						allAllowed = false
+						break
+					}
+				}
+				if !allAllowed {
+					continue
+				}
 			}
 			b, err := json.Marshal(ev)
 			if err != nil {
@@ -4891,6 +5351,14 @@ func (s *Server) serveFileMeta(w http.ResponseWriter, id string, includePath boo
 	} else {
 		rec.StorageDir = ""
 		rec.SourcePath = ""
+		if len(rec.Versions) > 0 {
+			cleanVers := make([]storage.FileVersion, len(rec.Versions))
+			for i, v := range rec.Versions {
+				v.StorageDir = ""
+				cleanVers[i] = v
+			}
+			rec.Versions = cleanVers
+		}
 	}
 	storageMode := rec.StorageMode
 	if storageMode == "" {

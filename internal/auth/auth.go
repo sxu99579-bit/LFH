@@ -74,6 +74,7 @@ type storeData struct {
 	BlockedExts    []string              `json:"blocked_exts,omitempty"`
 	Users          map[string]User       `json:"users"`
 	Invites        map[string]InviteCode `json:"invites,omitempty"`
+	AgentKeys      map[string]AgentKey   `json:"agent_keys,omitempty"`
 }
 
 type InitOptions struct {
@@ -91,6 +92,9 @@ type Manager struct {
 	blockedExts         []string
 	users               map[string]User
 	invites             map[string]InviteCode
+	agentKeys           map[string]AgentKey
+	agentRateMu         sync.Mutex
+	agentRates          map[string][]time.Time
 	initialAdminUser    string
 	initialAdminPass    string
 	createdInitialAdmin bool
@@ -113,6 +117,8 @@ func NewManagerWithOptions(dataDir string, opts InitOptions) (*Manager, error) {
 		blockedExts:    []string{},
 		users:          make(map[string]User),
 		invites:        make(map[string]InviteCode),
+		agentKeys:      make(map[string]AgentKey),
+		agentRates:     make(map[string][]time.Time),
 	}
 	if err := m.loadOrInit(opts); err != nil {
 		return nil, err
@@ -151,6 +157,20 @@ func (m *Manager) loadOrInit(opts InitOptions) error {
 				}
 				if data.Invites != nil {
 					m.invites = data.Invites
+				}
+				if data.AgentKeys != nil {
+					for id, ak := range data.AgentKeys {
+						if strings.TrimSpace(ak.ID) == "" {
+							ak.ID = strings.TrimSpace(id)
+						}
+						if ak.ID == "" || strings.TrimSpace(ak.TokenHash) == "" || strings.TrimSpace(ak.Name) == "" {
+							continue
+						}
+						if ak.RateLimitPerMin <= 0 {
+							ak.RateLimitPerMin = DefaultAgentRateLimitPerMin
+						}
+						m.agentKeys[ak.ID] = ak
+					}
 				}
 				return nil
 			}
@@ -212,6 +232,7 @@ func (m *Manager) saveLocked() error {
 		BlockedExts:    m.blockedExts,
 		Users:          m.users,
 		Invites:        m.invites,
+		AgentKeys:      m.agentKeys,
 	}
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -232,6 +253,7 @@ func (m *Manager) ExportSnapshot() ([]byte, error) {
 		BlockedExts:    m.blockedExts,
 		Users:          m.users,
 		Invites:        m.invites,
+		AgentKeys:      m.agentKeys,
 	}
 	return json.Marshal(data)
 }
@@ -297,6 +319,29 @@ func (m *Manager) ImportSnapshot(raw []byte) error {
 	allowed := NormalizeExts(data.AllowedExts)
 	blocked := NormalizeExts(data.BlockedExts)
 
+	agentKeys := make(map[string]AgentKey, len(data.AgentKeys))
+	for k, ak := range data.AgentKeys {
+		id := strings.TrimSpace(ak.ID)
+		if id == "" {
+			id = strings.TrimSpace(k)
+		}
+		if id == "" || strings.TrimSpace(ak.Name) == "" || strings.TrimSpace(ak.TokenHash) == "" {
+			continue
+		}
+		owner := strings.TrimSpace(ak.OwnerUsername)
+		if _, ok := users[owner]; !ok {
+			continue
+		}
+		ak.ID = id
+		ak.OwnerUsername = owner
+		if ak.RateLimitPerMin <= 0 {
+			ak.RateLimitPerMin = DefaultAgentRateLimitPerMin
+		} else if ak.RateLimitPerMin > MaxAgentRateLimitPerMin {
+			ak.RateLimitPerMin = MaxAgentRateLimitPerMin
+		}
+		agentKeys[id] = ak
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -311,6 +356,7 @@ func (m *Manager) ImportSnapshot(raw []byte) error {
 	oldBlocked := m.blockedExts
 	oldUsers := m.users
 	oldInvites := m.invites
+	oldAgentKeys := m.agentKeys
 
 	m.secret = secret
 	m.inviteRequired = invReq
@@ -318,6 +364,7 @@ func (m *Manager) ImportSnapshot(raw []byte) error {
 	m.blockedExts = blocked
 	m.users = users
 	m.invites = invites
+	m.agentKeys = agentKeys
 
 	if err := m.saveLocked(); err != nil {
 		m.secret = oldSecret
@@ -326,8 +373,10 @@ func (m *Manager) ImportSnapshot(raw []byte) error {
 		m.blockedExts = oldBlocked
 		m.users = oldUsers
 		m.invites = oldInvites
+		m.agentKeys = oldAgentKeys
 		return err
 	}
+	m.resetAgentRates()
 	return nil
 }
 
@@ -676,7 +725,20 @@ func (m *Manager) DeleteUser(actorUsername, targetUsername string) error {
 		return errors.New("不能删除管理员账号")
 	}
 	delete(m.users, target)
-	return m.saveLocked()
+	var removedKeys []string
+	for id, ak := range m.agentKeys {
+		if ak.OwnerUsername == target {
+			delete(m.agentKeys, id)
+			removedKeys = append(removedKeys, id)
+		}
+	}
+	if err := m.saveLocked(); err != nil {
+		return err
+	}
+	for _, id := range removedKeys {
+		m.clearAgentRateBucket(id)
+	}
+	return nil
 }
 
 // SetUserRole promotes an active user to admin or revokes admin privileges back to regular user.

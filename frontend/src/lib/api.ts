@@ -1,9 +1,12 @@
 import type {
+  AgentKeyItem,
+  AgentScope,
   AuditEntry,
   BandwidthProbeResult,
   ClusterCapabilityView,
   ClusterResponse,
   DiscoveredNode,
+  FileLease,
   FileRecord,
   FileVersion,
   IntegrityStatus,
@@ -17,9 +20,14 @@ import type {
   ServerInfo,
   SummaryStats,
   SystemLogEntry,
+  TransferTicketResponse,
   UpdateStatus,
   UploadPolicy,
   User,
+  VerifyPreset,
+  VerifyResult,
+  WebhookRuleItem,
+  WebhookTestResult,
 } from '@/types'
 import { getDeviceMeta } from '@/lib/utils'
 
@@ -299,12 +307,43 @@ export const api = {
       }
     ),
   getMounts: () => apiFetch<{ mounts: MountItem[] }>('/api/admin/mounts'),
-  addMount: (payload: { node_id: string; dir_path: string; alias: string; allowed_users: string[] }) =>
+  addMount: (payload: {
+    node_id: string
+    dir_path: string
+    alias: string
+    allowed_users: string[]
+    writable?: boolean
+    shadow_backup?: boolean
+    ignore_patterns?: string[]
+    max_file_bytes?: number
+    verify_presets?: VerifyPreset[]
+  }) =>
     apiFetch<{ mounts: MountItem[]; pool?: PoolSummary }>('/api/admin/mounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+  updateMount: (
+    nodeID: string,
+    mountID: string,
+    payload: {
+      alias?: string
+      allowed_users?: string[]
+      writable?: boolean
+      shadow_backup?: boolean
+      ignore_patterns?: string[]
+      max_file_bytes?: number
+      verify_presets?: VerifyPreset[]
+    }
+  ) =>
+    apiFetch<{ ok: boolean; mount: MountItem; mounts: MountItem[]; pool?: PoolSummary }>(
+      `/api/admin/mounts/${encodeURIComponent(nodeID)}/${encodeURIComponent(mountID)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ),
   syncMount: (nodeID: string, mountID: string) =>
     apiFetch<{ mounts: MountItem[]; pool?: PoolSummary; result?: { added?: number; updated?: number; removed?: number } }>(
       `/api/admin/mounts/${encodeURIComponent(nodeID)}/${encodeURIComponent(mountID)}/sync`,
@@ -314,6 +353,127 @@ export const api = {
     apiFetch<{ mounts: MountItem[]; pool?: PoolSummary; removed?: number }>(
       `/api/admin/mounts/${encodeURIComponent(nodeID)}/${encodeURIComponent(mountID)}`,
       { method: 'DELETE' }
+    ),
+
+  // Agent Keys & Soft Leases
+  getAgentKeys: () => apiFetch<{ keys: AgentKeyItem[] }>('/api/agent-keys'),
+  createAgentKey: (payload: {
+    name: string
+    scopes: AgentScope[]
+    read_folders: string[]
+    write_folders: string[]
+    default_allowed_users: string[]
+    allow_set_visibility: boolean
+    rate_limit_per_min: number
+    expires_hours?: number
+  }) =>
+    apiFetch<{ ok: boolean; key: AgentKeyItem; token: string }>('/api/agent-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateAgentKey: (
+    id: string,
+    payload: {
+      name?: string
+      scopes?: AgentScope[]
+      read_folders?: string[]
+      write_folders?: string[]
+      default_allowed_users?: string[]
+      allow_set_visibility?: boolean
+      rate_limit_per_min?: number
+      disabled?: boolean
+      clear_expires_at?: boolean
+    }
+  ) =>
+    apiFetch<{ ok: boolean; key: AgentKeyItem }>(`/api/agent-keys/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  toggleAgentKey: (id: string, disabled?: boolean) =>
+    apiFetch<{ ok: boolean; key: AgentKeyItem }>(`/api/agent-keys/${encodeURIComponent(id)}/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(disabled === undefined ? {} : { disabled }),
+    }),
+  deleteAgentKey: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/agent-keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  getFileLease: (id: string) =>
+    apiFetch<{ locked: boolean; lease: FileLease | null }>(`/api/files/${encodeURIComponent(id)}/lease`),
+  releaseFileLease: (id: string, force = false) =>
+    apiFetch<{ ok: boolean }>(`/api/files/${encodeURIComponent(id)}/lease`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
+    }),
+  issueTicket: (payload: {
+    action: 'up' | 'down'
+    file_id?: string
+    path?: string
+    folder_path?: string
+    file_name?: string
+    allowed_users?: string[]
+    max_bytes?: number
+    target_node?: string
+    ttl_seconds?: number
+    prefer_direct?: boolean
+  }) =>
+    apiFetch<TransferTicketResponse>('/api/tickets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  triggerMountVerify: (mountID: string, presetID: string) =>
+    apiFetch<VerifyResult>(
+      `/api/mounts/${encodeURIComponent(mountID)}/verify/${encodeURIComponent(presetID)}`,
+      { method: 'POST' }
+    ),
+  getWebhooks: () =>
+    apiFetch<{ ok: boolean; webhooks: WebhookRuleItem[] }>('/api/admin/webhooks'),
+  createWebhook: (payload: {
+    name: string
+    folder_prefix: string
+    events: string[]
+    target_url: string
+    secret: string
+    enabled?: boolean
+    include_download_ticket?: boolean
+  }) =>
+    apiFetch<{ ok: boolean; webhook: WebhookRuleItem }>('/api/admin/webhooks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateWebhook: (
+    id: string,
+    payload: {
+      name?: string
+      folder_prefix?: string
+      events?: string[]
+      target_url?: string
+      secret?: string
+      enabled?: boolean
+      include_download_ticket?: boolean
+    }
+  ) =>
+    apiFetch<{ ok: boolean; webhook: WebhookRuleItem }>(
+      `/api/admin/webhooks/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ),
+  deleteWebhook: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/admin/webhooks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  testWebhook: (id: string) =>
+    apiFetch<{ ok: boolean; result: WebhookTestResult }>(
+      `/api/admin/webhooks/${encodeURIComponent(id)}/test`,
+      { method: 'POST' }
     ),
   importLocal: (payload: { node_id: string; source_path: string; folder_path: string; allowed_users: string[] }) =>
     apiFetch<{ pool?: PoolSummary; imported_count?: number }>('/api/admin/files/import-local', {

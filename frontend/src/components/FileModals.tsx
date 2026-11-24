@@ -3,7 +3,7 @@ import { ArrowLeft, Download, Edit3, Folder, FileArchive, Search } from 'lucide-
 import { api } from '@/lib/api'
 import { formatSize, getFileExt, isEditableTextFile } from '@/lib/utils'
 import type { FileRecord, NodeStatus } from '@/types'
-import { Badge, Button, Dialog, Input, Select, Textarea, useToast } from '@/components/ui'
+import { Badge, Button, Dialog, Input, Select, Switch, Textarea, useToast } from '@/components/ui'
 
 interface DocxBlock {
   kind: 'heading' | 'table' | string
@@ -264,12 +264,14 @@ function PreviewRenderer({
 
 export function PreviewModal({
   file,
+  writableMountIds,
   onClose,
   onOpenEditor,
   targetNode,
   onRefreshAll,
 }: {
   file: FileRecord | null
+  writableMountIds?: Set<string>
   onClose: () => void
   onOpenEditor: (rec: FileRecord) => void
   targetNode: string
@@ -345,7 +347,7 @@ export function PreviewModal({
               <span>返回压缩包</span>
             </Button>
           )}
-          {!activeEntry && isEditableTextFile(file) && (
+          {!activeEntry && isEditableTextFile(file, writableMountIds) && (
             <Button
               size="xs"
               variant="outline"
@@ -585,6 +587,9 @@ export function CreateTxtModal({
   )
 }
 
+const DEFAULT_MOUNT_IGNORES =
+  'node_modules, .git, dist, build, .next, .nuxt, target, vendor, __pycache__, .venv, .idea, .vscode, .DS_Store, *.log'
+
 export function LocalImportModal({
   open,
   initialMode,
@@ -605,6 +610,10 @@ export function LocalImportModal({
   const [nodeId, setNodeId] = useState('')
   const [pathVal, setPathVal] = useState('')
   const [folderVal, setFolderVal] = useState('')
+  const [writable, setWritable] = useState(false)
+  const [shadowBackup, setShadowBackup] = useState(true)
+  const [ignoreText, setIgnoreText] = useState(DEFAULT_MOUNT_IGNORES)
+  const [maxFileMB, setMaxFileMB] = useState('50')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -612,6 +621,10 @@ export function LocalImportModal({
       setMode(initialMode)
       setPathVal('')
       setFolderVal('')
+      setWritable(false)
+      setShadowBackup(true)
+      setIgnoreText(DEFAULT_MOUNT_IGNORES)
+      setMaxFileMB('50')
       const online = nodes.filter((n) => n.online)
       const def = online.find((n) => n.is_self) || online[0]
       setNodeId(def?.node_id || '')
@@ -626,13 +639,26 @@ export function LocalImportModal({
     setBusy(true)
     try {
       if (mode === 'mount') {
+        const parsedIgnores = Array.from(
+          new Set(
+            ignoreText
+              .split(/[\n,;]+/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          )
+        )
+        const maxFileBytes = Math.max(1, Number(maxFileMB || 50)) * 1024 * 1024
         await api.addMount({
           node_id: nodeId,
           dir_path: pathVal.trim(),
           alias: folderVal.trim(),
           allowed_users: allowedUsers,
+          writable,
+          shadow_backup: writable ? shadowBackup : false,
+          ignore_patterns: parsedIgnores,
+          max_file_bytes: maxFileBytes,
         })
-        toast('已成功挂载本机虚拟目录并开始同步索引', 'success')
+        toast(writable ? '已创建可写项目工作区挂载并开始同步索引' : '已成功挂载本机虚拟目录并开始同步索引', 'success')
       } else {
         const res = await api.importLocal({
           node_id: nodeId,
@@ -708,9 +734,80 @@ export function LocalImportModal({
           <Input
             value={folderVal}
             onChange={(e) => setFolderVal(e.target.value)}
-            placeholder={mode === 'mount' ? '例如：高清影视库' : '留空存入根目录'}
+            placeholder={mode === 'mount' ? '例如：shopapp 或 高清影视库' : '留空存入根目录'}
           />
         </div>
+
+        {mode === 'mount' && (
+          <div className="space-y-2.5 rounded-lg border border-border bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="font-medium">启用可写项目工作区（允许授权 Agent 双向写穿）</div>
+                <div className="text-[11px] text-muted-foreground">
+                  默认关闭以保持只读安全；开启后支持多 Agent 写穿源码及网页在线编辑
+                </div>
+              </div>
+              <Switch checked={writable} onCheckedChange={setWritable} />
+            </div>
+
+            {writable && (
+              <>
+                <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
+                  <div>
+                    <div className="font-medium">开启 Shadow 版本自动备份</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Agent 修改覆盖前自动将旧版本保留至 uploads/，随时一键还原写回磁盘
+                    </div>
+                  </div>
+                  <Switch checked={shadowBackup} onCheckedChange={setShadowBackup} />
+                </div>
+
+                <div className="grid gap-2 sm:grid-cols-3 border-t border-border pt-2">
+                  <div className="sm:col-span-2 space-y-1">
+                    <label className="font-medium block">忽略目录 / 文件模板</label>
+                    <Textarea
+                      value={ignoreText}
+                      onChange={(e) => setIgnoreText(e.target.value)}
+                      className="min-h-[58px] font-mono text-[11px]"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="font-medium block">单文件上限 (MB)</label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={1024}
+                      value={maxFileMB}
+                      onChange={(e) => setMaxFileMB(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-1">
+                  {[
+                    { label: '全栈默认', val: DEFAULT_MOUNT_IGNORES },
+                    { label: 'Node/前端', val: 'node_modules, dist, .next, .nuxt, coverage, *.log' },
+                    { label: 'Go 工程', val: 'bin, dist, vendor, *.exe, *.test' },
+                    { label: 'Python', val: '__pycache__, .venv, venv, .pytest_cache, *.pyc' },
+                  ].map((tpl) => (
+                    <Button
+                      key={tpl.label}
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => setIgnoreText(tpl.val)}
+                    >
+                      {tpl.label}
+                    </Button>
+                  ))}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  服务端硬编码保护：`.git`、`.ssh`、`.env`、私钥后缀及符号链接逃逸始终禁止读写。
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="outline" size="sm" onClick={onClose}>取消</Button>

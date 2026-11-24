@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"lfh/internal/bridge"
 	"lfh/internal/plugins"
 	"lfh/internal/storage"
 	"lfh/internal/version"
@@ -1750,7 +1751,36 @@ func computeSignature(secret, method, path, ts, nodeID, nonce string) string {
 
 // ==================== Cross-Node HTTP Proxy Helpers ====================
 
+func decodePeerError(statusCode int, body []byte, fallback string) error {
+	var envelope struct {
+		Error      string                    `json:"error"`
+		Code       string                    `json:"code"`
+		Conflict   *storage.ConflictError    `json:"conflict"`
+		Lease      *storage.LeaseLockedError `json:"lease"`
+		PatchError *storage.PatchError       `json:"patch_error"`
+	}
+	if json.Unmarshal(body, &envelope) == nil {
+		if (envelope.Code == "version_conflict" || statusCode == http.StatusConflict) && envelope.Conflict != nil {
+			return envelope.Conflict
+		}
+		if (envelope.Code == "lease_locked" || statusCode == http.StatusLocked) && envelope.Lease != nil {
+			return envelope.Lease
+		}
+		if (envelope.Code == "patch_failed" || statusCode == http.StatusUnprocessableEntity) && envelope.PatchError != nil {
+			return envelope.PatchError
+		}
+		if envelope.Error != "" {
+			return errors.New(envelope.Error)
+		}
+	}
+	return errors.New(fallback)
+}
+
 func (m *Manager) ProxyUpload(peer NodeStatus, filename, folderPath string, r io.Reader, uploader string, allowedUsers []string, dev storage.DeviceInfo) (storage.FileRecord, error) {
+	return m.ProxyUploadWithConcurrency(peer, filename, folderPath, r, uploader, allowedUsers, dev, storage.WriteConcurrencyOptions{})
+}
+
+func (m *Manager) ProxyUploadWithConcurrency(peer NodeStatus, filename, folderPath string, r io.Reader, uploader string, allowedUsers []string, dev storage.DeviceInfo, conc storage.WriteConcurrencyOptions) (storage.FileRecord, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
@@ -1764,6 +1794,15 @@ func (m *Manager) ProxyUpload(peer NodeStatus, filename, folderPath string, r io
 		_ = mw.WriteField("device_name", dev.Name)
 		_ = mw.WriteField("device_ip", dev.IP)
 		_ = mw.WriteField("device_detail", dev.Detail)
+		if conc.ExpectedVersion != nil {
+			_ = mw.WriteField("expected_version", strconv.Itoa(*conc.ExpectedVersion))
+		}
+		if conc.ActorKeyID != "" {
+			_ = mw.WriteField("actor_key_id", conc.ActorKeyID)
+		}
+		if conc.ForceLease {
+			_ = mw.WriteField("force_lease", "true")
+		}
 		if len(allowedUsers) > 0 {
 			if rawAllowed, err := json.Marshal(allowedUsers); err == nil {
 				_ = mw.WriteField("allowed_users", string(rawAllowed))
@@ -1798,13 +1837,7 @@ func (m *Manager) ProxyUpload(peer NodeStatus, filename, folderPath string, r io
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
-			return storage.FileRecord{}, errors.New(errBody.Error)
-		}
-		return storage.FileRecord{}, fmt.Errorf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode)
+		return storage.FileRecord{}, decodePeerError(resp.StatusCode, body, fmt.Sprintf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode))
 	}
 
 	var rec storage.FileRecord
@@ -1895,10 +1928,23 @@ func (m *Manager) FetchPeerFileToTemp(peer NodeStatus, fileID string) (string, f
 }
 
 func (m *Manager) ProxyDelete(peer NodeStatus, fileID string) error {
+	return m.ProxyDeleteWithConcurrency(peer, fileID, storage.WriteConcurrencyOptions{})
+}
+
+func (m *Manager) ProxyDeleteWithConcurrency(peer NodeStatus, fileID string, conc storage.WriteConcurrencyOptions) error {
 	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/files/" + fileID
 	req, err := http.NewRequest(http.MethodDelete, targetURL, nil)
 	if err != nil {
 		return err
+	}
+	if conc.ExpectedVersion != nil {
+		req.Header.Set("X-Expected-Version", strconv.Itoa(*conc.ExpectedVersion))
+	}
+	if conc.ActorKeyID != "" {
+		req.Header.Set("X-Actor-Key-ID", conc.ActorKeyID)
+	}
+	if conc.ForceLease {
+		req.Header.Set("X-Force-Lease", "true")
 	}
 	SignRequest(req, m.Secret(), m.NodeID())
 
@@ -1908,14 +1954,18 @@ func (m *Manager) ProxyDelete(peer NodeStatus, fileID string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("远端节点删除失败 (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+		return decodePeerError(resp.StatusCode, body, fmt.Sprintf("远端节点删除失败 (%d): %s", resp.StatusCode, strings.TrimSpace(string(body))))
 	}
 	m.RemovePeerFile(peer.NodeID, fileID)
 	return nil
 }
 
 func (m *Manager) ProxyNewVersion(peer NodeStatus, fileID, filename, note string, r io.Reader, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
+	return m.ProxyNewVersionWithConcurrency(peer, fileID, filename, note, r, uploader, dev, storage.WriteConcurrencyOptions{})
+}
+
+func (m *Manager) ProxyNewVersionWithConcurrency(peer NodeStatus, fileID, filename, note string, r io.Reader, uploader string, dev storage.DeviceInfo, conc storage.WriteConcurrencyOptions) (storage.FileRecord, error) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
@@ -1929,6 +1979,15 @@ func (m *Manager) ProxyNewVersion(peer NodeStatus, fileID, filename, note string
 		_ = mw.WriteField("device_name", dev.Name)
 		_ = mw.WriteField("device_ip", dev.IP)
 		_ = mw.WriteField("device_detail", dev.Detail)
+		if conc.ExpectedVersion != nil {
+			_ = mw.WriteField("expected_version", strconv.Itoa(*conc.ExpectedVersion))
+		}
+		if conc.ActorKeyID != "" {
+			_ = mw.WriteField("actor_key_id", conc.ActorKeyID)
+		}
+		if conc.ForceLease {
+			_ = mw.WriteField("force_lease", "true")
+		}
 
 		part, err := mw.CreateFormFile("file", filename)
 		if err != nil {
@@ -1958,13 +2017,7 @@ func (m *Manager) ProxyNewVersion(peer NodeStatus, fileID, filename, note string
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
-			return storage.FileRecord{}, errors.New(errBody.Error)
-		}
-		return storage.FileRecord{}, fmt.Errorf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode)
+		return storage.FileRecord{}, decodePeerError(resp.StatusCode, body, fmt.Sprintf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode))
 	}
 
 	var rec storage.FileRecord
@@ -1976,7 +2029,11 @@ func (m *Manager) ProxyNewVersion(peer NodeStatus, fileID, filename, note string
 }
 
 func (m *Manager) ProxyEditFile(peer NodeStatus, fileID, content, note, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
-	payload, _ := json.Marshal(map[string]string{
+	return m.ProxyEditFileWithConcurrency(peer, fileID, content, note, uploader, dev, storage.WriteConcurrencyOptions{})
+}
+
+func (m *Manager) ProxyEditFileWithConcurrency(peer NodeStatus, fileID, content, note, uploader string, dev storage.DeviceInfo, conc storage.WriteConcurrencyOptions) (storage.FileRecord, error) {
+	reqBody := map[string]any{
 		"content":       content,
 		"note":          note,
 		"uploader":      uploader,
@@ -1984,7 +2041,13 @@ func (m *Manager) ProxyEditFile(peer NodeStatus, fileID, content, note, uploader
 		"device_name":   dev.Name,
 		"device_ip":     dev.IP,
 		"device_detail": dev.Detail,
-	})
+		"actor_key_id":  conc.ActorKeyID,
+		"force_lease":   conc.ForceLease,
+	}
+	if conc.ExpectedVersion != nil {
+		reqBody["expected_version"] = *conc.ExpectedVersion
+	}
+	payload, _ := json.Marshal(reqBody)
 	targetURL := fmt.Sprintf("%s/internal/cluster/files/%s/edit", strings.TrimRight(peer.HTTPURL, "/"), fileID)
 	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
 	if err != nil {
@@ -2000,13 +2063,7 @@ func (m *Manager) ProxyEditFile(peer NodeStatus, fileID, content, note, uploader
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
-			return storage.FileRecord{}, errors.New(errBody.Error)
-		}
-		return storage.FileRecord{}, fmt.Errorf("远端节点在线保存失败 (%d)", resp.StatusCode)
+		return storage.FileRecord{}, decodePeerError(resp.StatusCode, body, fmt.Sprintf("远端节点在线保存失败 (%d)", resp.StatusCode))
 	}
 	var rec storage.FileRecord
 	if err := json.Unmarshal(body, &rec); err != nil {
@@ -2017,14 +2074,24 @@ func (m *Manager) ProxyEditFile(peer NodeStatus, fileID, content, note, uploader
 }
 
 func (m *Manager) ProxyRestoreVersion(peer NodeStatus, fileID string, ver int, note, uploader string, dev storage.DeviceInfo) (storage.FileRecord, error) {
-	payload, _ := json.Marshal(map[string]string{
+	return m.ProxyRestoreVersionWithConcurrency(peer, fileID, ver, note, uploader, dev, storage.WriteConcurrencyOptions{})
+}
+
+func (m *Manager) ProxyRestoreVersionWithConcurrency(peer NodeStatus, fileID string, ver int, note, uploader string, dev storage.DeviceInfo, conc storage.WriteConcurrencyOptions) (storage.FileRecord, error) {
+	reqBody := map[string]any{
 		"note":          note,
 		"uploader":      uploader,
 		"device_fp":     dev.FP,
 		"device_name":   dev.Name,
 		"device_ip":     dev.IP,
 		"device_detail": dev.Detail,
-	})
+		"actor_key_id":  conc.ActorKeyID,
+		"force_lease":   conc.ForceLease,
+	}
+	if conc.ExpectedVersion != nil {
+		reqBody["expected_version"] = *conc.ExpectedVersion
+	}
+	payload, _ := json.Marshal(reqBody)
 	targetURL := fmt.Sprintf("%s/internal/cluster/files/%s/versions/%d/restore", strings.TrimRight(peer.HTTPURL, "/"), fileID, ver)
 	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
 	if err != nil {
@@ -2040,13 +2107,7 @@ func (m *Manager) ProxyRestoreVersion(peer NodeStatus, fileID string, ver int, n
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
-			return storage.FileRecord{}, errors.New(errBody.Error)
-		}
-		return storage.FileRecord{}, fmt.Errorf("远端节点回滚版本失败 (%d)", resp.StatusCode)
+		return storage.FileRecord{}, decodePeerError(resp.StatusCode, body, fmt.Sprintf("远端节点回滚版本失败 (%d)", resp.StatusCode))
 	}
 	var rec storage.FileRecord
 	if err := json.Unmarshal(body, &rec); err != nil {
@@ -2054,6 +2115,249 @@ func (m *Manager) ProxyRestoreVersion(peer NodeStatus, fileID string, ver int, n
 	}
 	m.AddPeerFile(peer.NodeID, rec)
 	return rec, nil
+}
+
+func (m *Manager) ProxyGetLease(peer NodeStatus, fileID string) (storage.FileLease, bool, error) {
+	var resp struct {
+		Locked bool               `json:"locked"`
+		Lease  *storage.FileLease `json:"lease"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodGet, "/internal/cluster/files/"+url.PathEscape(fileID)+"/lease", nil, &resp); err != nil {
+		return storage.FileLease{}, false, err
+	}
+	if !resp.Locked || resp.Lease == nil {
+		return storage.FileLease{}, false, nil
+	}
+	return *resp.Lease, true, nil
+}
+
+func (m *Manager) ProxyAcquireLease(peer NodeStatus, fileID, holderKeyID, holderName string, ttlSeconds int, force bool) (storage.FileLease, error) {
+	reqBody := map[string]any{
+		"holder_key_id": holderKeyID,
+		"holder_name":   holderName,
+		"ttl_seconds":   ttlSeconds,
+		"force":         force,
+	}
+	var resp struct {
+		Lease storage.FileLease `json:"lease"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/files/"+url.PathEscape(fileID)+"/lease", reqBody, &resp); err != nil {
+		return storage.FileLease{}, err
+	}
+	return resp.Lease, nil
+}
+
+func (m *Manager) ProxyReleaseLease(peer NodeStatus, fileID, holderKeyID string, force bool) error {
+	reqBody := map[string]any{
+		"holder_key_id": holderKeyID,
+		"force":         force,
+	}
+	return m.doSignedPeerJSON(peer, http.MethodDelete, "/internal/cluster/files/"+url.PathEscape(fileID)+"/lease", reqBody, nil)
+}
+
+func (m *Manager) ReadPeerFileBytes(peer NodeStatus, fileID string, maxBytes int64) ([]byte, error) {
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/files/" + url.PathEscape(fileID) + "/raw"
+	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.streamClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("从节点 %s 读取文件内容失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusGone {
+		return nil, errors.New("源文件已移动或删除，外部引用已失效")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+		return nil, decodePeerError(resp.StatusCode, body, fmt.Sprintf("从节点 %s 读取文件失败 (%d)", peer.NodeName, resp.StatusCode))
+	}
+
+	var data []byte
+	if maxBytes > 0 {
+		data, err = io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf("文件大小超过文本读取上限 (%d 字节)", maxBytes)
+		}
+	} else {
+		data, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if m.store != nil && len(data) > 0 {
+		m.store.AddDownloadBytes(int64(len(data)))
+	}
+	return data, nil
+}
+
+func (m *Manager) ProxyPatchFileWithConcurrency(peer NodeStatus, fileID string, patchReq storage.PatchRequest, method, uploader string, dev storage.DeviceInfo, conc storage.WriteConcurrencyOptions) (storage.FileRecord, error) {
+	effExpected := conc.ExpectedVersion
+	if effExpected == nil {
+		effExpected = patchReq.ExpectedVersion
+	}
+	reqBody := map[string]any{
+		"mode":          patchReq.Mode,
+		"hunks":         patchReq.Hunks,
+		"unified_diff":  patchReq.UnifiedDiff,
+		"note":          patchReq.Note,
+		"method":        method,
+		"uploader":      uploader,
+		"device_fp":     dev.FP,
+		"device_name":   dev.Name,
+		"device_ip":     dev.IP,
+		"device_detail": dev.Detail,
+		"actor_key_id":  conc.ActorKeyID,
+		"force_lease":   conc.ForceLease,
+	}
+	if effExpected != nil {
+		reqBody["expected_version"] = *effExpected
+	}
+	var rec storage.FileRecord
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/files/"+url.PathEscape(fileID)+"/patch", reqBody, &rec); err != nil {
+		return storage.FileRecord{}, err
+	}
+	rec.NodeID = peer.NodeID
+	rec.NodeName = peer.NodeName
+	rec.NodeOS = peer.OS
+	rec.NodeOnline = true
+	m.AddPeerFile(peer.NodeID, rec)
+	return rec, nil
+}
+
+func (m *Manager) ProxyBatchCommit(peer NodeStatus, req storage.BatchCommitRequest, uploader string, dev storage.DeviceInfo, conc storage.WriteConcurrencyOptions) (storage.BatchCommitResult, error) {
+	reqBody := map[string]any{
+		"note":          req.Note,
+		"operations":    req.Operations,
+		"uploader":      uploader,
+		"device_fp":     dev.FP,
+		"device_name":   dev.Name,
+		"device_ip":     dev.IP,
+		"device_detail": dev.Detail,
+		"actor_key_id":  conc.ActorKeyID,
+		"force_lease":   conc.ForceLease,
+	}
+	var res storage.BatchCommitResult
+	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/files/batch-commit", reqBody, &res); err != nil {
+		return storage.BatchCommitResult{}, err
+	}
+	for i := range res.Results {
+		item := &res.Results[i]
+		if item.Deleted {
+			m.RemovePeerFile(peer.NodeID, item.FileID)
+			continue
+		}
+		if item.Record != nil {
+			item.Record.NodeID = peer.NodeID
+			item.Record.NodeName = peer.NodeName
+			item.Record.NodeOS = peer.OS
+			item.Record.NodeOnline = true
+			m.AddPeerFile(peer.NodeID, *item.Record)
+		}
+	}
+	return res, nil
+}
+
+// ProxyVerifyMount runs an allowlisted build/test preset on a remote online peer node.
+func (m *Manager) ProxyVerifyMount(peer NodeStatus, mountID, presetID string) (bridge.VerifyResult, error) {
+	targetURL := fmt.Sprintf("%s/internal/cluster/mounts/%s/verify/%s", strings.TrimRight(peer.HTTPURL, "/"), url.PathEscape(mountID), url.PathEscape(presetID))
+	req, err := http.NewRequest(http.MethodPost, targetURL, nil)
+	if err != nil {
+		return bridge.VerifyResult{}, err
+	}
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := newDirectClusterClient(330 * time.Second).Do(req)
+	if err != nil {
+		return bridge.VerifyResult{}, fmt.Errorf("远端节点 %s 执行构建校验失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return bridge.VerifyResult{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return bridge.VerifyResult{}, decodePeerError(resp.StatusCode, body, fmt.Sprintf("远端节点构建校验失败 (%d)", resp.StatusCode))
+	}
+	var out bridge.VerifyResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return bridge.VerifyResult{}, err
+	}
+	return out, nil
+}
+
+func (m *Manager) FindMountByFolderPath(folderPath string) (ClusterMountView, string, NodeStatus, bool) {
+	clean := storage.SanitizeFolderPath(folderPath)
+	if clean == "" {
+		return ClusterMountView{}, "", NodeStatus{}, false
+	}
+	if localMount, rel, ok := m.store.FindMountByFolderPath(clean); ok {
+		self := m.SelfStatus()
+		return ClusterMountView{
+			MountEntry: localMount,
+			NodeID:     self.NodeID,
+			NodeName:   self.NodeName,
+			IsSelf:     true,
+		}, rel, self, true
+	}
+
+	hasPeerMounts := false
+	m.mu.RLock()
+	for _, p := range m.peers {
+		if time.Since(p.status.LastSeen) <= PeerTimeout && strings.TrimSpace(p.status.HTTPURL) != "" && p.status.MountCount > 0 {
+			hasPeerMounts = true
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if !hasPeerMounts {
+		return ClusterMountView{}, "", NodeStatus{}, false
+	}
+
+	allMounts := m.ListAllMounts()
+	lowClean := strings.ToLower(clean)
+	var best ClusterMountView
+	var bestRel string
+	bestAliasLen := -1
+	for _, view := range allMounts {
+		if view.IsSelf {
+			continue
+		}
+		alias := storage.SanitizeFolderPath(view.Alias)
+		if alias == "" {
+			continue
+		}
+		lowAlias := strings.ToLower(alias)
+		if lowClean == lowAlias {
+			if len(alias) > bestAliasLen {
+				best = view
+				bestRel = ""
+				bestAliasLen = len(alias)
+			}
+			continue
+		}
+		if strings.HasPrefix(lowClean, lowAlias+"/") && len(alias) > bestAliasLen {
+			best = view
+			bestRel = clean[len(alias)+1:]
+			bestAliasLen = len(alias)
+		}
+	}
+	if bestAliasLen < 0 {
+		return ClusterMountView{}, "", NodeStatus{}, false
+	}
+	peer, err := m.resolveOnlinePeer(best.NodeID)
+	if err != nil {
+		return best, bestRel, NodeStatus{NodeID: best.NodeID, NodeName: best.NodeName, Online: false}, true
+	}
+	return best, bestRel, peer, true
 }
 
 func (m *Manager) ProxyDeleteVersion(peer NodeStatus, fileID string, ver int) (storage.FileRecord, error) {
@@ -2242,6 +2546,15 @@ func (m *Manager) resolveOnlinePeer(nodeID string) (NodeStatus, error) {
 	return peer, nil
 }
 
+// ResolveNode resolves the local node (when nodeID is empty or matches self) or an online remote peer.
+func (m *Manager) ResolveNode(nodeID string) (NodeStatus, error) {
+	cleanID := strings.TrimSpace(nodeID)
+	if cleanID == "" || cleanID == m.NodeID() {
+		return m.SelfStatus(), nil
+	}
+	return m.resolveOnlinePeer(cleanID)
+}
+
 func (m *Manager) doSignedPeerJSON(peer NodeStatus, method, endpoint string, reqBody any, dst any) error {
 	var bodyReader io.Reader
 	if reqBody != nil {
@@ -2269,13 +2582,7 @@ func (m *Manager) doSignedPeerJSON(peer NodeStatus, method, endpoint string, req
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errBody struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
-			return errors.New(errBody.Error)
-		}
-		return fmt.Errorf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode)
+		return decodePeerError(resp.StatusCode, body, fmt.Sprintf("节点 %s 返回状态 %d", peer.NodeName, resp.StatusCode))
 	}
 	if dst != nil && len(body) > 0 {
 		return json.Unmarshal(body, dst)
@@ -2418,8 +2725,12 @@ func (m *Manager) ListAllMounts() []ClusterMountView {
 }
 
 func (m *Manager) AddNodeMount(nodeID, dirPath, alias, addedBy string, allowedUsers []string) (storage.MountEntry, int, error) {
+	return m.AddNodeMountWithOptions(nodeID, dirPath, alias, addedBy, allowedUsers, storage.AddMountOptions{})
+}
+
+func (m *Manager) AddNodeMountWithOptions(nodeID, dirPath, alias, addedBy string, allowedUsers []string, opts storage.AddMountOptions) (storage.MountEntry, int, error) {
 	if nodeID == "" || nodeID == m.NodeID() {
-		return m.store.AddMount(dirPath, alias, addedBy, allowedUsers)
+		return m.store.AddMountWithOptions(dirPath, alias, addedBy, allowedUsers, opts)
 	}
 	peer, err := m.resolveOnlinePeer(nodeID)
 	if err != nil {
@@ -2431,16 +2742,47 @@ func (m *Manager) AddNodeMount(nodeID, dirPath, alias, addedBy string, allowedUs
 		Files []storage.FileRecord `json:"files,omitempty"`
 	}
 	reqBody := map[string]any{
-		"dir_path":      dirPath,
-		"alias":         alias,
-		"added_by":      addedBy,
-		"allowed_users": allowedUsers,
+		"dir_path":        dirPath,
+		"alias":           alias,
+		"added_by":        addedBy,
+		"allowed_users":   allowedUsers,
+		"writable":        opts.Writable,
+		"shadow_backup":   opts.ShadowBackup,
+		"ignore_patterns": opts.IgnorePatterns,
+		"ignore_set":      opts.IgnoreSet,
+		"max_file_bytes":  opts.MaxFileBytes,
+		"verify_presets":  opts.VerifyPresets,
 	}
 	if err := m.doSignedPeerJSON(peer, http.MethodPost, "/internal/cluster/mounts", reqBody, &resp); err != nil {
 		return storage.MountEntry{}, 0, err
 	}
 	m.replacePeerMountFiles(peer.NodeID, resp.Mount.ID, resp.Files)
+	m.mu.Lock()
+	if cur, ok := m.peers[peer.NodeID]; ok {
+		cur.status.MountCount++
+	}
+	m.mu.Unlock()
 	return resp.Mount, resp.Added, nil
+}
+
+func (m *Manager) UpdateNodeMount(nodeID, mountID string, opts storage.UpdateMountOptions) (storage.MountEntry, storage.MountSyncResult, error) {
+	if nodeID == "" || nodeID == m.NodeID() {
+		return m.store.UpdateMount(mountID, opts)
+	}
+	peer, err := m.resolveOnlinePeer(nodeID)
+	if err != nil {
+		return storage.MountEntry{}, storage.MountSyncResult{}, err
+	}
+	var resp struct {
+		Mount  storage.MountEntry      `json:"mount"`
+		Result storage.MountSyncResult `json:"result"`
+		Files  []storage.FileRecord    `json:"files,omitempty"`
+	}
+	if err := m.doSignedPeerJSON(peer, http.MethodPatch, "/internal/cluster/mounts/"+url.PathEscape(mountID), opts, &resp); err != nil {
+		return storage.MountEntry{}, storage.MountSyncResult{}, err
+	}
+	m.replacePeerMountFiles(peer.NodeID, mountID, resp.Files)
+	return resp.Mount, resp.Result, nil
 }
 
 func (m *Manager) RemoveNodeMount(nodeID, mountID string) (int, error) {

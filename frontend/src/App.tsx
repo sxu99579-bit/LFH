@@ -53,6 +53,7 @@ function WorkspaceApp() {
   const [filesLoading, setFilesLoading] = useState(false)
   const [capabilities, setCapabilities] = useState<ClusterCapabilityView[]>([])
   const [selectableUsers, setSelectableUsers] = useState<Array<{ username: string; role: string }>>([])
+  const [writableMountIds, setWritableMountIds] = useState<Set<string>>(() => new Set())
 
   // File filters
   const [searchQuery, setSearchQuery] = useState('')
@@ -129,10 +130,20 @@ function WorkspaceApp() {
       ])
       setCapabilities(capRes.capabilities || [])
       setSelectableUsers(selRes.users || [])
+      if (user?.role === 'admin') {
+        const mntRes = await api.getMounts().catch(() => ({ mounts: [] }))
+        const nextSet = new Set<string>()
+        for (const m of mntRes.mounts || []) {
+          if (m.writable) nextSet.add(m.id)
+        }
+        setWritableMountIds(nextSet)
+      } else {
+        setWritableMountIds(new Set())
+      }
     } catch {
       // non-fatal
     }
-  }, [])
+  }, [user?.role])
 
   const refreshAll = useCallback(async () => {
     await Promise.all([loadCluster(), loadFilesAndSummary(), loadAuxData()])
@@ -176,6 +187,19 @@ function WorkspaceApp() {
       void loadFilesAndSummary()
       void loadCluster()
     }
+    es.addEventListener('change', (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data)
+        if (data.kind === 'entry_switched' && data.entry_url) {
+          toast(`主入口节点已切换至：${data.entry_url}`, 'info')
+          void loadCluster()
+          return
+        }
+      } catch {
+        // ignore parse error
+      }
+      handleEvent()
+    })
     es.addEventListener('upload', handleEvent)
     es.addEventListener('extract', handleEvent)
     es.addEventListener('delete', handleEvent)
@@ -319,6 +343,7 @@ function WorkspaceApp() {
             nodes={nodes}
             capabilities={capabilities}
             selectableUsers={selectableUsers}
+            writableMountIds={writableMountIds}
             isMobile={isMobile}
             loading={filesLoading}
             searchQuery={searchQuery}
@@ -420,6 +445,7 @@ function WorkspaceApp() {
         file={inspectedFile}
         user={user}
         capabilities={capabilities}
+        writableMountIds={writableMountIds}
         onClose={() => setInspectedFile(null)}
         onOpenPreview={(rec) => setPreviewFile(rec)}
         onOpenEditor={(rec) => setEditingFile(rec)}
@@ -435,6 +461,7 @@ function WorkspaceApp() {
 
       <PreviewModal
         file={previewFile}
+        writableMountIds={writableMountIds}
         onClose={() => setPreviewFile(null)}
         onOpenEditor={(rec) => setEditingFile(rec)}
         targetNode="auto"

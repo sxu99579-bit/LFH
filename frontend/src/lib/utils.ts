@@ -73,10 +73,41 @@ export function compareVersions(a?: string, b?: string): number {
 }
 
 export function formatUpdateMethodLabel(method?: string, ver?: number): string {
-  if (method === 'online_edit') return '在线编辑'
-  if (method === 'version_restore') return '版本回退'
-  if (method === 'upload_overwrite' || (ver && ver > 1)) return '上传覆盖'
-  return '首次入库'
+  switch (method) {
+    case 'agent_mcp_write':
+      return 'Agent 写入'
+    case 'agent_mcp_patch':
+      return 'Agent 补丁'
+    case 'patch':
+      return '文本补丁'
+    case 'batch_commit':
+      return '原子批量提交'
+    case 'mount_sync':
+      return '挂载同步'
+    case 'version_upload':
+      return '上传新版本'
+    case 'local_import':
+      return '本机导入'
+    case 'online_edit':
+      return '在线编辑'
+    case 'version_restore':
+      return '版本回退'
+    case 'upload_overwrite':
+      return '上传覆盖'
+    default:
+      if (ver && ver > 1) return '上传覆盖'
+      return '首次入库'
+  }
+}
+
+export function isAgentDeviceName(name?: string): boolean {
+  return Boolean(name && name.startsWith('Agent · '))
+}
+
+export function extractAgentLabel(name?: string): string {
+  return String(name || '')
+    .replace(/^Agent\s*·\s*/, '')
+    .trim()
 }
 
 export function formatStorageModeLabel(mode?: string): string {
@@ -122,8 +153,10 @@ export function getFileExt(rec: Pick<FileRecord, 'ext' | 'name'>): string {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : ''
 }
 
-export function isEditableTextFile(rec: FileRecord): boolean {
-  if (rec.storage_mode === 'mount') return false
+export function isEditableTextFile(rec: FileRecord, writableMountIds?: Set<string>): boolean {
+  if (rec.storage_mode === 'mount') {
+    if (!rec.mount_id || !writableMountIds?.has(rec.mount_id)) return false
+  }
   const ext = getFileExt(rec)
   return editableExts.has(ext)
 }
