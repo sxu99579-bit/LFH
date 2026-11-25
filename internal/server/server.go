@@ -122,6 +122,7 @@ func New(authMgr *auth.Manager, store *storage.Store, clusterMgr *cluster.Manage
 	}
 	srv.tasks = tm
 	srv.mcpServer = srv.newWiredMCPServer()
+	srv.installHAHooks()
 	srv.loadPluginJobs()
 	return srv, nil
 }
@@ -525,6 +526,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/promote", s.requireClusterAuth(s.handleClusterPromote))
 	mux.HandleFunc("POST /internal/cluster/repoint", s.requireClusterAuth(s.handleClusterRepoint))
 	mux.HandleFunc("POST /internal/cluster/leave", s.requireClusterAuth(s.handleClusterLeave))
+	mux.HandleFunc("GET /internal/cluster/ha-status", s.requireClusterAuth(s.handleClusterHAStatus))
+	mux.HandleFunc("GET /internal/cluster/state-snapshot", s.requireClusterAuth(s.handleClusterStateSnapshot))
+	mux.HandleFunc("POST /internal/cluster/failback-prepare", s.requireClusterAuth(s.handleClusterFailbackPrepare))
 	mux.HandleFunc("GET /internal/cluster/binary", s.requireClusterAuth(s.handleClusterGetBinary))
 	mux.HandleFunc("GET /internal/cluster/speedtest", s.requireClusterAuth(s.handleClusterSpeedtest))
 	mux.HandleFunc("POST /internal/cluster/upgrade-binary", s.requireClusterAuth(s.handleClusterUpgradeBinary))
@@ -532,6 +536,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Public & user-facing endpoints
 	mux.HandleFunc("GET /api/info", s.handleInfo)
+	mux.HandleFunc("GET /api/client/topology", s.handleClientTopology)
+	mux.HandleFunc("GET /api/client/update/check", s.handleClientUpdateCheck)
+	mux.HandleFunc("GET /api/client/update/download", s.handleClientUpdateDownload)
 	mux.HandleFunc("POST /api/cluster/adopt", s.handleClusterAdopt)
 	mux.HandleFunc("GET /worker", s.handleWorkerPage)
 	mux.HandleFunc("POST /api/cluster/leave-self", s.handleClusterLeaveSelf)
@@ -587,6 +594,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/cluster/storage-dir", s.requireAdmin(s.handleAdminClusterStorageDir))
 	mux.HandleFunc("POST /api/admin/cluster/clipboard", s.requireAdmin(s.handleAdminClusterClipboard))
 	mux.HandleFunc("POST /api/admin/cluster/endpoint", s.requireAdmin(s.handleAdminClusterEndpoint))
+	mux.HandleFunc("POST /api/admin/cluster/ha", s.requireAdmin(s.handleAdminClusterHA))
 	mux.HandleFunc("POST /api/admin/files/import-local", s.requireAdmin(s.handleAdminImportLocal))
 	mux.HandleFunc("GET /api/admin/mounts", s.requireAdmin(s.handleAdminListMounts))
 	mux.HandleFunc("POST /api/admin/mounts", s.requireAdmin(s.handleAdminAddMount))
@@ -722,6 +730,9 @@ func (s *Server) Handler() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/internal/cluster/") ||
 			r.URL.Path == "/s/ticket" ||
 			r.URL.Path == "/api/info" ||
+			r.URL.Path == "/api/client/topology" ||
+			r.URL.Path == "/api/client/update/check" ||
+			r.URL.Path == "/api/client/update/download" ||
 			r.URL.Path == "/api/cluster/adopt" ||
 			r.URL.Path == "/worker" ||
 			r.URL.Path == "/api/cluster/leave-self" ||
@@ -762,7 +773,9 @@ func (s *Server) handleServeMobileHTML(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) redirectWorkerToEntry(w http.ResponseWriter, r *http.Request) {
 	entry := s.cluster.EntryURL()
+	w.Header().Set("X-QuailNest-Role", s.cluster.Role())
 	if entry != "" {
+		w.Header().Set("X-QuailNest-Entry-URL", entry)
 		target := strings.TrimRight(entry, "/")
 		if r.URL.Path != "/" {
 			target += r.URL.RequestURI()
@@ -831,11 +844,16 @@ func (s *Server) handleClusterHeartbeat(w http.ResponseWriter, r *http.Request) 
 			NodeName: payload.Node.NodeName,
 		})
 	}
+	authHash, tasksHash := s.cluster.ExportStandbyHashes()
+	topo := s.cluster.BuildClientTopology()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
 		"entry_url":         s.cluster.EntryURL(),
 		"entry_version":     version.Version,
 		"auto_sync_workers": s.cluster.AutoSyncWorkers(),
+		"auth_hash":         authHash,
+		"tasks_hash":        tasksHash,
+		"topology":          topo,
 	})
 }
 
@@ -1414,6 +1432,7 @@ func (s *Server) handleClusterPromote(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ClusterSecret string `json:"cluster_secret"`
 		AuthSnapshot  []byte `json:"auth_snapshot"`
+		TasksSnapshot []byte `json:"tasks_snapshot,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -1431,6 +1450,11 @@ func (s *Server) handleClusterPromote(w http.ResponseWriter, r *http.Request) {
 	if err := s.auth.ImportSnapshot(req.AuthSnapshot); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	if len(req.TasksSnapshot) > 0 {
+		if tm := s.getTasks(); tm != nil {
+			_ = tm.ImportSnapshot(req.TasksSnapshot)
+		}
 	}
 	node, err := s.cluster.PromoteSelfToEntry(req.ClusterSecret)
 	if err != nil {
@@ -1451,13 +1475,15 @@ func (s *Server) handleClusterPromote(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClusterRepoint(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		NewEntryURL string `json:"new_entry_url"`
+		SenderID    string `json:"sender_id,omitempty"`
+		Epoch       uint64 `json:"epoch,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	if err := s.cluster.RepointEntry(req.NewEntryURL); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if err := s.cluster.RepointEntryWithEpoch(req.NewEntryURL, req.SenderID, req.Epoch); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 	s.events.Publish(FileChangeEvent{
@@ -1885,17 +1911,24 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if len(entryURLs) == 0 && entryURL != "" {
 		entryURLs = []string{entryURL}
 	}
+	poolSummary := s.cluster.PoolSummaryForRole(false)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"app_name":        version.AppName,
-		"version":         version.Version,
-		"entry_url":       entryURL,
-		"entry_urls":      entryURLs,
-		"entry_addrs":     activeAddrs,
-		"local_url":       "http://localhost:" + s.Port(),
-		"role":            s.cluster.Role(),
-		"invite_required": s.auth.Settings().InviteRequired,
-		"is_mobile_ua":    isMobileRequest(r),
-		"pool":            s.cluster.PoolSummaryForRole(false),
+		"app_name":             version.AppName,
+		"version":              version.Version,
+		"cluster_id":           s.cluster.ClusterID(),
+		"node_id":              s.cluster.NodeID(),
+		"node_name":            s.cluster.NodeName(),
+		"epoch":                s.cluster.ClusterEpoch(),
+		"failover_active":      s.cluster.FailoverActive(),
+		"home_primary_node_id": poolSummary.HomePrimaryNodeID,
+		"entry_url":            entryURL,
+		"entry_urls":           entryURLs,
+		"entry_addrs":          activeAddrs,
+		"local_url":            "http://localhost:" + s.Port(),
+		"role":                 s.cluster.Role(),
+		"invite_required":      s.auth.Settings().InviteRequired,
+		"is_mobile_ua":         isMobileRequest(r),
+		"pool":                 poolSummary,
 	})
 }
 
@@ -2458,16 +2491,25 @@ func (s *Server) handleAdminClusterPromote(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "导出账号快照失败: " + err.Error()})
 		return
 	}
-	newEntryURL, targetNode, err := s.cluster.PromotePeer(req.TargetNodeID, snap)
+	var tasksSnap []byte
+	if tm := s.getTasks(); tm != nil {
+		tasksSnap, _ = tm.ExportSnapshot()
+	}
+	newEntryURL, targetNode, err := s.cluster.PromotePeerWithState(req.TargetNodeID, snap, tasksSnap)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	topo := s.cluster.BuildClientTopology()
 	s.logAudit(r, u.Username, "cluster_promote", targetNode.NodeName, "ok", newEntryURL)
 	s.events.Publish(FileChangeEvent{
-		Kind:     "entry_switched",
-		NodeName: targetNode.NodeName,
-		EntryURL: newEntryURL,
+		Kind:      "entry_switched",
+		Reason:    "manual_promote",
+		NodeName:  targetNode.NodeName,
+		EntryURL:  newEntryURL,
+		EntryURLs: topo.ActiveEntryURLs,
+		Epoch:     topo.Epoch,
+		Topology:  &topo,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
@@ -3510,6 +3552,16 @@ func (s *Server) handleAdminClusterEndpoint(w http.ResponseWriter, r *http.Reque
 		newEntryURL = primaryURL
 		_ = s.cluster.SetEndpointNICsConfig(cleanIP, cleanExposeIPs, cleanDisabledIPs, updateNICSelection, newPort, newEntryURL)
 	}
+
+	topo := s.cluster.BuildClientTopology()
+	s.PublishEvent(FileChangeEvent{
+		Kind:      "topology_updated",
+		NodeName:  s.cluster.NodeName(),
+		EntryURL:  newEntryURL,
+		EntryURLs: topo.ActiveEntryURLs,
+		Epoch:     topo.Epoch,
+		Topology:  &topo,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"entry_url":       newEntryURL,

@@ -69,8 +69,14 @@ type Config struct {
 	Port             string            `json:"port,omitempty"`
 	EntryHint        string            `json:"entry_hint,omitempty"`
 	StorageDir       string            `json:"storage_dir,omitempty"`
-	PrimaryNodeID    string            `json:"primary_node_id,omitempty"`
-	EvictedPeers     map[string]string `json:"evicted_peers,omitempty"`
+	PrimaryNodeID          string            `json:"primary_node_id,omitempty"`
+	ClusterEpoch           uint64            `json:"cluster_epoch,omitempty"`
+	HomePrimaryNodeID      string            `json:"home_primary_node_id,omitempty"`
+	HomePrimaryURLs        []string          `json:"home_primary_urls,omitempty"`
+	FailoverActive         bool              `json:"failover_active,omitempty"`
+	AutoFailover           *bool             `json:"auto_failover,omitempty"`
+	PreferredStandbyNodeID string            `json:"preferred_standby_node_id,omitempty"`
+	EvictedPeers           map[string]string `json:"evicted_peers,omitempty"`
 	AutoSyncWorkers  *bool             `json:"auto_sync_workers,omitempty"`
 	ClipboardEnabled bool              `json:"clipboard_enabled,omitempty"`
 	DiscoveryPort    int               `json:"discovery_port"`
@@ -122,6 +128,7 @@ type NodeStatus struct {
 	Arch               string      `json:"arch"`
 	Version            string      `json:"version,omitempty"`
 	HTTPURL            string      `json:"http_url"`
+	HTTPURLs           []string    `json:"http_urls,omitempty"`
 	QuotaGB            float64     `json:"quota_gb"`
 	QuotaBytes         int64       `json:"quota_bytes"`
 	UsedBytes          int64       `json:"used_bytes"`
@@ -159,17 +166,26 @@ type NodeStatus struct {
 	MountCount         int                         `json:"mount_count,omitempty"`
 	ClipboardEnabled   bool                        `json:"clipboard_enabled"`
 	Plugins            []plugins.CapabilitySummary `json:"plugins,omitempty"`
+	FailoverScore      float64                     `json:"failover_score,omitempty"`
 	Online             bool                        `json:"online"`
 	IsSelf             bool        `json:"is_self"`
 	LastSeen           time.Time   `json:"last_seen"`
 }
 
 type PoolSummary struct {
-	EntryURL           string       `json:"entry_url"`
-	EntryVersion       string       `json:"entry_version,omitempty"`
-	AutoSyncWorkers    bool         `json:"auto_sync_workers"`
-	PrimaryNodeID      string       `json:"primary_node_id,omitempty"`
-	VersionConsistent  bool         `json:"version_consistent"`
+	ClusterID              string       `json:"cluster_id,omitempty"`
+	ClusterEpoch           uint64       `json:"cluster_epoch,omitempty"`
+	EntryURL               string       `json:"entry_url"`
+	EntryVersion           string       `json:"entry_version,omitempty"`
+	AutoSyncWorkers        bool         `json:"auto_sync_workers"`
+	PrimaryNodeID          string       `json:"primary_node_id,omitempty"`
+	HomePrimaryNodeID      string       `json:"home_primary_node_id,omitempty"`
+	HomePrimaryURLs        []string     `json:"home_primary_urls,omitempty"`
+	FailoverActive         bool         `json:"failover_active,omitempty"`
+	AutoFailover           bool         `json:"auto_failover"`
+	PreferredStandbyNodeID string       `json:"preferred_standby_node_id,omitempty"`
+	StandbyOrder           []string     `json:"standby_order,omitempty"`
+	VersionConsistent      bool         `json:"version_consistent"`
 	MismatchedNodes    []string     `json:"mismatched_nodes,omitempty"`
 	HighestNodeVersion string       `json:"highest_node_version,omitempty"`
 	HighestNodeID      string       `json:"highest_node_id,omitempty"`
@@ -250,9 +266,26 @@ type Manager struct {
 	onPeerVersionAhead  func(peer NodeStatus)
 	onEntryVersionAhead func(entryURL, entryVersion string)
 	onClipboardToggle   func(enabled bool)
+	onEntryAddrs        func() []string
+	onExportState       func() (authHash string, authSnap []byte, tasksHash string, tasksSnap []byte)
+	onImportState       func(authSnap []byte, tasksSnap []byte) error
+	onHAEvent           func(kind, reason, newEntryURL string, entryURLs []string, epoch uint64, topo *ClientTopology)
+	cachedTopology      *ClientTopology
+	lastAuthHash        string
+	lastTasksHash       string
 	lastSelfSyncAttempt time.Time
 	lastHBLatencyMs     float64
 	lastSyncAt          time.Time
+	lastHBSuccessAt     time.Time
+	hbFailSince         time.Time
+	failoverInProgress  bool
+	homeStableSince     time.Time
+	failbackInProgress  bool
+	failoverTimeout     time.Duration
+	failoverRankDelay   time.Duration
+	failbackProbeIntv   time.Duration
+	failbackStableDur   time.Duration
+	failbackGrace       time.Duration
 }
 
 func (m *Manager) SetPluginManager(pm *plugins.Manager) {
@@ -430,16 +463,29 @@ func NewManager(dataDir string, store *storage.Store, opts Options) (*Manager, e
 		cfg.NodeName = hn
 	}
 
+	if cfg.ClusterEpoch == 0 && cfg.Role == RoleEntry {
+		cfg.ClusterEpoch = 1
+	}
+	if cfg.Role == RoleEntry && !cfg.FailoverActive && strings.TrimSpace(cfg.HomePrimaryNodeID) == "" {
+		cfg.HomePrimaryNodeID = cfg.NodeID
+	}
+
 	m := &Manager{
-		cfgPath:      cfgPath,
-		cfg:          cfg,
-		store:        store,
-		selfURL:      strings.TrimRight(strings.TrimSpace(opts.SelfURL), "/"),
-		peers:        make(map[string]*peerRecord),
-		discovered:   make(map[string]DiscoveredNode),
-		apiClient:    newDirectClusterClient(10 * time.Second),
-		streamClient: newDirectClusterClient(0),
-		hbTrigger:    make(chan struct{}, 1),
+		cfgPath:           cfgPath,
+		cfg:               cfg,
+		store:             store,
+		selfURL:           strings.TrimRight(strings.TrimSpace(opts.SelfURL), "/"),
+		peers:             make(map[string]*peerRecord),
+		discovered:        make(map[string]DiscoveredNode),
+		apiClient:         newDirectClusterClient(10 * time.Second),
+		streamClient:      newDirectClusterClient(0),
+		hbTrigger:         make(chan struct{}, 1),
+		lastHBSuccessAt:   time.Now(),
+		failoverTimeout:   12 * time.Second,
+		failoverRankDelay: 4 * time.Second,
+		failbackProbeIntv: 5 * time.Second,
+		failbackStableDur: 10 * time.Second,
+		failbackGrace:     3 * time.Second,
 	}
 	if err := m.saveLocked(); err != nil {
 		return nil, err
@@ -591,6 +637,7 @@ func (m *Manager) SelfStatus() NodeStatus {
 	hbLat := m.lastHBLatencyMs
 	lastSync := m.lastSyncAt
 	pm := m.pluginMgr
+	httpURLs := m.selfAllURLsLocked()
 	m.mu.RUnlock()
 
 	var localPlugins []plugins.CapabilitySummary
@@ -635,7 +682,7 @@ func (m *Manager) SelfStatus() NodeStatus {
 		netLat = hbLat
 	}
 
-	return NodeStatus{
+	st := NodeStatus{
 		NodeID:             cfg.NodeID,
 		NodeName:           cfg.NodeName,
 		Role:               cfg.Role,
@@ -643,6 +690,7 @@ func (m *Manager) SelfStatus() NodeStatus {
 		Arch:               runtime.GOARCH,
 		Version:            version.Version,
 		HTTPURL:            selfURL,
+		HTTPURLs:           httpURLs,
 		QuotaGB:            float64(quotaBytes) / float64(GB),
 		QuotaBytes:         quotaBytes,
 		UsedBytes:          used,
@@ -682,6 +730,8 @@ func (m *Manager) SelfStatus() NodeStatus {
 		IsSelf:             true,
 		LastSeen:           now,
 	}
+	st.FailoverScore = ComputeFailoverScore(st, cfg.PreferredStandbyNodeID)
+	return st
 }
 
 func deriveDiskMetricsFromDrives(storageDir string, drives []DriveInfo) (total, used, free int64, pct float64) {
@@ -1365,11 +1415,19 @@ func (m *Manager) PoolSummary() PoolSummary {
 			primaryID = self.NodeID
 		}
 	}
+	preferredStandby := m.cfg.PreferredStandbyNodeID
+	autoFailover := m.cfg.AutoFailover == nil || *m.cfg.AutoFailover
+	clusterEpoch := m.cfg.ClusterEpoch
+	homePrimaryID := m.cfg.HomePrimaryNodeID
+	homePrimaryURLs := cloneCleanURLs(m.cfg.HomePrimaryURLs)
+	failoverActive := m.cfg.FailoverActive
+	clusterID := SecretHash(m.cfg.ClusterSecret)
 	peers := make([]NodeStatus, 0, len(m.peers))
 	for _, p := range m.peers {
 		st := p.status
 		st.IsSelf = false
 		st.Online = now.Sub(st.LastSeen) <= PeerTimeout
+		st.FailoverScore = ComputeFailoverScore(st, preferredStandby)
 		if role == RoleEntry {
 			if st.NodeID == primaryID {
 				st.Role = RoleEntry
@@ -1380,6 +1438,17 @@ func (m *Manager) PoolSummary() PoolSummary {
 		peers = append(peers, st)
 	}
 	m.mu.RUnlock()
+
+	self.FailoverScore = ComputeFailoverScore(self, preferredStandby)
+	if role == RoleEntry && !failoverActive {
+		homePrimaryID = self.NodeID
+		if len(self.HTTPURLs) > 0 {
+			homePrimaryURLs = cloneCleanURLs(self.HTTPURLs)
+		} else if entryURL != "" {
+			homePrimaryURLs = []string{entryURL}
+		}
+	}
+	standbyOrder := computeStandbyOrder(peers, preferredStandby)
 
 	if role == RoleEntry {
 		if primaryID == self.NodeID {
@@ -1413,12 +1482,20 @@ func (m *Manager) PoolSummary() PoolSummary {
 	}
 
 	summary := PoolSummary{
-		EntryURL:        entryURL,
-		EntryVersion:    version.Version,
-		AutoSyncWorkers: m.AutoSyncWorkers(),
-		PrimaryNodeID:   primaryID,
-		TotalNodes:      len(nodes),
-		Nodes:           nodes,
+		ClusterID:              clusterID,
+		ClusterEpoch:           clusterEpoch,
+		EntryURL:               entryURL,
+		EntryVersion:           version.Version,
+		AutoSyncWorkers:        m.AutoSyncWorkers(),
+		PrimaryNodeID:          primaryID,
+		HomePrimaryNodeID:      homePrimaryID,
+		HomePrimaryURLs:        homePrimaryURLs,
+		FailoverActive:         failoverActive,
+		AutoFailover:           autoFailover,
+		PreferredStandbyNodeID: preferredStandby,
+		StandbyOrder:           standbyOrder,
+		TotalNodes:             len(nodes),
+		Nodes:                  nodes,
 	}
 	highestVer := version.Version
 	highestNodeID := self.NodeID
@@ -3148,6 +3225,9 @@ func (m *Manager) restartLoopsLocked() {
 	}
 	if role == RoleEntry {
 		go m.runPeerLivenessWatcher(loopCtx)
+		if m.cfg.FailoverActive && strings.TrimSpace(m.cfg.HomePrimaryNodeID) != "" && m.cfg.HomePrimaryNodeID != m.cfg.NodeID {
+			go m.runFailbackWatcher(loopCtx)
+		}
 	} else if role == RoleWorker {
 		go m.runWorkerHeartbeat(loopCtx)
 	}
@@ -3378,10 +3458,20 @@ func (m *Manager) PromoteSelfToEntry(clusterSecret string) (NodeStatus, error) {
 	oldHint := m.cfg.EntryHint
 	oldDiscEntry := m.discoveredEntryURL
 	oldPrimary := m.cfg.PrimaryNodeID
+	oldHome := m.cfg.HomePrimaryNodeID
+	oldFailover := m.cfg.FailoverActive
+	oldEpoch := m.cfg.ClusterEpoch
 
 	m.cfg.Role = RoleEntry
 	m.cfg.EntryHint = ""
-	m.cfg.PrimaryNodeID = ""
+	m.cfg.PrimaryNodeID = m.cfg.NodeID
+	m.cfg.HomePrimaryNodeID = m.cfg.NodeID
+	m.cfg.FailoverActive = false
+	if m.cfg.ClusterEpoch == 0 {
+		m.cfg.ClusterEpoch = 1
+	} else {
+		m.cfg.ClusterEpoch++
+	}
 	m.discoveredEntryURL = ""
 	if m.peers == nil {
 		m.peers = make(map[string]*peerRecord)
@@ -3390,6 +3480,9 @@ func (m *Manager) PromoteSelfToEntry(clusterSecret string) (NodeStatus, error) {
 		m.cfg.Role = oldRole
 		m.cfg.EntryHint = oldHint
 		m.cfg.PrimaryNodeID = oldPrimary
+		m.cfg.HomePrimaryNodeID = oldHome
+		m.cfg.FailoverActive = oldFailover
+		m.cfg.ClusterEpoch = oldEpoch
 		m.discoveredEntryURL = oldDiscEntry
 		m.mu.Unlock()
 		return NodeStatus{}, err
@@ -3414,13 +3507,17 @@ func (m *Manager) RepointEntry(newEntryURL string) error {
 	oldRole := m.cfg.Role
 	oldHint := m.cfg.EntryHint
 	oldPrimary := m.cfg.PrimaryNodeID
+	oldFailover := m.cfg.FailoverActive
 	oldDiscEntry := m.discoveredEntryURL
 	oldPeers := m.peers
 
 	m.cfg.Role = RoleWorker
 	m.cfg.EntryHint = cleanURL
 	m.cfg.PrimaryNodeID = ""
+	m.cfg.FailoverActive = false
 	m.discoveredEntryURL = cleanURL
+	m.hbFailSince = time.Time{}
+	m.lastHBSuccessAt = time.Now()
 	m.peers = make(map[string]*peerRecord)
 	for id, dn := range m.discovered {
 		dn.AlreadyInPool = false
@@ -3430,6 +3527,7 @@ func (m *Manager) RepointEntry(newEntryURL string) error {
 		m.cfg.Role = oldRole
 		m.cfg.EntryHint = oldHint
 		m.cfg.PrimaryNodeID = oldPrimary
+		m.cfg.FailoverActive = oldFailover
 		m.discoveredEntryURL = oldDiscEntry
 		m.peers = oldPeers
 		m.mu.Unlock()
@@ -3620,6 +3718,11 @@ func (m *Manager) DissolveCluster() (int, error) {
 
 // PromotePeer transfers cluster entry authority and auth state to an online worker node (or designates primary node for legacy workers).
 func (m *Manager) PromotePeer(targetNodeID string, authSnapshot []byte) (string, NodeStatus, error) {
+	return m.PromotePeerWithState(targetNodeID, authSnapshot, nil)
+}
+
+// PromotePeerWithState transfers entry authority along with auth and optional AI task board snapshots.
+func (m *Manager) PromotePeerWithState(targetNodeID string, authSnapshot, tasksSnapshot []byte) (string, NodeStatus, error) {
 	if m.Role() != RoleEntry {
 		return "", NodeStatus{}, errors.New("当前节点不是主入口节点")
 	}
@@ -3681,9 +3784,11 @@ func (m *Manager) PromotePeer(targetNodeID string, authSnapshot []byte) (string,
 	promotePayload, err := json.Marshal(struct {
 		ClusterSecret string `json:"cluster_secret"`
 		AuthSnapshot  []byte `json:"auth_snapshot"`
+		TasksSnapshot []byte `json:"tasks_snapshot,omitempty"`
 	}{
 		ClusterSecret: secret,
 		AuthSnapshot:  authSnapshot,
+		TasksSnapshot: tasksSnapshot,
 	})
 	if err != nil {
 		return "", NodeStatus{}, err
@@ -3830,18 +3935,24 @@ func (m *Manager) SendHeartbeatNow() error {
 	m.mu.Lock()
 	m.lastHBLatencyMs = rttMs
 	m.lastSyncAt = time.Now()
+	m.lastHBSuccessAt = time.Now()
+	m.hbFailSince = time.Time{}
 	m.mu.Unlock()
 
 	var ack struct {
-		OK              bool   `json:"ok"`
-		EntryURL        string `json:"entry_url"`
-		EntryVersion    string `json:"entry_version"`
-		AutoSyncWorkers bool   `json:"auto_sync_workers"`
+		OK              bool            `json:"ok"`
+		EntryURL        string          `json:"entry_url"`
+		EntryVersion    string          `json:"entry_version"`
+		AutoSyncWorkers bool            `json:"auto_sync_workers"`
+		AuthHash        string          `json:"auth_hash,omitempty"`
+		TasksHash       string          `json:"tasks_hash,omitempty"`
+		Topology        *ClientTopology `json:"topology,omitempty"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&ack) == nil {
+	if json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&ack) == nil {
 		clean := strings.TrimRight(strings.TrimSpace(ack.EntryURL), "/")
 		var aheadCb func(entryURL, entryVersion string)
 		var targetEntry string
+		var exportFn func() (string, []byte, string, []byte)
 		m.mu.Lock()
 		if clean != "" {
 			m.discoveredEntryURL = clean
@@ -3850,6 +3961,10 @@ func (m *Manager) SendHeartbeatNow() error {
 		if targetEntry == "" {
 			targetEntry = strings.TrimRight(entryURL, "/")
 		}
+		if ack.Topology != nil {
+			m.updateCachedTopologyLocked(ack.Topology)
+		}
+		exportFn = m.onExportState
 		if m.cfg.Role == RoleWorker &&
 			ack.AutoSyncWorkers &&
 			ack.EntryVersion != "" &&
@@ -3860,6 +3975,14 @@ func (m *Manager) SendHeartbeatNow() error {
 			aheadCb = m.onEntryVersionAhead
 		}
 		m.mu.Unlock()
+
+		if m.Role() == RoleWorker && targetEntry != "" && exportFn != nil && (ack.AuthHash != "" || ack.TasksHash != "") {
+			localAuthHash, _, localTasksHash, _ := exportFn()
+			if (ack.AuthHash != "" && ack.AuthHash != localAuthHash) ||
+				(ack.TasksHash != "" && ack.TasksHash != localTasksHash) {
+				_ = m.pullStateSnapshotFromEntry(targetEntry)
+			}
+		}
 		if aheadCb != nil {
 			go aheadCb(targetEntry, ack.EntryVersion)
 		}
@@ -3870,17 +3993,40 @@ func (m *Manager) SendHeartbeatNow() error {
 func (m *Manager) runWorkerHeartbeat(ctx context.Context) {
 	if err := m.SendHeartbeatNow(); err != nil {
 		log.Printf("[cluster] initial heartbeat pending: %v", err)
+		m.recordHeartbeatFailure()
 	}
-	ticker := time.NewTicker(3 * time.Second)
+	m.mu.RLock()
+	ft := m.failoverTimeout
+	m.mu.RUnlock()
+	hbIntv := 3 * time.Second
+	if ft > 0 && ft/2 < hbIntv {
+		hbIntv = ft / 2
+		if hbIntv < 100*time.Millisecond {
+			hbIntv = 100 * time.Millisecond
+		}
+	}
+	ticker := time.NewTicker(hbIntv)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = m.SendHeartbeatNow()
+			if err := m.SendHeartbeatNow(); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.recordHeartbeatFailure()
+				m.maybeRunAutoFailover(ctx)
+			}
 		case <-m.hbTrigger:
-			_ = m.SendHeartbeatNow()
+			if err := m.SendHeartbeatNow(); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.recordHeartbeatFailure()
+				m.maybeRunAutoFailover(ctx)
+			}
 		}
 	}
 }

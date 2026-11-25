@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuailNest 鹌鹑窝 — 桌面客户端配置</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09090b;
+      --card: #121216;
+      --card-2: #18181d;
+      --border: #27272a;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.14), transparent 45%),
+        radial-gradient(circle at 85% 100%, rgba(59, 130, 246, 0.08), transparent 42%),
+        var(--bg);
+      color: var(--text);
+      padding: 24px 20px 36px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+    .shell {
+      width: 100%;
+      max-width: 780px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 4px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+    .brand img {
+      width: 46px;
+      height: 46px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: #0f0f13;
+      object-fit: cover;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 19px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .brand p {
+      margin: 3px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 18px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+    .banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.38);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 13px;
+    }
+    .banner.show { display: flex; }
+    .banner-title { font-weight: 600; color: #fca5a5; }
+    .banner-sub { color: var(--muted); margin-top: 2px; font-size: 12px; }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 108px 1fr 114px;
+      gap: 10px;
+    }
+    .grid-half {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    @media (max-width: 620px) {
+      .grid-2, .grid-half { grid-template-columns: 1fr; }
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    input, select {
+      width: 100%;
+      height: 38px;
+      padding: 0 12px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--card-2);
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus, select:focus { border-color: var(--primary); }
+    .switch-row {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 13px;
+    }
+    .switch-row input[type="checkbox"] {
+      width: 17px;
+      height: 17px;
+      accent-color: var(--primary);
+      cursor: pointer;
+    }
+    .probe-box {
+      display: none;
+      margin-top: 12px;
+      border-radius: 10px;
+      padding: 10px 13px;
+      font-size: 13px;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+      background: var(--card-2);
+    }
+    .probe-box.show { display: block; }
+    .probe-box.ok { border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.08); color: #6ee7b7; }
+    .probe-box.err { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.09); color: #fca5a5; }
+    .probe-box.loading { border-color: rgba(37, 99, 235, 0.45); background: rgba(37, 99, 235, 0.09); color: #93c5fd; }
+    .actions {
+      margin-top: 14px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      height: 37px;
+      padding: 0 14px;
+      border-radius: 9px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 1px solid var(--border);
+      background: var(--card-2);
+      color: var(--text);
+    }
+    button:hover:not(:disabled) { background: #222229; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+    button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    button.sm { height: 30px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
+    button.danger { color: #fca5a5; border-color: rgba(239, 68, 68, 0.3); }
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin: 0 0 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--card-2);
+      margin-top: 8px;
+    }
+    .item-main { min-width: 0; flex: 1; }
+    .item-title {
+      font-size: 13px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+    .pill {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: rgba(37, 99, 235, 0.16);
+      color: #93c5fd;
+    }
+    .pill-green {
+      background: rgba(16, 185, 129, 0.16);
+      color: #6ee7b7;
+    }
+    .item-sub {
+      margin-top: 3px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .item-btns { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .empty-tip { font-size: 12px; color: var(--muted); padding: 6px 0 2px; }
+    .progress-wrap {
+      display: none;
+      margin-top: 8px;
+      height: 7px;
+      width: 100%;
+      background: #27272a;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-wrap.show { display: block; }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--primary);
+      transition: width 0.2s ease;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 5px;
+      border-radius: 5px;
+    }
+    .footer-note {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+      padding: 0 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="header">
+      <div class="brand">
+        <img src="/logo.png" alt="QuailNest" />
+        <div>
+          <h1>QuailNest 鹌鹑窝 · 桌面客户端 <span id="client-ver-badge" class="pill">V1.11.25.2</span></h1>
+          <p>自动扫描局域网集群 · 主备自动切换/恢复 · 本机固定 MCP 代理 · 内置自升级</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="sm" id="btn-scan-lan">扫描局域网 (8080/UDP)</button>
+        <button type="button" class="sm" id="btn-check-update">检查客户端更新</button>
+      </div>
+    </div>
+
+    <div id="offline-banner" class="banner">
+      <div>
+        <div class="banner-title" id="offline-title">当前服务器连接中断</div>
+        <div class="banner-sub" id="offline-detail">正在等待恢复或请确认 IP 与端口</div>
+      </div>
+      <button type="button" class="sm" id="btn-retry-current">自动容灾重连</button>
+    </div>
+
+    <!-- Client Update Card -->
+    <div id="update-card" class="card" style="display: none;">
+      <div class="section-title">
+        <span id="update-title">发现新版本客户端</span>
+        <span id="update-source-pill" class="pill pill-green">可升级</span>
+      </div>
+      <div id="update-desc" class="empty-tip" style="color: var(--text);"></div>
+      <div id="update-progress-wrap" class="progress-wrap">
+        <div id="update-progress-bar" class="progress-bar"></div>
+      </div>
+      <div class="actions" style="margin-top: 10px;">
+        <button type="button" class="sm" id="btn-update-close">稍后提醒</button>
+        <button type="button" class="sm primary" id="btn-update-install">下载校验并立即升级</button>
+      </div>
+    </div>
+
+    <!-- LAN Discovery Card -->
+    <div class="card">
+      <div class="section-title">
+        <span>局域网发现的 QuailNest 集群</span>
+        <span id="scan-status" style="font-size: 12px; color: var(--muted); font-weight: 400;">待扫描</span>
+      </div>
+      <div id="discovered-list">
+        <div class="empty-tip">点击右上角「扫描局域网 (8080/UDP)」，仅 1 个集群将自动接入，多个集群可手动选择。</div>
+      </div>
+    </div>
+
+    <!-- Manual Server Config Card -->
+    <div class="card">
+      <div class="section-title">
+        <span>手动配置服务端与本地代理</span>
+        <span style="font-size: 11px; font-weight: 400; color: var(--muted);">支持粘贴完整 URL 自动拆解</span>
+      </div>
+
+      <form id="server-form">
+        <div class="grid-2">
+          <div>
+            <label for="scheme">协议</label>
+            <select id="scheme">
+              <option value="http">http://</option>
+              <option value="https">https://</option>
+            </select>
+          </div>
+          <div>
+            <label for="host">服务器 IP 地址或域名 *</label>
+            <input id="host" type="text" placeholder="例如：192.168.1.100 或 nas.local" autocomplete="off" required />
+          </div>
+          <div>
+            <label for="port">端口 *</label>
+            <input id="port" type="number" min="1" max="65535" value="8080" required />
+          </div>
+        </div>
+
+        <div class="grid-half">
+          <div>
+            <label for="label">服务器备注（可选）</label>
+            <input id="label" type="text" placeholder="例如：家庭 NAS / 工作室主机" />
+          </div>
+          <div>
+            <label for="view-mode">默认显示视图</label>
+            <select id="view-mode">
+              <option value="desktop">桌面版工作区（推荐）</option>
+              <option value="mobile">移动版精简视图</option>
+            </select>
+          </div>
+        </div>
+
+        <label class="switch-row" for="auto-connect">
+          <span>下次启动桌面客户端时自动多级容灾重连（原地址 -> 主节点其余网卡 -> 备选节点）</span>
+          <input id="auto-connect" type="checkbox" checked />
+        </label>
+
+        <div class="switch-row" style="margin-top: 8px;">
+          <div style="min-width: 0; flex: 1;">
+            <div style="font-weight: 500;">启用本机固定 MCP 代理（<code>http://127.0.0.1:<span id="mcp-port-text">18080</span>/mcp</code>）</div>
+            <div style="font-size: 11px; color: var(--muted); margin-top: 2px;">
+              本地 Cursor / Antigravity / Claude Code 连接此固定地址，主节点切换或恢复时自动透明跟踪
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button type="button" class="sm" id="btn-copy-mcp">复制代理地址</button>
+            <input id="mcp-proxy-enabled" type="checkbox" style="width: 17px; height: 17px; accent-color: var(--primary); cursor: pointer;" />
+          </div>
+        </div>
+
+        <div id="probe-box" class="probe-box"></div>
+
+        <div class="actions">
+          <button type="button" id="btn-test">测试连接</button>
+          <button type="submit" class="primary" id="btn-save">保存并进入工作区</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- History & Saved Topology Card -->
+    <div class="card">
+      <div class="section-title">
+        <span>历史服务器与已保存节点拓扑</span>
+        <span id="topology-badge" style="font-size: 12px; color: var(--muted); font-weight: 400;">尚未缓存拓扑</span>
+      </div>
+      <div id="history-list">
+        <div class="empty-tip">暂无历史连接记录，保存或自动扫描连接后将记录在此。</div>
+      </div>
+    </div>
+
+    <div class="footer-note">
+      <div>进入工作区后，可随时通过菜单 <code>服务器 -> 修改 IP / 切换或扫描服务器</code> 或快捷键 <code>Ctrl + ,</code> 返回此页；主节点恢复上线后客户端也将自动切回主节点。</div>
+      <div id="config-path" style="margin-top: 4px; opacity: 0.85;"></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const schemeEl = document.getElementById('scheme');
+      const hostEl = document.getElementById('host');
+      const portEl = document.getElementById('port');
+      const labelEl = document.getElementById('label');
+      const viewModeEl = document.getElementById('view-mode');
+      const autoConnectEl = document.getElementById('auto-connect');
+      const mcpEnabledEl = document.getElementById('mcp-proxy-enabled');
+      const mcpPortTextEl = document.getElementById('mcp-port-text');
+      const probeBoxEl = document.getElementById('probe-box');
+      const historyListEl = document.getElementById('history-list');
+      const topologyBadgeEl = document.getElementById('topology-badge');
+      const discoveredListEl = document.getElementById('discovered-list');
+      const scanStatusEl = document.getElementById('scan-status');
+      const configPathEl = document.getElementById('config-path');
+      const offlineBannerEl = document.getElementById('offline-banner');
+      const offlineTitleEl = document.getElementById('offline-title');
+      const offlineDetailEl = document.getElementById('offline-detail');
+      const updateCardEl = document.getElementById('update-card');
+      const updateTitleEl = document.getElementById('update-title');
+      const updateSourcePillEl = document.getElementById('update-source-pill');
+      const updateDescEl = document.getElementById('update-desc');
+      const updateProgressWrapEl = document.getElementById('update-progress-wrap');
+      const updateProgressBarEl = document.getElementById('update-progress-bar');
+
+      const btnTest = document.getElementById('btn-test');
+      const btnSave = document.getElementById('btn-save');
+      const btnScanLan = document.getElementById('btn-scan-lan');
+      const btnCheckUpdate = document.getElementById('btn-check-update');
+      const btnRetryCurrent = document.getElementById('btn-retry-current');
+      const btnUpdateInstall = document.getElementById('btn-update-install');
+      const btnUpdateClose = document.getElementById('btn-update-close');
+      const btnCopyMcp = document.getElementById('btn-copy-mcp');
+
+      let currentProfile = null;
+      let latestUpdateInfo = null;
+      let mcpPort = 18080;
+
+      function postIPC(payload) {
+        if (window.ipc && typeof window.ipc.postMessage === 'function') {
+          window.ipc.postMessage(JSON.stringify(payload));
+        }
+      }
+
+      function trySplitUrlInput(rawText) {
+        const s = (rawText || '').trim();
+        const m = s.match(/^(https?):\/\/(\[[^\]]+\]|[^:/?#\s]+)(?::(\d+))?/i);
+        if (m) {
+          schemeEl.value = m[1].toLowerCase();
+          hostEl.value = m[2].replace(/^\[|\]$/g, '');
+          portEl.value = m[3] ? m[3] : (schemeEl.value === 'https' ? '443' : '8080');
+          return true;
+        }
+        const mHostPort = s.match(/^([^:/?#\s]+):(\d+)$/);
+        if (mHostPort) {
+          hostEl.value = mHostPort[1];
+          portEl.value = mHostPort[2];
+          return true;
+        }
+        return false;
+      }
+
+      hostEl.addEventListener('paste', function (e) {
+        const pasted = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+        if (pasted.includes('://') || /^[^:\s]+:\d+/.test(pasted.trim())) {
+          setTimeout(() => trySplitUrlInput(hostEl.value), 0);
+        }
+      });
+
+      hostEl.addEventListener('blur', function () {
+        if (hostEl.value.includes('://')) trySplitUrlInput(hostEl.value);
+      });
+
+      function showProbe(kind, text) {
+        probeBoxEl.className = 'probe-box show ' + kind;
+        probeBoxEl.textContent = text;
+      }
+
+      function formPayload() {
+        return {
+          scheme: schemeEl.value,
+          host: hostEl.value.trim(),
+          port: portEl.value.trim(),
+          label: labelEl.value.trim(),
+          view_mode: viewModeEl.value,
+          auto_connect: Boolean(autoConnectEl.checked),
+        };
+      }
+
+      mcpEnabledEl.addEventListener('change', function () {
+        postIPC({ cmd: 'set_mcp_proxy', enabled: Boolean(mcpEnabledEl.checked) });
+      });
+
+      btnCopyMcp.addEventListener('click', async function () {
+        const txt = 'http://127.0.0.1:' + mcpPort + '/mcp';
+        try {
+          await navigator.clipboard.writeText(txt);
+          showProbe('ok', '已复制固定 MCP 地址：' + txt);
+        } catch (e) {
+          showProbe('ok', '请手动复制：' + txt);
+        }
+      });
+
+      function renderDiscovered(clusters) {
+        const list = Array.isArray(clusters) ? clusters : [];
+        discoveredListEl.innerHTML = '';
+        if (list.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'empty-tip';
+          empty.textContent = '局域网暂未发现可连接的 QuailNest 实例，请确认服务端已启动且与本机处于同一网段。';
+          discoveredListEl.appendChild(empty);
+          return;
+        }
+        list.forEach((c) => {
+          const row = document.createElement('div');
+          row.className = 'list-item';
+
+          const main = document.createElement('div');
+          main.className = 'item-main';
+
+          const title = document.createElement('div');
+          title.className = 'item-title';
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = c.name || 'QuailNest';
+          title.appendChild(nameSpan);
+
+          if (c.version) {
+            const p1 = document.createElement('span');
+            p1.className = 'pill';
+            p1.textContent = c.version;
+            title.appendChild(p1);
+          }
+          const p2 = document.createElement('span');
+          p2.className = 'pill pill-green';
+          p2.textContent = c.online_nodes + '/' + c.total_nodes + ' 节点 · ' + c.latency_ms + 'ms';
+          title.appendChild(p2);
+
+          const sub = document.createElement('div');
+          sub.className = 'item-sub';
+          const altCount = Array.isArray(c.entry_urls) ? c.entry_urls.length : 1;
+          sub.textContent = c.entry_url + (altCount > 1 ? '（共 ' + altCount + ' 个可用网卡入口）' : '');
+
+          main.appendChild(title);
+          main.appendChild(sub);
+
+          const btns = document.createElement('div');
+          btns.className = 'item-btns';
+          const btnJoin = document.createElement('button');
+          btnJoin.type = 'button';
+          btnJoin.className = 'sm primary';
+          btnJoin.textContent = '选择并进入';
+          btnJoin.onclick = function () {
+            postIPC({
+              cmd: 'save_and_connect',
+              scheme: c.entry_url.startsWith('https://') ? 'https' : 'http',
+              host: c.entry_url,
+              port: '',
+              label: c.name || '',
+              view_mode: viewModeEl.value,
+              auto_connect: Boolean(autoConnectEl.checked),
+            });
+          };
+          btns.appendChild(btnJoin);
+
+          row.appendChild(main);
+          row.appendChild(btns);
+          discoveredListEl.appendChild(row);
+        });
+      }
+
+      function renderHistory(history, topo) {
+        const list = Array.isArray(history) ? history : [];
+        if (topo && Array.isArray(topo.nodes) && topo.nodes.length > 0) {
+          const nicCount = Array.isArray(topo.active_entry_urls) ? topo.active_entry_urls.length : 0;
+          topologyBadgeEl.textContent =
+            '已缓存 Epoch #' + (topo.epoch || 1) + ' · 主节点 ' + nicCount + ' 个网卡 / 共 ' + topo.nodes.length + ' 节点';
+        } else {
+          topologyBadgeEl.textContent = list.length + ' 条历史记录';
+        }
+
+        historyListEl.innerHTML = '';
+        if (list.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'empty-tip';
+          empty.textContent = '暂无历史连接记录，保存首个服务器后将自动记录在此。';
+          historyListEl.appendChild(empty);
+          return;
+        }
+        list.forEach((item) => {
+          const baseUrl = item.scheme + '://' + (item.host.includes(':') ? '[' + item.host + ']' : item.host) + ':' + item.port;
+          const row = document.createElement('div');
+          row.className = 'list-item';
+
+          const main = document.createElement('div');
+          main.className = 'item-main';
+
+          const title = document.createElement('div');
+          title.className = 'item-title';
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = item.label ? item.label : item.host + ':' + item.port;
+          title.appendChild(nameSpan);
+          if (item.version) {
+            const pill = document.createElement('span');
+            pill.className = 'pill';
+            pill.textContent = item.version;
+            title.appendChild(pill);
+          }
+
+          const sub = document.createElement('div');
+          sub.className = 'item-sub';
+          sub.textContent = baseUrl;
+          main.appendChild(title);
+          main.appendChild(sub);
+
+          const btns = document.createElement('div');
+          btns.className = 'item-btns';
+
+          const btnUse = document.createElement('button');
+          btnUse.type = 'button';
+          btnUse.className = 'sm primary';
+          btnUse.textContent = '直接连接';
+          btnUse.onclick = function () {
+            postIPC({
+              cmd: 'save_and_connect',
+              scheme: item.scheme,
+              host: item.host,
+              port: String(item.port),
+              label: item.label || '',
+              view_mode: viewModeEl.value,
+              auto_connect: Boolean(autoConnectEl.checked),
+            });
+          };
+
+          const btnFill = document.createElement('button');
+          btnFill.type = 'button';
+          btnFill.className = 'sm';
+          btnFill.textContent = '编辑';
+          btnFill.onclick = function () {
+            schemeEl.value = item.scheme || 'http';
+            hostEl.value = item.host || '';
+            portEl.value = String(item.port || 8080);
+            labelEl.value = item.label || '';
+            hostEl.focus();
+          };
+
+          const btnDel = document.createElement('button');
+          btnDel.type = 'button';
+          btnDel.className = 'sm danger';
+          btnDel.textContent = '删除';
+          btnDel.onclick = function () {
+            postIPC({ cmd: 'delete_history', base_url: baseUrl });
+          };
+
+          btns.appendChild(btnUse);
+          btns.appendChild(btnFill);
+          btns.appendChild(btnDel);
+
+          row.appendChild(main);
+          row.appendChild(btns);
+          historyListEl.appendChild(row);
+        });
+      }
+
+      btnScanLan.addEventListener('click', function () {
+        btnScanLan.disabled = true;
+        scanStatusEl.textContent = '正在并发扫描局域网 8080 端口与 UDP 广播...';
+        postIPC({ cmd: 'scan_lan', auto_enter_single: false });
+      });
+
+      btnCheckUpdate.addEventListener('click', function () {
+        btnCheckUpdate.disabled = true;
+        btnCheckUpdate.textContent = '检查中...';
+        postIPC({ cmd: 'check_update' });
+      });
+
+      btnUpdateInstall.addEventListener('click', function () {
+        if (!latestUpdateInfo || !latestUpdateInfo.download_url) return;
+        btnUpdateInstall.disabled = true;
+        updateProgressWrapEl.classList.add('show');
+        updateProgressBarEl.style.width = '5%';
+        postIPC({
+          cmd: 'apply_update',
+          download_url: latestUpdateInfo.download_url,
+          sha256: latestUpdateInfo.sha256 || '',
+        });
+      });
+
+      btnUpdateClose.addEventListener('click', function () {
+        updateCardEl.style.display = 'none';
+      });
+
+      btnTest.addEventListener('click', function () {
+        const data = formPayload();
+        if (!data.host) {
+          showProbe('err', '请先填写服务器 IP 地址或域名');
+          hostEl.focus();
+          return;
+        }
+        btnTest.disabled = true;
+        showProbe('loading', '正在探测服务端 /api/info 接口...');
+        postIPC({ cmd: 'test_connection', ...data });
+      });
+
+      document.getElementById('server-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        const data = formPayload();
+        if (!data.host) {
+          showProbe('err', '请填写服务器 IP 地址或域名');
+          hostEl.focus();
+          return;
+        }
+        showProbe('loading', '正在校验地址并连接到 QuailNest 工作区...');
+        postIPC({ cmd: 'save_and_connect', ...data });
+      });
+
+      btnRetryCurrent.addEventListener('click', function () {
+        postIPC({ cmd: 'auto_failover_reconnect' });
+      });
+
+      window.__qnHydrate = function (state) {
+        if (!state) return;
+        if (state.client_version) {
+          document.getElementById('client-ver-badge').textContent = state.client_version;
+        }
+        const cfg = state.config || {};
+        autoConnectEl.checked = cfg.auto_connect !== false;
+        viewModeEl.value = cfg.view_mode === 'mobile' ? 'mobile' : 'desktop';
+        mcpEnabledEl.checked = Boolean(cfg.mcp_proxy_enabled);
+        mcpPort = cfg.mcp_proxy_port || 18080;
+        mcpPortTextEl.textContent = String(mcpPort);
+
+        if (cfg.current) {
+          currentProfile = cfg.current;
+          schemeEl.value = cfg.current.scheme || 'http';
+          hostEl.value = cfg.current.host || '';
+          portEl.value = String(cfg.current.port || 8080);
+          labelEl.value = cfg.current.label || '';
+        }
+        renderHistory(cfg.history || [], cfg.topology || null);
+        if (state.config_path) {
+          configPathEl.textContent = '配置与拓扑缓存路径：' + state.config_path;
+        }
+      };
+
+      window.__qnScanStarting = function () {
+        btnScanLan.disabled = true;
+        scanStatusEl.textContent = '正在扫描局域网（8080 端口 + UDP 53319）...';
+      };
+
+      window.__qnScanResult = function (clusters) {
+        btnScanLan.disabled = false;
+        const n = Array.isArray(clusters) ? clusters.length : 0;
+        scanStatusEl.textContent = n > 0 ? ('发现 ' + n + ' 个集群') : '未发现局域网集群';
+        renderDiscovered(clusters);
+      };
+
+      window.__qnProbeResult = function (res) {
+        btnTest.disabled = false;
+        if (!res) return;
+        if (res.ok) {
+          const nicInfo = Array.isArray(res.entry_urls) && res.entry_urls.length > 0
+            ? (' | 主节点 ' + res.entry_urls.length + ' 网卡')
+            : '';
+          showProbe(
+            'ok',
+            '连接成功：' + (res.app_name || 'QuailNest') + ' ' + (res.version || '') +
+            ' | 在线节点 ' + res.online_nodes + '/' + res.total_nodes + nicInfo + ' | 延迟 ' + res.latency_ms + ' ms'
+          );
+        } else {
+          showProbe('err', res.error || '连接失败');
+        }
+      };
+
+      window.__qnUpdateResult = function (payload) {
+        btnCheckUpdate.disabled = false;
+        btnCheckUpdate.textContent = '检查客户端更新';
+        if (!payload || !payload.ok) {
+          showProbe('err', (payload && payload.error) || '检查更新失败');
+          return;
+        }
+        const info = payload.info || {};
+        if (!info.has_update) {
+          updateCardEl.style.display = 'none';
+          showProbe('ok', '当前客户端已是最新版本 (' + (info.current_version || 'V1.11.25.2') + ')');
+          return;
+        }
+        latestUpdateInfo = info;
+        updateCardEl.style.display = 'block';
+        updateTitleEl.textContent = '发现新版本桌面客户端：' + info.latest_version;
+        updateSourcePillEl.textContent = info.via_server ? '经由局域网服务端极速下载' : 'GitHub Release';
+        updateDescEl.textContent = info.release_notes
+          ? info.release_notes.slice(0, 260)
+          : ('安装包：' + (info.asset_name || 'quailnest-desktop-windows-amd64.exe'));
+      };
+
+      window.__qnUpdateProgress = function (pct, msg, errMsg) {
+        if (errMsg) {
+          btnUpdateInstall.disabled = false;
+          updateProgressWrapEl.classList.remove('show');
+          showProbe('err', errMsg);
+          return;
+        }
+        updateProgressWrapEl.classList.add('show');
+        updateProgressBarEl.style.width = Math.min(100, Math.max(0, Number(pct) || 0)) + '%';
+        if (msg) updateDescEl.textContent = msg;
+      };
+
+      window.__qnSetError = function (msg) {
+        btnTest.disabled = false;
+        btnSave.disabled = false;
+        showProbe('err', msg || '操作失败');
+      };
+
+      window.__qnSetOfflineBanner = function (url, reason) {
+        offlineBannerEl.classList.add('show');
+        offlineTitleEl.textContent = '无法连接服务端：' + (url || '');
+        offlineDetailEl.textContent = reason || '请检查服务端是否运行，或点击右侧「自动容灾重连」切换备用地址';
+      };
+
+      window.addEventListener('DOMContentLoaded', function () {
+        postIPC({ cmd: 'get_state' });
+      });
+    })();
+  </script>
+</body>
+</html>

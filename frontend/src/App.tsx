@@ -222,11 +222,37 @@ function WorkspaceApp() {
       void loadFilesAndSummary()
       void loadCluster()
     }
+    const forwardNativeServerEvent = (data: Record<string, unknown>) => {
+      try {
+        const w = window as Window & {
+          QuailNestAndroid?: { onServerEvent?: (json: string) => void }
+          ipc?: { postMessage?: (msg: string) => void }
+        }
+        if (w.QuailNestAndroid?.onServerEvent) {
+          w.QuailNestAndroid.onServerEvent(JSON.stringify(data))
+        }
+        if (w.ipc?.postMessage) {
+          w.ipc.postMessage(JSON.stringify({ cmd: 'server_event', event: data }))
+        }
+      } catch {
+        // ignore bridge error
+      }
+    }
     es.addEventListener('change', (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data)
+        if (data.kind === 'topology_updated') {
+          forwardNativeServerEvent(data)
+          void loadCluster()
+          return
+        }
         if (data.kind === 'entry_switched' && data.entry_url) {
-          toast(`主入口节点已切换至：${data.entry_url}`, 'info')
+          forwardNativeServerEvent(data)
+          const msg =
+            data.reason === 'primary_restored'
+              ? `主节点已恢复上线，正在切回主入口：${data.entry_url}`
+              : `主入口节点已切换至：${data.entry_url}`
+          toast(msg, 'info')
           void loadCluster()
           return
         }
@@ -276,8 +302,13 @@ function WorkspaceApp() {
     es.addEventListener('entry_switched', (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data)
+        forwardNativeServerEvent(data)
         if (data.entry_url) {
-          toast(`主入口节点已切换至：${data.entry_url}`, 'info')
+          const msg =
+            data.reason === 'primary_restored'
+              ? `主节点已恢复上线，正在切回主入口：${data.entry_url}`
+              : `主入口节点已切换至：${data.entry_url}`
+          toast(msg, 'info')
         }
       } catch {
         // ignore parse error

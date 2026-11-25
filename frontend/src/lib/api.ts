@@ -16,6 +16,7 @@ import type {
   AgentTaskSummary,
   AuditEntry,
   BandwidthProbeResult,
+  ClientTopology,
   ClusterCapabilityView,
   ClusterResponse,
   DiscoveredNode,
@@ -410,6 +411,12 @@ export const api = {
     }),
   saveEndpoint: (payload: { expose_ip: string; expose_ips: string[]; disabled_ips: string[]; port: string }) =>
     apiFetch<ClusterResponse & { entry_url: string; port_changed?: boolean }>('/api/admin/cluster/endpoint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  setClusterHA: (payload: { auto_failover?: boolean; preferred_standby_node_id?: string }) =>
+    apiFetch<{ ok: boolean; topology: ClientTopology; pool: PoolSummary }>('/api/admin/cluster/ha', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

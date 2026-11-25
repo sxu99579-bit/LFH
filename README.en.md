@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">Issues</a> · <code>V1.11.25.1</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">Issues</a> · <code>V1.11.25.2</code>
 </p>
 
 ---
@@ -51,6 +51,7 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - Join or adopt standalone QuailNest hosts directly from the Web UI using the peer's admin credentials or cluster secret—zero CLI restart needed, with customizable storage quotas (`500MB`, `10GB`, `1.5TB`) behind one unified entry URL;
   - **Live Node Status & Online-Only File Visibility**: Real-time node health indicators appear in the top bar, sidebar, and cluster table. Files on **online nodes appear normally**, while files stored on **offline nodes are automatically hidden** and seamlessly restored when the node comes back online.
   - **Lossless Primary Node Switching & Node Exit Control**: Promote any online worker node into the cluster's new **Primary/Entry** node in one click (migrating accounts/permissions while preserving files across all hosts), evict online nodes or delete offline entries cleanly, dissolve an entire cluster, or visit `/worker` on any worker node to leave the cluster independently.
+  - **HA Auto-Failover, Hot-Standby Replication, LAN Auto-Discovery & Self-Update (`V1.11.25.2`)**: Continuously replicates Auth accounts, quotas, Agent keys, OAuth tokens, and AI Task Board snapshots (`agent-tasks.json`) to standby nodes; promotes the highest network-stability-scored standby node automatically if the primary drops, and cleanly transfers delta state + broadcasts SSE switchback when the home primary recovers stably; Desktop & Android clients automatically discover LAN clusters (`:8080` + UDP `53319`), persist multi-NIC & full-cluster address tables for 4-level automatic failover, offer an optional Desktop local MCP proxy (`127.0.0.1:18080`), and support SHA-256-verified in-app self-updates via the primary server's LAN cache.
 - **Super Clipboard & Instant Create `.txt`**:
   - Opt-in **Super Clipboard** per node (`-clipboard`, local `/worker` toggle, or centralized Primary-to-Worker remote toggle in Cluster Settings): automatically watches copied text/images on enabled machines, auto-names them with timestamps, and uploads into `超级剪贴板/YYYY-MM` for cross-device access;
   - Create `.txt` files directly from the Web toolbar with an inline editor and immediate versioning.
@@ -129,7 +130,7 @@ Your generated initial credentials are also written to `./quailnest-data/initial
 Manual `docker build` / `docker run` equivalent:
 
 ```bash
-docker build -t quailnest:V1.11.25.1 .
+docker build -t quailnest:V1.11.25.2 .
 
 docker run -d \
   --name quailnest \
@@ -137,7 +138,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/quailnest-data:/data \
-  quailnest:V1.11.25.1 -data /data -port 8080 -expose-ip 192.168.1.100
+  quailnest:V1.11.25.2 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---
@@ -170,6 +171,15 @@ Copy [`cluster-config.example.json`](./cluster-config.example.json) to `cluster-
 # Example: contribute 50GB from a second machine to the cluster pool
 ./quailnest -role worker -quota 50GB -secret "your-cluster-secret" -entry "http://192.168.1.100:8080"
 ```
+
+---
+
+## Desktop & Android Clients
+
+In addition to web browsers, QuailNest provides standalone **Desktop** and **Android** clients. Both launch into a clean **IP Address + Port** setup view with `/api/info` connectivity probing, persistent configuration, server history, and automatic reconnect on startup:
+
+- **Desktop Client (Windows Portable / Rust + WebView2)**: Source at [`clients/desktop/`](./clients/desktop/), built binary at `dist/quailnest-desktop-windows-amd64.exe`. Features persistent session/cookies, smart URL paste (`http://ip:port`), server history list, and instant server switching anytime via top menu **`服务器 -> 修改 IP 与端口`** or **`Ctrl + ,`**.
+- **Android Client (Signed APK / Native WebView Wrapper)**: Source at [`clients/android/`](./clients/android/), signed APK at `dist/quailnest-android.apk` (`minSdk 24` / `targetSdk 36`, LAN cleartext HTTP enabled). Supports multi-file upload picker, fullscreen media playback, native `DownloadManager` integration (plus `blob:` bridging), and a draggable floating server switch pill.
 
 ---
 
@@ -210,6 +220,9 @@ All backend packages use pure Go stdlib with embedded frontend static assets (`/
 │   ├── updater/                # GitHub Release check, verification & live swap
 │   └── version/                # App name, release tag & default repo
 ├── assets/                     # Minimalist SVG/PNG logo suite & README illustrations
+├── clients/
+│   ├── desktop/                # Rust (tao + wry + muda) desktop client (WebView2 + manual IP/port setup)
+│   └── android/                # Native Android client (manual IP/port setup, DownloadManager & floating switcher)
 ├── frontend/                   # React 19 + TypeScript + Vite + Tailwind v4 frontend source (inspired by shadcn-admin)
 ├── web/                        # Compiled frontend bundle embedded via Go (index.html, mobile.html, assets)
 ├── Dockerfile                  # Multi-stage Alpine container build

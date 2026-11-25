@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -385,13 +386,7 @@ func (m *TaskManager) loadFromDisk() error {
 }
 
 func (m *TaskManager) persistLocked() error {
-	list := make([]AgentTask, 0, len(m.order))
-	for _, id := range m.order {
-		if t, ok := m.tasks[id]; ok {
-			list = append(list, cloneAgentTask(t))
-		}
-	}
-	data, err := json.MarshalIndent(taskStoreSnapshot{Tasks: list}, "", "  ")
+	data, err := json.MarshalIndent(m.snapshotLocked(), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -400,6 +395,79 @@ func (m *TaskManager) persistLocked() error {
 		return err
 	}
 	return os.Rename(tmp, m.path)
+}
+
+func (m *TaskManager) snapshotLocked() taskStoreSnapshot {
+	list := make([]AgentTask, 0, len(m.order))
+	for _, id := range m.order {
+		if t, ok := m.tasks[id]; ok {
+			list = append(list, cloneAgentTask(t))
+		}
+	}
+	return taskStoreSnapshot{Tasks: list}
+}
+
+// ExportSnapshot serializes the task board state into canonical JSON for hot-standby cluster sync.
+func (m *TaskManager) ExportSnapshot() ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return json.Marshal(m.snapshotLocked())
+}
+
+// SnapshotHash returns a short deterministic digest of the current task board state.
+func (m *TaskManager) SnapshotHash() string {
+	raw, err := m.ExportSnapshot()
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
+}
+
+// ImportSnapshot atomically replaces the local task board from a primary/failback snapshot.
+func (m *TaskManager) ImportSnapshot(raw []byte) error {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil
+	}
+	var snap taskStoreSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return fmt.Errorf("无效的任务板快照: %w", err)
+	}
+
+	m.mu.Lock()
+	oldTasks := m.tasks
+	oldOrder := m.order
+
+	nextTasks := make(map[string]*AgentTask, len(snap.Tasks))
+	nextOrder := make([]string, 0, len(snap.Tasks))
+	for _, t := range snap.Tasks {
+		cp := cloneAgentTask(&t)
+		if cp.ID == "" {
+			continue
+		}
+		if _, dup := nextTasks[cp.ID]; dup {
+			continue
+		}
+		nextTasks[cp.ID] = &cp
+		nextOrder = append(nextOrder, cp.ID)
+	}
+	m.tasks = nextTasks
+	m.order = nextOrder
+	if err := m.persistLocked(); err != nil {
+		m.tasks = oldTasks
+		m.order = oldOrder
+		m.mu.Unlock()
+		return err
+	}
+	m.notifyWaitersLocked()
+	cb := m.onChange
+	m.mu.Unlock()
+
+	if cb != nil {
+		cb("sync", AgentTask{})
+	}
+	return nil
 }
 
 func cloneTimeValPtr(t *time.Time) *time.Time {

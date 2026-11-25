@@ -4,23 +4,28 @@ import (
 	"sync"
 	"time"
 
+	"lfh/internal/cluster"
 	"lfh/internal/updater"
 )
 
 type FileChangeEvent struct {
-	Version      uint64          `json:"version"`
-	Kind         string          `json:"kind"` // "upload", "delete", "extract", "cluster_sync", "entry_switched", "policy", "access", "role_change", "update_available", "update_progress", "upgrading"
-	Uploader     string          `json:"uploader,omitempty"`
-	ActorName    string          `json:"actor_name,omitempty"`
-	Count        int             `json:"count,omitempty"`
-	FileNames    []string        `json:"file_names,omitempty"`
-	FolderPaths  []string        `json:"folder_paths,omitempty"`
-	BatchID      string          `json:"batch_id,omitempty"`
-	NodeName     string          `json:"node_name,omitempty"`
-	EntryURL     string          `json:"entry_url,omitempty"`
-	AllowedUsers []string        `json:"-"`
-	UpdateStatus *updater.Status `json:"update_status,omitempty"`
-	Timestamp    int64           `json:"timestamp"`
+	Version      uint64                  `json:"version"`
+	Kind         string                  `json:"kind"` // "upload", "delete", "extract", "cluster_sync", "entry_switched", "topology_updated", "policy", "access", "role_change", "update_available", "update_progress", "upgrading"
+	Reason       string                  `json:"reason,omitempty"`
+	Uploader     string                  `json:"uploader,omitempty"`
+	ActorName    string                  `json:"actor_name,omitempty"`
+	Count        int                     `json:"count,omitempty"`
+	FileNames    []string                `json:"file_names,omitempty"`
+	FolderPaths  []string                `json:"folder_paths,omitempty"`
+	BatchID      string                  `json:"batch_id,omitempty"`
+	NodeName     string                  `json:"node_name,omitempty"`
+	EntryURL     string                  `json:"entry_url,omitempty"`
+	EntryURLs    []string                `json:"entry_urls,omitempty"`
+	Epoch        uint64                  `json:"epoch,omitempty"`
+	Topology     *cluster.ClientTopology `json:"topology,omitempty"`
+	AllowedUsers []string                `json:"-"`
+	UpdateStatus *updater.Status         `json:"update_status,omitempty"`
+	Timestamp    int64                   `json:"timestamp"`
 }
 
 const maxEventHistory = 64

@@ -158,6 +158,8 @@ export interface NodeStatus {
   disk_percent: number
   net_latency_ms: number
   heartbeat_latency_ms: number
+  failover_score?: number
+  http_urls?: string[]
   upload_bps: number
   download_bps: number
   total_upload_bytes?: number
@@ -177,10 +179,18 @@ export interface NodeStatus {
 }
 
 export interface PoolSummary {
+  cluster_id?: string
+  cluster_epoch?: number
   entry_url: string
   entry_version?: string
   auto_sync_workers: boolean
   primary_node_id?: string
+  home_primary_node_id?: string
+  home_primary_urls?: string[]
+  failover_active?: boolean
+  auto_failover?: boolean
+  preferred_standby_node_id?: string
+  standby_order?: string[]
   version_consistent?: boolean
   mismatched_nodes?: string[]
   highest_node_version?: string
@@ -192,6 +202,32 @@ export interface PoolSummary {
   total_free_bytes: number
   total_file_count: number
   nodes: NodeStatus[]
+}
+
+export interface TopologyNode {
+  node_id: string
+  node_name: string
+  role: string
+  is_home_primary?: boolean
+  online: boolean
+  urls: string[]
+  score: number
+  version?: string
+}
+
+export interface ClientTopology {
+  cluster_id: string
+  epoch: number
+  home_primary_node_id?: string
+  home_primary_urls?: string[]
+  active_entry_node_id?: string
+  active_entry_urls?: string[]
+  failover_active?: boolean
+  auto_failover: boolean
+  preferred_standby_node_id?: string
+  standby_order?: string[]
+  nodes: TopologyNode[]
+  updated_at: string
 }
 
 export interface ServerInfo {

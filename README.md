@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">问题反馈</a> · <code>V1.11.25.1</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">问题反馈</a> · <code>V1.11.25.2</code>
 </p>
 
 ---
@@ -51,6 +51,7 @@
   - 无需命令行即可直接在网页端输入对方管理员账号或密钥**一键纳管远端节点**（或将本机主动接入其他主入口），实现多主机闲置空间实时并池、单一主入口统一访问；
   - **节点在线状态与在线文件联动**：顶部状态栏、左侧节点列表与集群管理表实时展示节点在线状态；**节点在线时汇总展示该节点文件，节点离线后自动隐藏其上的文件、上线后自动恢复显示**。
   - **主节点无损切换与节点退出控制**：支持一键将任意在线从节点设为新**主节点**（自动迁移账号权限并保留各节点文件），支持在主节点将成员**移出集群 / 删除离线节点**、**解散集群**，以及直接访问从节点 `/worker` 控制台自行退出集群。
+  - **高可用自动故障转移、热备同步、客户端自动发现与自升级（`V1.11.25.2`）**：主节点连续同步账号、配额、Agent 密钥、OAuth 令牌与 AI 任务板快照（`agent-tasks.json`）至备用子节点；主节点意外失联后按**网络可达性与稳定性优先的混合评分**自动提升最稳健节点接管，原主节点稳定恢复后自动增量回传状态、SSE 广播客户端在 1 秒内无感切回主入口并和平退位；Windows 桌面端与 Android 客户端支持局域网 `8080` 端口 + UDP `53319` 自动扫网接入（单集群自动直连、多集群列表选择）、保存多网卡及全集群地址表执行四级故障切换、桌面端可选本机固定 MCP 反向代理（`127.0.0.1:18080`）以及应用内经由主节点局域网缓存（SHA-256 校验）一键升级。
 - **超级剪贴板与新建 TXT 文本文件**：
   - 支持各部署节点本机手动开关（`-clipboard` 或 Web / 控制台切换）**超级剪贴板**，并由主节点在网页端集中控制各分节点是否开启；开启后自动监听本机复制的文本与图片，按时间戳自动命名并归档上传至 `超级剪贴板/YYYY-MM` 目录，跨设备秒级同步；
   - 工具栏支持一键**新建 `.txt` 文件**并在网页中直接编写内容即时入库。
@@ -130,7 +131,7 @@ docker compose logs quailnest
 也可以直接使用 `docker build` / `docker run` 手动运行：
 
 ```bash
-docker build -t quailnest:V1.11.25.1 .
+docker build -t quailnest:V1.11.25.2 .
 
 docker run -d \
   --name quailnest \
@@ -138,7 +139,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/quailnest-data:/data \
-  quailnest:V1.11.25.1 -data /data -port 8080 -expose-ip 192.168.1.100
+  quailnest:V1.11.25.2 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---
@@ -171,6 +172,15 @@ go build -trimpath -ldflags="-s -w" -o quailnest.exe .  # Windows
 # 示例：将第二台机器作为存储节点接入，贡献 50GB 空间
 ./quailnest -role worker -quota 50GB -secret "主节点设置的集群密钥" -entry "http://192.168.1.100:8080"
 ```
+
+---
+
+## 桌面端与安卓客户端
+
+除了浏览器直接访问外，QuailNest 还提供**电脑桌面端**与**安卓手机端**独立客户端，启动后均可手动输入或粘贴局域网服务端 **IP 地址与端口**、测试 `/api/info` 连通性并持久保存（支持历史服务器记录与下次启动自动直连）：
+
+- **桌面端客户端（Windows 便携版 / Rust + WebView2）**：源码位于 [`clients/desktop/`](./clients/desktop/)，编译产物为 `dist/quailnest-desktop-windows-amd64.exe`。支持保存多台服务器与历史列表、持久化 Cookie/登录态、以及通过顶部菜单 **`服务器 -> 修改 IP 与端口`** 或快捷键 **`Ctrl + ,`** 随时切换服务端地址。
+- **安卓手机客户端（Android APK / 原生 WebView 容器）**：源码位于 [`clients/android/`](./clients/android/)，签名安装包为 `dist/quailnest-android.apk`（`minSdk 24` / `targetSdk 36`，允许局域网 `http://` 明文访问）。支持多文件选择器上传、全屏视频播放、系统 `DownloadManager` 大文件后台下载（含 `blob:` 导出），以及通过边缘可拖动的 **「服务」悬浮胶囊按钮** 随时切换 IP 与端口或刷新工作区。
 
 ---
 
@@ -211,6 +221,9 @@ go build -trimpath -ldflags="-s -w" -o quailnest.exe .  # Windows
 │   ├── updater/                # GitHub Release 检查、校验与零停机替换升级
 │   └── version/                # 应用标识与版本信息
 ├── assets/                     # Logo 矢量/透明包与 README 视觉插图
+├── clients/
+│   ├── desktop/                # Rust (tao + wry + muda) 跨平台桌面客户端（WebView2，支持 IP/端口管理）
+│   └── android/                # 原生 Android 客户端（手动 IP/端口配置、系统下载桥接与悬浮切换按钮）
 ├── frontend/                   # React 19 + TypeScript + Vite + Tailwind v4 前端源码（参考 shadcn-admin 风格）
 ├── web/                        # 预构建前端产物（内嵌至 Go 单文件：index.html / mobile.html / assets）
 ├── Dockerfile                  # 多阶段生产容器镜像构建文件

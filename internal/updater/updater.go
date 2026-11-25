@@ -100,6 +100,7 @@ type EventCallback func(st Status)
 type Manager struct {
 	mu          sync.RWMutex
 	opMu        sync.Mutex
+	dataDir     string
 	cfgPath     string
 	cfg         Config
 	status      Status
@@ -121,6 +122,7 @@ func NewManager(dataDir string, defaultRepo string) (*Manager, error) {
 		repo = version.DefaultRepo
 	}
 	m := &Manager{
+		dataDir:    dataDir,
 		cfgPath:    filepath.Join(dataDir, "updater.json"),
 		apiBaseURL: "https://api.github.com",
 		httpClient: &http.Client{Timeout: 30 * time.Second},
@@ -368,7 +370,8 @@ func SelectAsset(assets []ReleaseAsset, goos, goarch string) (ReleaseAsset, stri
 			checksumsURL = a.BrowserDownloadURL
 			continue
 		}
-		if strings.HasSuffix(low, ".sha256") || strings.HasSuffix(low, ".sig") || strings.HasSuffix(low, ".asc") || strings.HasSuffix(low, ".txt") {
+		if strings.HasSuffix(low, ".sha256") || strings.HasSuffix(low, ".sig") || strings.HasSuffix(low, ".asc") || strings.HasSuffix(low, ".txt") ||
+			strings.Contains(low, "desktop") || strings.Contains(low, "android") || strings.HasSuffix(low, ".apk") {
 			continue
 		}
 
@@ -407,6 +410,238 @@ func SelectAsset(assets []ReleaseAsset, goos, goarch string) (ReleaseAsset, stri
 		}
 	}
 	return best, checksumsURL
+}
+
+// ClientUpdateInfo describes update metadata for QuailNest desktop and Android standalone clients.
+type ClientUpdateInfo struct {
+	Platform       string `json:"platform"`
+	CurrentVersion string `json:"current_version"`
+	LatestVersion  string `json:"latest_version"`
+	HasUpdate      bool   `json:"has_update"`
+	ReleaseURL     string `json:"release_url,omitempty"`
+	ReleaseNotes   string `json:"release_notes,omitempty"`
+	PublishedAt    string `json:"published_at,omitempty"`
+	AssetName      string `json:"asset_name,omitempty"`
+	AssetSize      int64  `json:"asset_size,omitempty"`
+	AssetURL       string `json:"asset_url,omitempty"`
+	ChecksumsURL   string `json:"checksums_url,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
+	DownloadURL    string `json:"download_url,omitempty"`
+}
+
+// SelectClientAsset selects the client installer binary matching platform ("windows-desktop" or "android").
+func SelectClientAsset(assets []ReleaseAsset, platform string) (ReleaseAsset, string) {
+	p := strings.ToLower(strings.TrimSpace(platform))
+	var checksumsURL string
+	var best ReleaseAsset
+	bestScore := -1
+
+	for _, a := range assets {
+		low := strings.ToLower(strings.TrimSpace(a.Name))
+		if low == "checksums.txt" || low == "sha256sums.txt" || low == "sha256sum.txt" || strings.HasSuffix(low, "checksums.txt") {
+			checksumsURL = a.BrowserDownloadURL
+			continue
+		}
+		if strings.HasSuffix(low, ".sha256") || strings.HasSuffix(low, ".sig") || strings.HasSuffix(low, ".asc") || strings.HasSuffix(low, ".txt") {
+			continue
+		}
+		switch p {
+		case "android", "apk", "android-apk":
+			if !strings.HasSuffix(low, ".apk") {
+				continue
+			}
+			score := 10
+			if strings.Contains(low, "android") || strings.Contains(low, "quailnest") {
+				score = 30
+			}
+			if score > bestScore {
+				bestScore = score
+				best = a
+			}
+		case "windows-desktop", "desktop", "desktop-windows":
+			if !strings.Contains(low, "desktop") || !strings.HasSuffix(low, ".exe") {
+				continue
+			}
+			score := 10
+			if strings.Contains(low, "windows") && strings.Contains(low, "amd64") {
+				score = 40
+			} else if strings.Contains(low, "windows") {
+				score = 30
+			}
+			if score > bestScore {
+				bestScore = score
+				best = a
+			}
+		}
+	}
+	return best, checksumsURL
+}
+
+func (m *Manager) fetchLatestGithubRelease(ctx context.Context) (githubRelease, error) {
+	m.mu.RLock()
+	repo := m.cfg.Repo
+	base := strings.TrimRight(m.apiBaseURL, "/")
+	client := m.httpClient
+	m.mu.RUnlock()
+
+	reqURL := fmt.Sprintf("%s/repos/%s/releases/latest", base, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return githubRelease{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return githubRelease{}, fmt.Errorf("连接 GitHub 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return githubRelease{}, fmt.Errorf("GitHub API 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var rel githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return githubRelease{}, fmt.Errorf("解析 Release 数据失败: %w", err)
+	}
+	return rel, nil
+}
+
+func (m *Manager) fetchAssetSHA256FromChecksums(ctx context.Context, checksumsURL, assetName string) string {
+	if strings.TrimSpace(checksumsURL) == "" || strings.TrimSpace(assetName) == "" {
+		return ""
+	}
+	m.mu.RLock()
+	client := m.httpClient
+	m.mu.RUnlock()
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.applyProxy(checksumsURL), nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+
+	targetBase := filepath.Base(assetName)
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 512*1024))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		fileCol := strings.TrimPrefix(fields[1], "*")
+		if filepath.Base(fileCol) == targetBase {
+			return strings.ToLower(strings.TrimSpace(fields[0]))
+		}
+	}
+	return ""
+}
+
+// CheckClientUpdate checks the latest release for a standalone desktop/Android client package.
+func (m *Manager) CheckClientUpdate(ctx context.Context, platform, currentVersion string) (ClientUpdateInfo, error) {
+	cleanPlatform := strings.ToLower(strings.TrimSpace(platform))
+	if cleanPlatform == "" {
+		cleanPlatform = "windows-desktop"
+	}
+	rel, err := m.fetchLatestGithubRelease(ctx)
+	if err != nil {
+		return ClientUpdateInfo{}, err
+	}
+	latest := strings.TrimSpace(rel.TagName)
+	if latest == "" {
+		latest = strings.TrimSpace(rel.Name)
+	}
+	asset, checksumsURL := SelectClientAsset(rel.Assets, cleanPlatform)
+	hasUpdate := latest != "" && asset.Name != "" && asset.BrowserDownloadURL != "" &&
+		(strings.TrimSpace(currentVersion) == "" || CompareVersions(latest, currentVersion) > 0)
+
+	expectedSHA := ""
+	if asset.Name != "" && checksumsURL != "" {
+		expectedSHA = m.fetchAssetSHA256FromChecksums(ctx, checksumsURL, asset.Name)
+	}
+
+	return ClientUpdateInfo{
+		Platform:       cleanPlatform,
+		CurrentVersion: strings.TrimSpace(currentVersion),
+		LatestVersion:  latest,
+		HasUpdate:      hasUpdate,
+		ReleaseURL:     rel.HTMLURL,
+		ReleaseNotes:   rel.Body,
+		PublishedAt:    rel.PublishedAt,
+		AssetName:      asset.Name,
+		AssetSize:      asset.Size,
+		AssetURL:       asset.BrowserDownloadURL,
+		ChecksumsURL:   checksumsURL,
+		SHA256:         expectedSHA,
+		DownloadURL:    "/api/client/update/download?platform=" + url.QueryEscape(cleanPlatform),
+	}, nil
+}
+
+// DownloadCachedClientAsset downloads (or reuses verified local cache of) the latest client binary for LAN delivery.
+func (m *Manager) DownloadCachedClientAsset(ctx context.Context, platform string) (string, ClientUpdateInfo, error) {
+	info, err := m.CheckClientUpdate(ctx, platform, "")
+	if err != nil {
+		return "", info, err
+	}
+	if info.AssetName == "" || info.AssetURL == "" {
+		return "", info, fmt.Errorf("当前发布版本暂未包含 %s 客户端安装包", platform)
+	}
+	safeTag := filepath.Base(strings.TrimSpace(info.LatestVersion))
+	if safeTag == "" || safeTag == "." || safeTag == ".." {
+		safeTag = "latest"
+	}
+	safeAsset := filepath.Base(info.AssetName)
+	cacheDir := filepath.Join(m.dataDir, "client-updates", safeTag)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", info, err
+	}
+	finalPath := filepath.Join(cacheDir, safeAsset)
+
+	if st, statErr := os.Stat(finalPath); statErr == nil && !st.IsDir() && st.Size() > 0 {
+		if info.SHA256 == "" {
+			return finalPath, info, nil
+		}
+		if f, err := os.Open(finalPath); err == nil {
+			h := sha256.New()
+			_, _ = io.Copy(h, f)
+			_ = f.Close()
+			if strings.EqualFold(hex.EncodeToString(h.Sum(nil)), info.SHA256) {
+				return finalPath, info, nil
+			}
+		}
+		_ = os.Remove(finalPath)
+	}
+
+	tmpPath := finalPath + ".downloading"
+	_ = os.Remove(tmpPath)
+	dlClient := &http.Client{Timeout: 8 * time.Minute}
+	actualSHA, err := m.downloadFile(ctx, dlClient, m.applyProxy(info.AssetURL), tmpPath, info.AssetSize)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return "", info, fmt.Errorf("缓存客户端安装包失败: %w", err)
+	}
+	if info.SHA256 != "" && !strings.EqualFold(actualSHA, info.SHA256) {
+		_ = os.Remove(tmpPath)
+		return "", info, fmt.Errorf("客户端安装包 SHA256 校验失败（期望 %s，实际 %s）", info.SHA256, actualSHA)
+	}
+	if info.SHA256 == "" {
+		info.SHA256 = actualSHA
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", info, err
+	}
+	return finalPath, info, nil
 }
 
 func (m *Manager) applyProxy(rawURL string) string {
@@ -1301,6 +1536,9 @@ func CleanupOldBinary(exePath string) {
 
 func isMatchingBinaryEntryForOS(name, targetOS string) bool {
 	base := strings.ToLower(filepath.Base(name))
+	if strings.Contains(base, "desktop") || strings.Contains(base, "android") || strings.HasSuffix(base, ".apk") {
+		return false
+	}
 	if strings.EqualFold(targetOS, "windows") {
 		return base == "quailnest.exe" || base == "lfh.exe" ||
 			((strings.HasPrefix(base, "quailnest") || strings.HasPrefix(base, "lfh")) && strings.HasSuffix(base, ".exe"))

@@ -19,3 +19,14 @@ Thumbs.db
 
 # Frontend dependencies
 frontend/node_modules/
+
+# Desktop & Android client build outputs & local secrets
+clients/desktop/target/
+clients/android/.gradle/
+clients/android/build/
+clients/android/app/build/
+clients/android/local.properties
+*.apk
+*.aab
+*.jks
+*.keystore

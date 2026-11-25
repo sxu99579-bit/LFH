@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuailNest</string>
+    <string name="setup_title">QuailNest 鹌鹑窝</string>
+    <string name="setup_subtitle">自动发现局域网集群或手动配置地址，多网卡与主备节点断线自动接管</string>
+    <string name="section_discovery">局域网自动发现</string>
+    <string name="btn_scan_lan">扫描局域网</string>
+    <string name="scan_idle_hint">点击扫描局域网 8080 端口与节点广播；仅发现 1 个集群时将自动接入</string>
+    <string name="section_server_config">手动设置 IP 与端口</string>
+    <string name="hint_paste_tip">支持粘贴完整地址自动解析</string>
+    <string name="label_scheme">访问协议</string>
+    <string name="label_host">服务器 IP 地址或域名</string>
+    <string name="hint_host">例如 192.168.1.100 或 nas.local</string>
+    <string name="label_port">端口</string>
+    <string name="hint_port">8080</string>
+    <string name="label_note">服务器备注（可选）</string>
+    <string name="hint_note">例如 家里主机 / 实验室</string>
+    <string name="label_auto_connect">下次打开自动直连并启用主备无缝切换</string>
+    <string name="label_mobile_view">优先使用移动端适配视图（推荐）</string>
+    <string name="btn_test_connection">测试连接</string>
+    <string name="btn_save_and_enter">保存并进入</string>
+    <string name="section_history">历史保存的服务器</string>
+    <string name="history_empty">暂无历史服务器记录，连接首个服务器后将自动保存。</string>
+    <string name="section_client_update">客户端版本与升级</string>
+    <string name="btn_check_update">检查客户端更新</string>
+    <string name="offline_banner_title">无法连接服务器</string>
+    <string name="btn_retry_connect">重试连接</string>
+    <string name="btn_auto_failover_reconnect">自动搜寻可用节点</string>
+    <string name="btn_change_server">修改 IP 与端口</string>
+    <string name="footer_switch_hint">进入工作区后将自动同步主服务器多网卡 IP 与所有备援节点地址表；点击悬浮「服务」按钮可随时切服、重扫或应用内升级。</string>
+</resources>

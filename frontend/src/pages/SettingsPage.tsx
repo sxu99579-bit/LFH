@@ -1289,6 +1289,91 @@ export function SettingsPage({
             </Card>
           </div>
 
+          {/* High Availability Auto-Failover & Failback Strategy */}
+          <Card>
+            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <ShieldCheck className="h-4 w-4 text-primary" />
+                  <span>高可用自动故障转移与容灾策略</span>
+                </CardTitle>
+                <CardDescription>
+                  主节点失联约 12 秒后按「网络质量 50% + 性能健康 35% + 稳定性 15%」自动切换至最优子节点；原主节点恢复稳定后自动回传任务/权限并通知客户端切回
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2 text-xs shrink-0">
+                <span className="text-muted-foreground">启用自动切主</span>
+                <Switch
+                  checked={pool?.auto_failover !== false}
+                  onCheckedChange={async (checked) => {
+                    try {
+                      await api.setClusterHA({ auto_failover: checked })
+                      toast(checked ? '已开启主节点掉线自动故障转移' : '已暂停自动故障转移', 'success')
+                      await onRefreshAll()
+                    } catch (err) {
+                      toast(err instanceof Error ? err.message : '更新高可用配置失败', 'error')
+                    }
+                  }}
+                />
+              </div>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={pool?.failover_active ? 'warning' : 'success'}>
+                  {pool?.failover_active ? '当前处于备节点临时接管状态' : '当前由原主节点正常服务'}
+                </Badge>
+                {pool?.cluster_epoch ? (
+                  <Badge variant="outline">集群任期 Epoch #{pool.cluster_epoch}</Badge>
+                ) : null}
+                {pool?.standby_order && pool.standby_order.length > 0 && (
+                  <span className="text-muted-foreground">
+                    当前接班顺位：
+                    {pool.standby_order
+                      .map((id) => {
+                        const hit = nodes.find((x) => x.node_id === id)
+                        if (!hit) return id
+                        const scoreText =
+                          typeof hit.failover_score === 'number'
+                            ? ` (${hit.failover_score >= 1000 ? `${(hit.failover_score - 1000).toFixed(1)}·固定首选` : hit.failover_score.toFixed(1)}分)`
+                            : ''
+                        return `${hit.node_name}${scoreText}`
+                      })
+                      .join(' > ')}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-muted-foreground whitespace-nowrap">手动固定首选备胎：</span>
+                <Select
+                  value={pool?.preferred_standby_node_id || ''}
+                  onChange={async (e) => {
+                    try {
+                      await api.setClusterHA({ preferred_standby_node_id: e.target.value })
+                      toast(e.target.value ? '已更新首选备用主节点' : '已恢复全自动综合评分选主', 'success')
+                      await onRefreshAll()
+                    } catch (err) {
+                      toast(err instanceof Error ? err.message : '设置首选备胎失败', 'error')
+                    }
+                  }}
+                  className="h-8 min-w-[165px] text-xs"
+                >
+                  <option value="">自动综合评分最优</option>
+                  {nodes
+                    .filter((n) => n.node_id !== pool?.primary_node_id && !n.is_self)
+                    .map((n) => (
+                      <option key={n.node_id} value={n.node_id}>
+                        {n.node_name}
+                        {typeof n.failover_score === 'number' && n.failover_score > 0
+                          ? ` (${(n.failover_score >= 1000 ? n.failover_score - 1000 : n.failover_score).toFixed(1)}分)`
+                          : ''}
+                      </option>
+                    ))}
+                </Select>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Cluster Nodes Management */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between gap-2">

@@ -58,7 +58,8 @@ func TestCompareVersions(t *testing.T) {
 		{"V0.11.25.0", "V0.11.24.4", 1},
 		{"V0.12.0", "V0.11.25.0", 1},
 		{"V1.11.25.1", "V0.11.25.0", 1},
-		{"V1.12.0", "V1.11.25.1", 1},
+		{"V1.11.25.2", "V1.11.25.1", 1},
+		{"V1.12.0", "V1.11.25.2", 1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersions(tc.a, tc.b); got != tc.want {
@@ -290,7 +291,7 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 	oldSum := sha256.Sum256(oldBytes)
 	oldHex := hex.EncodeToString(oldSum[:])
 
-	curBytes := []byte("LFH-CURRENT-BINARY-V1.11.25.1")
+	curBytes := []byte("LFH-CURRENT-BINARY-V1.11.25.2")
 	curSum := sha256.Sum256(curBytes)
 	curHex := hex.EncodeToString(curSum[:])
 
@@ -300,8 +301,8 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 		case "/repos/tester/LFH/releases":
 			_ = json.NewEncoder(w).Encode([]githubRelease{
 				{
-					TagName:     "V1.11.25.1",
-					Name:        "V1.11.25.1",
+					TagName:     "V1.11.25.2",
+					Name:        "V1.11.25.2",
 					PublishedAt: "2026-11-22T10:00:00Z",
 					Assets: []ReleaseAsset{
 						{Name: assetName, Size: int64(len(curBytes)), BrowserDownloadURL: ts.URL + "/dl/cur/" + assetName},
@@ -415,5 +416,82 @@ func TestQuailNestAndLegacyLFHCompatibility(t *testing.T) {
 	}
 	if !isMatchingBinaryEntryForOS("quailnest-linux-amd64", "linux") || !isMatchingBinaryEntryForOS("lfh-linux-amd64", "linux") {
 		t.Fatal("expected both quailnest and legacy lfh linux binaries to match")
+	}
+}
+
+func TestSelectAssetExcludesClientBinariesAndSelectClientAsset(t *testing.T) {
+	assets := []ReleaseAsset{
+		{Name: "checksums.txt", BrowserDownloadURL: "https://example.com/checksums.txt"},
+		{Name: "quailnest-desktop-windows-amd64.exe", Size: 2703360, BrowserDownloadURL: "https://example.com/desktop.exe"},
+		{Name: "quailnest-android.apk", Size: 896806, BrowserDownloadURL: "https://example.com/app.apk"},
+		{Name: "quailnest-windows-amd64.exe", Size: 17229824, BrowserDownloadURL: "https://example.com/server.exe"},
+		{Name: "quailnest-linux-amd64", Size: 16871584, BrowserDownloadURL: "https://example.com/server-linux"},
+	}
+
+	srvWin, cs := SelectAsset(assets, "windows", "amd64")
+	if srvWin.Name != "quailnest-windows-amd64.exe" || cs == "" {
+		t.Fatalf("expected server binary only, got %+v cs=%q", srvWin, cs)
+	}
+	deskAsset, _ := SelectClientAsset(assets, "windows-desktop")
+	if deskAsset.Name != "quailnest-desktop-windows-amd64.exe" {
+		t.Fatalf("expected desktop asset, got %+v", deskAsset)
+	}
+	apkAsset, _ := SelectClientAsset(assets, "android")
+	if apkAsset.Name != "quailnest-android.apk" {
+		t.Fatalf("expected android apk asset, got %+v", apkAsset)
+	}
+
+	// End-to-end cached client update download + SHA256 verification.
+	apkBytes := []byte("FAKE-SIGNED-APK-V1.11.25.2")
+	sum := sha256.Sum256(apkBytes)
+	expectedSHA := hex.EncodeToString(sum[:])
+
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/tester/QuailNest/releases/latest":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "V1.11.25.2",
+				Name:    "V1.11.25.2",
+				Assets: []ReleaseAsset{
+					{Name: "checksums.txt", BrowserDownloadURL: ts.URL + "/dl/checksums.txt"},
+					{Name: "quailnest-android.apk", Size: int64(len(apkBytes)), BrowserDownloadURL: ts.URL + "/dl/quailnest-android.apk"},
+				},
+			})
+		case "/dl/checksums.txt":
+			_, _ = w.Write([]byte(expectedSHA + "  quailnest-android.apk\n"))
+		case "/dl/quailnest-android.apk":
+			_, _ = w.Write(apkBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	mgr, err := NewManager(dir, "tester/QuailNest")
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mgr.SetTestOverrides(ts.URL, os.Executable, func(context.Context, string) error { return nil })
+
+	updInfo, err := mgr.CheckClientUpdate(context.Background(), "android", "V1.11.25.1")
+	if err != nil {
+		t.Fatalf("CheckClientUpdate: %v", err)
+	}
+	if !updInfo.HasUpdate || updInfo.SHA256 != expectedSHA || updInfo.LatestVersion != "V1.11.25.2" {
+		t.Fatalf("unexpected client update info: %+v", updInfo)
+	}
+
+	cachedPath, dlInfo, err := mgr.DownloadCachedClientAsset(context.Background(), "android")
+	if err != nil {
+		t.Fatalf("DownloadCachedClientAsset: %v", err)
+	}
+	if dlInfo.SHA256 != expectedSHA {
+		t.Fatalf("expected sha %s, got %s", expectedSHA, dlInfo.SHA256)
+	}
+	gotBytes, err := os.ReadFile(cachedPath)
+	if err != nil || string(gotBytes) != string(apkBytes) {
+		t.Fatalf("unexpected cached apk content: err=%v len=%d", err, len(gotBytes))
 	}
 }

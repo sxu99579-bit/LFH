@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: quailnest:V1.11.25.1
+    image: quailnest:V1.11.25.2
     container_name: quailnest
     restart: unless-stopped
     # Note:

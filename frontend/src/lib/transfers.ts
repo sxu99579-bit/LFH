@@ -247,6 +247,16 @@ export function useTransferQueue(onUploadedRefresh: () => void) {
       if (!entry.dlParts) entry.dlParts = []
 
       updateTask(id, { status: 'running', error: undefined })
+      const androidBridge = (
+        window as Window & {
+          QuailNestAndroid?: { downloadUrl?: (url: string, fileName: string) => void }
+        }
+      ).QuailNestAndroid
+      if (androidBridge?.downloadUrl) {
+        androidBridge.downloadUrl(`/api/files/${encodeURIComponent(fileId)}/download`, entry.task.name)
+        updateTask(id, { status: 'done', transferred: entry.task.size, progress: 100 })
+        return
+      }
       try {
         const loadedSoFar = entry.task.transferred || 0
         const headers: HeadersInit = loadedSoFar > 0 ? { Range: `bytes=${loadedSoFar}-` } : {}

@@ -239,3 +239,54 @@ func TestTaskManagerCommentRoundLimitAutoPause(t *testing.T) {
 		t.Fatalf("human comment after pause: %v", err)
 	}
 }
+
+func TestTaskManagerSnapshotExportImport(t *testing.T) {
+	dirSrc := t.TempDir()
+	dirDst := t.TempDir()
+
+	src, err := NewTaskManager(dirSrc)
+	if err != nil {
+		t.Fatalf("src NewTaskManager: %v", err)
+	}
+	defer src.Close()
+	dst, err := NewTaskManager(dirDst)
+	if err != nil {
+		t.Fatalf("dst NewTaskManager: %v", err)
+	}
+	defer dst.Close()
+
+	admin := TaskActor{Username: "admin", Role: "admin"}
+	allowSplit := true
+	created, err := src.CreateTask(admin, CreateTaskInput{
+		Title:       "HA Failover Test Task",
+		Description: "verify task board hot standby",
+		Priority:    "high",
+		AllowSplit:  &allowSplit,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	snap, err := src.ExportSnapshot()
+	if err != nil {
+		t.Fatalf("ExportSnapshot: %v", err)
+	}
+	h1 := src.SnapshotHash()
+	if h1 == "" {
+		t.Fatal("expected non-empty snapshot hash")
+	}
+
+	if err := dst.ImportSnapshot([]byte("{not-json")); err == nil {
+		t.Fatal("expected invalid JSON snapshot to fail")
+	}
+	if err := dst.ImportSnapshot(snap); err != nil {
+		t.Fatalf("ImportSnapshot: %v", err)
+	}
+	if h2 := dst.SnapshotHash(); h2 != h1 {
+		t.Fatalf("expected matching snapshot hash after import, src=%s dst=%s", h1, h2)
+	}
+	got, err := dst.GetTask(admin, created.ID)
+	if err != nil || got.Title != "HA Failover Test Task" {
+		t.Fatalf("expected synced task on dst, err=%v got=%+v", err, got)
+	}
+}

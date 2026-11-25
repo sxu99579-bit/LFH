@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.quailnest.client'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.quailnest.client'
+        minSdk 24
+        targetSdk 36
+        versionCode 111252
+        versionName 'V1.11.25.2'
+    }
+
+    def customKeystorePath = System.getenv('QN_KEYSTORE_PATH')
+    signingConfigs {
+        if (customKeystorePath != null && !customKeystorePath.trim().isEmpty()) {
+            release {
+                storeFile file(customKeystorePath)
+                storePassword System.getenv('QN_KEYSTORE_PASS') ?: ''
+                keyAlias System.getenv('QN_KEY_ALIAS') ?: ''
+                keyPassword System.getenv('QN_KEY_PASS') ?: ''
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (customKeystorePath != null && !customKeystorePath.trim().isEmpty()) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+}

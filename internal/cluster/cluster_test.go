@@ -344,7 +344,7 @@ func TestOfflinePeerFilesHiddenNormalizeProbeAndRemove(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"app_name": "QuailNest",
-			"version":  "V1.11.25.1",
+			"version":  "V1.11.25.2",
 			"role":     "entry",
 			"pool": PoolSummary{
 				Nodes: []NodeStatus{{
