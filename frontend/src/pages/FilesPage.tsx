@@ -13,13 +13,13 @@ import {
   FilePlus2,
   FileText,
   FileVideo,
+  Folder,
   FolderUp,
   HardDrive,
   Info,
   LayoutGrid,
   List,
   Lock,
-  Play,
   RefreshCw,
   Search,
   SlidersHorizontal,
@@ -47,6 +47,8 @@ import {
   isEditableTextFile,
 } from '@/lib/utils'
 import { Badge, Button, Card, Input, Select, useToast } from '@/components/ui'
+import type { AppleIconSize } from '@/components/AppleFileIcons'
+import { AppleFilesGrid } from '@/components/AppleFilesGrid'
 
 interface FilesPageProps {
   user: User
@@ -106,110 +108,6 @@ function CategoryIcon({ category, className = 'h-4 w-4' }: { category: string; c
 }
 
 const IMAGE_THUMB_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'])
-const VIDEO_THUMB_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v'])
-
-function cardToneClasses(category: string, ext: string): string {
-  if (ext === 'pdf') return 'from-rose-500/15 via-rose-500/5 to-muted/40'
-  switch (category) {
-    case 'image':
-      return 'from-sky-500/15 via-sky-500/5 to-muted/40'
-    case 'video':
-      return 'from-purple-500/15 via-purple-500/5 to-muted/40'
-    case 'audio':
-      return 'from-pink-500/15 via-pink-500/5 to-muted/40'
-    case 'doc':
-      return 'from-amber-500/15 via-amber-500/5 to-muted/40'
-    case 'archive':
-      return 'from-orange-500/15 via-orange-500/5 to-muted/40'
-    case 'code':
-      return 'from-emerald-500/15 via-emerald-500/5 to-muted/40'
-    default:
-      return 'from-muted/60 via-muted/30 to-muted/10'
-  }
-}
-
-function FileCardThumbnail({
-  rec,
-  onClick,
-}: {
-  rec: FileRecord
-  onClick: (e: React.MouseEvent) => void
-}) {
-  const [failed, setFailed] = useState(false)
-  const ext = getFileExt(rec)
-  const extLabel = (ext || rec.category || 'FILE').toUpperCase()
-  const rawUrl = `/api/files/${encodeURIComponent(rec.id)}/download`
-  const canStream = !rec.source_missing && rec.node_online !== false && !failed
-  const isImage = IMAGE_THUMB_EXTS.has(ext)
-  const isVideo = VIDEO_THUMB_EXTS.has(ext)
-  const restricted = rec.allowed_users && rec.allowed_users.length > 0
-
-  return (
-    <div
-      onClick={onClick}
-      className={cn(
-        'group relative h-36 w-full overflow-hidden border-b border-border bg-gradient-to-br select-none',
-        cardToneClasses(rec.category, ext)
-      )}
-    >
-      {canStream && isImage ? (
-        <img
-          src={rawUrl}
-          alt={rec.name}
-          loading="lazy"
-          decoding="async"
-          onError={() => setFailed(true)}
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-        />
-      ) : canStream && isVideo ? (
-        <>
-          <video
-            src={`${rawUrl}#t=0.5`}
-            preload="metadata"
-            muted
-            playsInline
-            onError={() => setFailed(true)}
-            className="h-full w-full object-cover"
-          />
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/25 transition-colors group-hover:bg-black/35">
-            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-background/85 text-foreground shadow-md backdrop-blur-xs">
-              <Play className="h-4.5 w-4.5 ml-0.5 fill-current" />
-            </span>
-          </div>
-        </>
-      ) : (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/70 bg-background/80 shadow-xs transition-transform duration-200 group-hover:scale-105">
-            <CategoryIcon category={rec.category} className="h-6 w-6" />
-          </div>
-          <span className="rounded-md border border-border/70 bg-background/75 px-2 py-0.5 text-[10px] font-semibold tracking-wider text-muted-foreground">
-            {extLabel}
-          </span>
-        </div>
-      )}
-
-      {/* Subtle corner badges over thumbnail */}
-      <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1">
-        {restricted && (
-          <span className="inline-flex h-5 items-center rounded-md bg-background/85 px-1.5 text-[10px] font-medium text-amber-500 shadow-xs backdrop-blur-xs">
-            <Lock className="h-2.5 w-2.5" />
-          </span>
-        )}
-        {rec.source_missing && (
-          <Badge variant="destructive" className="shadow-xs">
-            源文件丢失
-          </Badge>
-        )}
-      </div>
-
-      {(isImage || isVideo) && canStream && (
-        <span className="pointer-events-none absolute right-2 bottom-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] font-semibold tracking-wider text-white backdrop-blur-xs">
-          {extLabel}
-        </span>
-      )}
-    </div>
-  )
-}
 
 async function readAllEntriesFromDrop(dt: DataTransfer): Promise<Array<{ file: File; relativePath: string }>> {
   const items = Array.from(dt.items || [])
@@ -299,7 +197,61 @@ export function FilesPage({
 }: FilesPageProps) {
   const { toast } = useToast()
   const isAdmin = user.role === 'admin'
-  const [viewMode, setViewMode] = useState<'table' | 'grid'>(isMobile ? 'grid' : 'table')
+  const [viewMode, setViewModeState] = useState<'table' | 'grid'>(() => {
+    if (isMobile) return 'grid'
+    try {
+      const saved = localStorage.getItem('lfh_files_view_mode')
+      if (saved === 'table' || saved === 'grid') return saved
+    } catch {
+      // ignore
+    }
+    return 'grid'
+  })
+  const [groupByFolder, setGroupByFolderState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('lfh_files_group_folders') !== '0'
+    } catch {
+      return true
+    }
+  })
+  const [iconSize, setIconSizeState] = useState<AppleIconSize>(() => {
+    try {
+      const saved = localStorage.getItem('lfh_files_icon_size')
+      if (saved === 'sm' || saved === 'md' || saved === 'lg') return saved
+    } catch {
+      // ignore
+    }
+    return 'md'
+  })
+
+  const setViewMode = (mode: 'table' | 'grid') => {
+    setViewModeState(mode)
+    try {
+      localStorage.setItem('lfh_files_view_mode', mode)
+    } catch {
+      // ignore
+    }
+  }
+  const setGroupByFolder = (val: boolean) => {
+    setGroupByFolderState(val)
+    try {
+      localStorage.setItem('lfh_files_group_folders', val ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }
+  const setIconSize = (sz: AppleIconSize) => {
+    setIconSizeState(sz)
+    try {
+      localStorage.setItem('lfh_files_icon_size', sz)
+    } catch {
+      // ignore
+    }
+  }
+
+  const hasActiveFilter = Boolean(
+    searchQuery.trim() || categoryFilter || monthFilter || nodeFilter || deviceFilter
+  )
   const [targetNode, setTargetNode] = useState('auto')
   const [allowedUsers, setAllowedUsers] = useState<string[]>([])
   const [showVisibilityPicker, setShowVisibilityPicker] = useState(false)
@@ -477,11 +429,59 @@ export function FilesPage({
                   'rounded px-2 py-1 text-xs cursor-pointer',
                   viewMode === 'grid' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'
                 )}
-                title="卡片视图"
+                title="图标视图 (Apple Finder 风格)"
               >
                 <LayoutGrid className="h-3.5 w-3.5" />
               </button>
             </div>
+          )}
+
+          {(viewMode === 'grid' || isMobile) && (
+            <>
+              <Button
+                size="sm"
+                variant={groupByFolder && !hasActiveFilter ? 'secondary' : 'outline'}
+                onClick={() => setGroupByFolder(!groupByFolder)}
+                disabled={hasActiveFilter}
+                title={
+                  hasActiveFilter
+                    ? '筛选或搜索时自动平铺显示匹配文件'
+                    : groupByFolder
+                    ? '按目录层级聚合（点击切换平铺）'
+                    : '全部平铺（点击按目录聚合）'
+                }
+              >
+                <Folder className="h-3.5 w-3.5 text-[#4aa1ec]" />
+                <span>{groupByFolder && !hasActiveFilter ? '按目录' : '平铺'}</span>
+              </Button>
+
+              {!isMobile && (
+                <div className="flex items-center rounded-md border border-border p-0.5 text-[11px]">
+                  {(
+                    [
+                      { id: 'sm', label: '小' },
+                      { id: 'md', label: '中' },
+                      { id: 'lg', label: '大' },
+                    ] as Array<{ id: AppleIconSize; label: string }>
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setIconSize(opt.id)}
+                      className={cn(
+                        'rounded px-2 py-1 cursor-pointer transition-colors',
+                        iconSize === opt.id
+                          ? 'bg-accent text-accent-foreground font-medium'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                      title={`图标尺寸：${opt.label}`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
           <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading} title="刷新列表">
@@ -807,85 +807,22 @@ export function FilesPage({
           </div>
         </Card>
       ) : (
-        /* Grid / Mobile Card Feed with visual thumbnails */
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {files.map((rec) => {
-            const previewable = canPreviewFile(rec)
-            const editable = isEditableTextFile(rec, writableMountIds)
-            const matchingCaps = getMatchingCapabilitiesForFile(capabilities, rec.name)
-            const storageLabel = formatStorageModeLabel(rec.storage_mode)
-            const fromAgent = isAgentDeviceName(rec.device_name)
-            return (
-              <Card
-                key={rec.id}
-                onClick={() => onInspectFile(rec)}
-                className="overflow-hidden flex flex-col justify-between hover:border-primary/40 transition-colors cursor-pointer"
-              >
-                <FileCardThumbnail
-                  rec={rec}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (previewable) onPreviewFile(rec)
-                    else onInspectFile(rec)
-                  }}
-                />
-
-                <div className="p-3.5 flex flex-1 flex-col justify-between gap-2.5">
-                  <div className="space-y-2 min-w-0">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium" title={rec.name}>{rec.name}</div>
-                      <div className="truncate text-[11px] text-muted-foreground mt-0.5">
-                        {rec.folder_path ? `/${rec.folder_path}` : categoryNames[rec.category] || '根目录'}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                      <Badge variant="outline" className="tabular-nums">
-                        {formatSize(rec.size)}
-                      </Badge>
-                      <Badge variant={rec.node_online === false ? 'warning' : 'secondary'}>
-                        {rec.node_name || '本机'}
-                      </Badge>
-                      <Badge variant="outline" className="tabular-nums">
-                        v{rec.version || 1}
-                      </Badge>
-                      {storageLabel && <Badge variant="default">{storageLabel}</Badge>}
-                      {fromAgent && (
-                        <Badge variant="default" className="max-w-full">
-                          <Bot className="h-3 w-3 shrink-0" />
-                          <span className="truncate">{extractAgentLabel(rec.device_name)}</span>
-                        </Badge>
-                      )}
-                      {matchingCaps.length > 0 && <Badge variant="default">可调插件</Badge>}
-                    </div>
-                  </div>
-
-                  <div
-                    className="flex items-center justify-between border-t border-border pt-2.5 text-[11px] text-muted-foreground"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <span className="truncate">{rec.uploader}</span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {previewable && (
-                        <Button size="xs" variant="ghost" onClick={() => onPreviewFile(rec)}>
-                          <Eye className="h-3.5 w-3.5" />
-                          <span>预览</span>
-                        </Button>
-                      )}
-                      {editable && (
-                        <Button size="xs" variant="ghost" onClick={() => onEditFile(rec)}>
-                          <Edit3 className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
-                      <Button size="xs" variant="outline" onClick={() => onDownloadFile(rec)}>
-                        <Download className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              </Card>
-            )
-          })}
-        </div>
+        /* Apple Finder / iPadOS Files style borderless icon canvas */
+        <AppleFilesGrid
+          files={files}
+          user={user}
+          capabilities={capabilities}
+          writableMountIds={writableMountIds}
+          isMobile={isMobile}
+          groupByFolder={groupByFolder}
+          iconSize={iconSize}
+          hasActiveFilter={hasActiveFilter}
+          onInspectFile={onInspectFile}
+          onPreviewFile={onPreviewFile}
+          onEditFile={onEditFile}
+          onDownloadFile={onDownloadFile}
+          onRefresh={onRefresh}
+        />
       )}
     </div>
   )

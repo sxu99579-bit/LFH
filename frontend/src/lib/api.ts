@@ -121,6 +121,10 @@ export const api = {
       `/api/files/${encodeURIComponent(id)}/meta?include_path=${includePath ? '1' : '0'}`
     ),
   previewFile: (id: string) => apiFetch<Record<string, unknown>>(`/api/files/${encodeURIComponent(id)}/preview`),
+  previewFileSnippet: (id: string) =>
+    apiFetch<{ type?: string; content?: string; lines?: string[]; snippet?: boolean; truncated?: boolean }>(
+      `/api/files/${encodeURIComponent(id)}/preview?snippet=1`
+    ),
   previewArchiveEntry: (id: string, entryPath: string) =>
     apiFetch<Record<string, unknown>>(`/api/files/${encodeURIComponent(id)}/archive-entry?path=${encodeURIComponent(entryPath)}&mode=preview`),
   extractArchive: (id: string, targetNode: string) => {

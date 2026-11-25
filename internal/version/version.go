@@ -2,6 +2,6 @@ package version
 
 var (
 	AppName     = "LFH"
-	Version     = "V0.11.24.2"
+	Version     = "V0.11.24.3"
 	DefaultRepo = "sxu99579-bit/LFH"
 )

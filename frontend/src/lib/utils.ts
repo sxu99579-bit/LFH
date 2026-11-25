@@ -41,6 +41,40 @@ export function formatTime(iso?: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+export function formatAppleDate(iso?: string): string {
+  if (!iso || iso.startsWith('0001-')) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+export function middleTruncateFileName(name: string, maxChars = 24): string {
+  const clean = String(name || '')
+  const chars = Array.from(clean)
+  if (chars.length <= maxChars || maxChars < 10) return clean
+
+  // Preserve the extension (plus a short tail before it) alongside the leading title.
+  const dotIdx = clean.lastIndexOf('.')
+  let extPart = ''
+  let stem = clean
+  if (dotIdx > 0 && clean.length - dotIdx <= 8) {
+    extPart = clean.slice(dotIdx)
+    stem = clean.slice(0, dotIdx)
+  }
+
+  const stemChars = Array.from(stem)
+  const extChars = Array.from(extPart)
+  const tailLen = extPart ? Math.min(4, Math.max(2, Math.floor(stemChars.length / 4))) : 5
+  const budgetForHead = maxChars - 3 - extChars.length - tailLen
+  if (budgetForHead < 4) {
+    const simpleHead = Math.max(4, maxChars - 3 - tailLen)
+    return `${chars.slice(0, simpleHead).join('')}...${chars.slice(-tailLen).join('')}`
+  }
+  const head = stemChars.slice(0, budgetForHead).join('')
+  const tail = stemChars.slice(-tailLen).join('')
+  return `${head}...${tail}${extPart}`
+}
+
 export function formatRelativeTime(iso?: string): string {
   if (!iso || iso.startsWith('0001-')) return '-'
   const d = new Date(iso)

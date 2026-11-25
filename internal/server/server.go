@@ -68,6 +68,8 @@ type Server struct {
 	agentPairing         *agentPairingManager
 	mcpOAuth             *mcpOAuthManager
 	tasks                *bridge.TaskManager
+	thumbCacheMu         sync.Mutex
+	thumbCache           *preview.ThumbCache
 	jobsMu       sync.RWMutex
 	jobs         []plugins.PluginJob
 	jobsPath     string
@@ -486,6 +488,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/cluster/files/{id}/download", s.requireClusterAuth(s.handleClusterDownload))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/raw", s.requireClusterAuth(s.handleClusterRaw))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/preview", s.requireClusterAuth(s.handleClusterPreview))
+	mux.HandleFunc("GET /internal/cluster/files/{id}/thumb", s.requireClusterAuth(s.handleClusterThumb))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/meta", s.requireClusterAuth(s.handleClusterMeta))
 	mux.HandleFunc("GET /internal/cluster/files/{id}/archive-entry", s.requireClusterAuth(s.handleClusterArchiveEntry))
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}", s.requireClusterAuth(s.handleClusterDelete))
@@ -634,6 +637,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/files/{id}/download", s.requirePrincipal(auth.ScopeRead, s.handleDownload))
 	mux.HandleFunc("GET /api/files/{id}/raw", s.requirePrincipal(auth.ScopeRead, s.handleRaw))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requirePrincipal(auth.ScopeRead, s.handlePreview))
+	mux.HandleFunc("GET /api/files/{id}/thumb", s.requirePrincipal(auth.ScopeRead, s.handleThumb))
 	mux.HandleFunc("GET /api/files/{id}/meta", s.requirePrincipal(auth.ScopeRead, s.handleFileMeta))
 	mux.HandleFunc("GET /api/files/{id}/archive-entry", s.requirePrincipal(auth.ScopeRead, s.handleArchiveEntry))
 	mux.HandleFunc("POST /api/files/{id}/access", s.requirePrincipal(auth.ScopeShare, s.handleUpdateFileAccess))
@@ -691,6 +695,9 @@ func (s *Server) Handler() http.Handler {
 			}
 			s.handleServeDesktopHTML(w, r)
 			return
+		}
+		if strings.HasSuffix(strings.ToLower(r.URL.Path), ".mjs") {
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		}
 		fileServer.ServeHTTP(w, r)
 	})
@@ -898,7 +905,7 @@ func (s *Server) handleClusterRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClusterPreview(w http.ResponseWriter, r *http.Request) {
-	s.serveFilePreview(w, r.PathValue("id"))
+	s.serveFilePreview(w, r, r.PathValue("id"))
 }
 
 func (s *Server) handleClusterMeta(w http.ResponseWriter, r *http.Request) {
@@ -4567,7 +4574,7 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request, p auth.Pr
 		return
 	}
 	if isLocal {
-		s.serveFilePreview(w, id)
+		s.serveFilePreview(w, r, id)
 		return
 	}
 	s.cluster.ProxyGet(w, r, peer, "/internal/cluster/files/"+id+"/preview")
@@ -5382,7 +5389,7 @@ func (s *Server) serveFileRaw(w http.ResponseWriter, r *http.Request, id string)
 	http.ServeContent(&downloadCountWriter{ResponseWriter: w, store: s.store}, r, rec.Name, info.ModTime(), f)
 }
 
-func (s *Server) serveFilePreview(w http.ResponseWriter, id string) {
+func (s *Server) serveFilePreview(w http.ResponseWriter, r *http.Request, id string) {
 	rec, fp, ok := s.store.Get(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
@@ -5395,6 +5402,18 @@ func (s *Server) serveFilePreview(w http.ResponseWriter, id string) {
 	}
 
 	ext := strings.ToLower(strings.TrimPrefix(rec.Ext, "."))
+	snippet := r != nil && r.URL.Query().Get("snippet") == "1"
+	if snippet {
+		if preview.IsTextPreviewExt(ext) {
+			s.serveTextSnippet(w, fp, ext)
+			return
+		}
+		if ext == "docx" || ext == "xlsx" || ext == "pptx" {
+			s.serveOfficeSnippet(w, fp, ext)
+			return
+		}
+	}
+
 	if preview.IsArchiveName(rec.Name) || ext == "rar" || ext == "7z" {
 		res, err := preview.InspectArchive(fp, rec.Name)
 		if err != nil {
