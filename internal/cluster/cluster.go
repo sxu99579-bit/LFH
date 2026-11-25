@@ -3073,6 +3073,53 @@ func (m *Manager) UpdateFileFolder(fileID, folderPath string) (storage.FileRecor
 	return updated, nil
 }
 
+// ReassignUserFiles transfers file ownership from oldUser to newUser locally and across online worker peers.
+func (m *Manager) ReassignUserFiles(oldUser, newUser string) (int, error) {
+	oldClean := strings.TrimSpace(oldUser)
+	newClean := strings.TrimSpace(newUser)
+	if oldClean == "" || newClean == "" || oldClean == newClean {
+		return 0, nil
+	}
+	total := m.store.ReassignUploader(oldClean, newClean)
+	payload, _ := json.Marshal(map[string]string{
+		"old_user": oldClean,
+		"new_user": newClean,
+	})
+	var firstErr error
+	for _, node := range m.PoolSummary().Nodes {
+		if node.IsSelf || !node.Online {
+			continue
+		}
+		targetURL := strings.TrimRight(node.HTTPURL, "/") + "/internal/cluster/users/reassign-files"
+		req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		SignRequest(req, m.Secret(), m.NodeID())
+		resp, err := m.apiClient.Do(req)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		var out struct {
+			Reassigned int `json:"reassigned"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		total += out.Reassigned
+	}
+	if total > 0 {
+		m.TriggerHeartbeat()
+	}
+	return total, firstErr
+}
+
 // ==================== Discovery & Heartbeat Loops ====================
 
 func (m *Manager) Start(ctx context.Context) {

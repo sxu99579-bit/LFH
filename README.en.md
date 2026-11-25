@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">Issues</a> · <code>V0.11.25.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">Issues</a> · <code>V1.11.25.1</code>
 </p>
 
 ---
@@ -63,9 +63,11 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser;
   - **Online Text / JSON / Markdown / Code Editor**: Edit uploaded `.txt`, `.json`, `.md`, `.yaml`, `.csv`, `.log`, `.ini`, `.conf`, `.sql`, and source code files directly in the browser with line numbers, JSON formatting/minifying/validation, and live split Markdown preview—saving creates a new version automatically;
   - **Detailed File Version Control**: Every version records and displays its **update method** (`Initial Upload`, `Upload Overwrite`, `Online Edit`, `Manual Version Upload`, `Historical Version Restore`), **updating user**, **updating device** (device name, fingerprint & IP), and **update timestamp**, with one-click download or rollback for any historical version.
-- **Fine-Grained Access Control & Role Governance**:
+- **User Governance v2 & Fine-Grained Access Control**:
   - Generates unique random initial admin credentials (`lfh_xxxxxx` + 12-character password) per fresh installation and saves a copy to `initial-admin.txt`, avoiding duplicate default passwords across hosts.
-  - Administrators can **grant or revoke admin privileges** for active accounts directly in User Management (with built-in self-modification and last-admin protection).
+  - **Full Member Lifecycle Governance**: Direct admin member creation (auto-generated strong passwords + mandatory first-login password change), one-click password reset, last login timestamp & IP audit tracking, instant force-logout (bumping session version to invalidate cookies & API tokens), and configurable account expiration.
+  - **Quotas, Readonly Role, Capability Flags & Folder Allowlists**: Set per-user storage quotas; assign the `readonly` visitor role or independently toggle upload, folder management, and AI Agent access; restrict members to specific folder allowlists enforced uniformly across UI, uploads, inline editing, folder ops, and MCP/REST endpoints.
+  - **Governance Workspace & Safe Asset Disposal**: Top KPI summary strip, role/status filters, batch actions (approve, ban, unban, force logout, batch quota), and a slide-over member detail drawer to inspect personal audit timelines, freeze/unfreeze owned AI Agent keys (disconnecting live MCP sessions), and choose `keep`, `transfer`, or `delete` for owned files upon member deletion.
   - **Designated User Visibility & Owner/Admin Deletion**: Restrict uploaded files to selected system users—unauthorized users never see them in file lists, charts, SSE notifications, or download/preview endpoints. Only **admins and the original uploader** may delete files or update visibility; other authorized recipients have read/download access only.
   - Standard users only see Appearance and Account settings. Storage drive selection, physical directory migration across disks, and server disk paths stay strictly hidden and accessible to administrators only.
 - **Light & Dark Themes across All Screens**: Polished light and dark themes with responsive layouts tuned for desktop, tablet, and mobile viewports.
@@ -127,7 +129,7 @@ Your generated initial credentials are also written to `./quailnest-data/initial
 Manual `docker build` / `docker run` equivalent:
 
 ```bash
-docker build -t quailnest:V0.11.25.0 .
+docker build -t quailnest:V1.11.25.1 .
 
 docker run -d \
   --name quailnest \
@@ -135,7 +137,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/quailnest-data:/data \
-  quailnest:V0.11.25.0 -data /data -port 8080 -expose-ip 192.168.1.100
+  quailnest:V1.11.25.1 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---

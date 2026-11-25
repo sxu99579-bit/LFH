@@ -930,6 +930,9 @@ func (m *Manager) AuthenticateAgentToken(token, clientIP string) (Principal, err
 		return Principal{}, ErrUnauthenticated
 	}
 	now := time.Now()
+	if isUserExpiredAt(owner, now) || !toPublicUser(owner).EffectiveCanUseAgents() {
+		return Principal{}, ErrUnauthenticated
+	}
 	if matched.ExpiresAt != nil && !now.Before(*matched.ExpiresAt) {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -999,11 +1002,12 @@ func (m *Manager) CurrentPrincipal(r *http.Request) (Principal, error) {
 			if hmac.Equal([]byte(parts[1]), []byte(expectedSig)) {
 				if raw, decErr := base64.RawURLEncoding.DecodeString(parts[0]); decErr == nil {
 					var payload sessionPayload
-					if err := json.Unmarshal(raw, &payload); err == nil && time.Now().Unix() <= payload.Exp {
+					now := time.Now()
+					if err := json.Unmarshal(raw, &payload); err == nil && now.Unix() <= payload.Exp {
 						m.mu.RLock()
 						u, ok := m.users[payload.Username]
 						m.mu.RUnlock()
-						if ok && (u.Status == "" || u.Status == StatusActive) {
+						if ok && (u.Status == "" || u.Status == StatusActive) && !isUserExpiredAt(u, now) && payload.Ver == u.SessionVersion {
 							return Principal{User: toPublicUser(u)}, nil
 						}
 					}

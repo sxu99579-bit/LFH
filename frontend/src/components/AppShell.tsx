@@ -131,7 +131,7 @@ export function AppShell({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold tracking-tight">QuailNest</div>
           <div className="truncate text-[11px] text-muted-foreground">
-            {info?.version || 'V0.11.25.0'} · 鹌鹑窝中枢
+            {info?.version || 'V1.11.25.1'} · 鹌鹑窝中枢
           </div>
         </div>
         {sidebarOpen && (
@@ -376,7 +376,7 @@ export function AppShell({
           onClose={() => setMobileMenuOpen(false)}
           side="bottom"
           title="快捷操作与入口切换"
-          subtitle={`当前版本 ${info?.version || 'V0.11.25.0'}`}
+          subtitle={`当前版本 ${info?.version || 'V1.11.25.1'}`}
         >
           <div className="grid grid-cols-2 gap-2.5">
             <button

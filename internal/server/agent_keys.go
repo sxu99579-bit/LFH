@@ -103,7 +103,7 @@ func (s *Server) findAccessibleFileForPrincipal(id string, p auth.Principal) (st
 		rLocal.NodeOS = runtime.GOOS
 		rLocal.NodeOnline = true
 		rLocal.StorageDir = s.store.RecordDir(rLocal)
-		if !storage.CanUserAccess(rLocal, p.User.Username, p.User.Role) {
+		if !storage.CanUserAccess(rLocal, p.User.Username, p.User.Role) || !p.User.CanAccessFolder(rLocal.FolderPath) {
 			return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在或无权访问"
 		}
 		if p.IsAgent && !p.CanReadFolder(rLocal.FolderPath) {
@@ -116,7 +116,7 @@ func (s *Server) findAccessibleFileForPrincipal(id string, p auth.Principal) (st
 	if !ok {
 		return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在"
 	}
-	if !storage.CanUserAccess(rPeer, p.User.Username, p.User.Role) {
+	if !storage.CanUserAccess(rPeer, p.User.Username, p.User.Role) || !p.User.CanAccessFolder(rPeer.FolderPath) {
 		return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在或无权访问"
 	}
 	if p.IsAgent && !p.CanReadFolder(rPeer.FolderPath) {
@@ -167,6 +167,10 @@ func (s *Server) handleListAgentKeys(w http.ResponseWriter, r *http.Request, u a
 }
 
 func (s *Server) handleCreateAgentKey(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	if !u.EffectiveCanUseAgents() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号已被禁止使用或创建 AI Agent 密钥"})
+		return
+	}
 	var req struct {
 		Name                string     `json:"name"`
 		OwnerUsername       string     `json:"owner_username"`

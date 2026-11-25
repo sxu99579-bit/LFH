@@ -57,6 +57,8 @@ func TestCompareVersions(t *testing.T) {
 		{"V0.11.24.4", "V0.11.24.3", 1},
 		{"V0.11.25.0", "V0.11.24.4", 1},
 		{"V0.12.0", "V0.11.25.0", 1},
+		{"V1.11.25.1", "V0.11.25.0", 1},
+		{"V1.12.0", "V1.11.25.1", 1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersions(tc.a, tc.b); got != tc.want {
@@ -111,7 +113,7 @@ func TestSelectAssetAndConfigPersistence(t *testing.T) {
 }
 
 func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
-	newBytes := []byte("LFH-NEW-BINARY-PAYLOAD-V0.12.0")
+	newBytes := []byte("LFH-NEW-BINARY-PAYLOAD-V2.0.0")
 	sum := sha256.Sum256(newBytes)
 	newHex := hex.EncodeToString(sum[:])
 
@@ -126,8 +128,8 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 		switch r.URL.Path {
 		case "/repos/tester/LFH/releases/latest":
 			_ = json.NewEncoder(w).Encode(githubRelease{
-				TagName:     "V0.12.0",
-				HTMLURL:     ts.URL + "/releases/V0.12.0",
+				TagName:     "V2.0.0",
+				HTMLURL:     ts.URL + "/releases/V2.0.0",
 				Body:        "Zero-downtime update test release",
 				PublishedAt: "2026-11-21T18:00:00Z",
 				Assets: []ReleaseAsset{
@@ -165,7 +167,7 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 
 	availableNotified := false
 	mgr.SetCallbacks(nil, func(st Status) {
-		if st.LatestVersion == "V0.12.0" {
+		if st.LatestVersion == "V2.0.0" {
 			availableNotified = true
 		}
 	}, nil)
@@ -174,7 +176,7 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckNow: %v", err)
 	}
-	if !st.HasUpdate || st.LatestVersion != "V0.12.0" || st.AssetName != assetName || !availableNotified {
+	if !st.HasUpdate || st.LatestVersion != "V2.0.0" || st.AssetName != assetName || !availableNotified {
 		t.Fatalf("unexpected check status: %+v notified=%v", st, availableNotified)
 	}
 
@@ -225,7 +227,7 @@ func TestCheckDownloadVerifySwapAndRollback(t *testing.T) {
 	if err := mgr.ApplyUpdateSync(context.Background()); err != nil {
 		t.Fatalf("expected ApplyUpdateSync success, got %v", err)
 	}
-	if handedVersion != "V0.12.0" || mgr.Status().State != "done" || mgr.Status().Progress != 100 {
+	if handedVersion != "V2.0.0" || mgr.Status().State != "done" || mgr.Status().Progress != 100 {
 		t.Fatalf("unexpected final status: ver=%q status=%+v", handedVersion, mgr.Status())
 	}
 	gotCur, _ = os.ReadFile(fakeExe)
@@ -288,7 +290,7 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 	oldSum := sha256.Sum256(oldBytes)
 	oldHex := hex.EncodeToString(oldSum[:])
 
-	curBytes := []byte("LFH-CURRENT-BINARY-V0.11.25.0")
+	curBytes := []byte("LFH-CURRENT-BINARY-V1.11.25.1")
 	curSum := sha256.Sum256(curBytes)
 	curHex := hex.EncodeToString(curSum[:])
 
@@ -298,8 +300,8 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 		case "/repos/tester/LFH/releases":
 			_ = json.NewEncoder(w).Encode([]githubRelease{
 				{
-					TagName:     "V0.11.25.0",
-					Name:        "V0.11.25.0",
+					TagName:     "V1.11.25.1",
+					Name:        "V1.11.25.1",
 					PublishedAt: "2026-11-22T10:00:00Z",
 					Assets: []ReleaseAsset{
 						{Name: assetName, Size: int64(len(curBytes)), BrowserDownloadURL: ts.URL + "/dl/cur/" + assetName},

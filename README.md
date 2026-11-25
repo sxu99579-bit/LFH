@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">问题反馈</a> · <code>V0.11.25.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">问题反馈</a> · <code>V1.11.25.1</code>
 </p>
 
 ---
@@ -63,9 +63,12 @@
   - 支持常见图片、音视频、文本/Markdown、文档及压缩包在线浏览、搜索与解压；
   - **文本在线编辑**：支持对已上传的 `.txt`、`.json`、`.md`、`.yaml`、`.csv`、`.log`、`.ini`、`.conf`、`.sql` 及常见代码文件直接在浏览器中在线编辑（内置行号、JSON 语法校验与一键格式化/压缩、Markdown 实时分栏预览），保存后自动生成新版本；
   - **全量版本信息控制**：详细展示每个版本的**更新方式**（`初始上传`、`上传覆盖更新`、`在线编辑更新`、`手动上传新版本`、`历史版本回滚`）、**更新用户**、**更新设备**（设备名称、指纹与 IP）及**更新时间**，支持任意历史版本独立下载与一键回滚。
-- **精细权限控制与角色治理**：
+- **用户治理 v2 与精细权限控制**：
   - 首次初始化自动生成全局随机管理员账号（`lfh_xxxxxx` 与高强度随机密码），并写入数据目录 `initial-admin.txt`，避免多机部署产生默认弱口令冲突。
-  - 管理员可在「用户管理」中随时为正常账号**授予或取消管理员权限**（内置防误删最后一名管理员与防自我降权保护）。
+  - **成员全生命周期治理**：支持管理员直接开户（自动生成初始强密码与首次登录强制改密）、一键重置密码、登录时间与 IP 审计追踪、一键强制下线（自增会话版本使旧 Cookie 与 API Token 即刻失效）、以及可配置的临时账号有效期自动过期。
+  - **配额、只读角色、细粒度能力与目录白名单**：支持按成员设置个人存储空间配额上限；新增 `只读访客 (readonly)` 角色，支持独立开关上传写入、目录管理与 AI Agent 使用权，并可为成员限定允许访问的目录白名单（在列表、上传、在线编辑、目录接口及 MCP/REST 中统一隔离拦截）。
+  - **成员工作台与安全处置**：提供顶部 KPI 概览卡片、多维筛选与批量操作栏（批准/封禁/解封/强制下线/批量配额），点击成员滑出右侧详情抽屉，可集中管理其关联 AI Agent Key（一键全部冻结并断开在线 MCP 会话）、查看个人行为审计时间线，并在删除账号时选择「过户文件给管理员 / 保留署名 / 彻底清理文件」。
+  - 管理员可在「用户治理」中随时调整账号角色（内置防误删最后一名管理员与防自我降权保护）。
   - 支持**指定用户可见与下载**：上传时或上传后均可限定仅指定系统用户可下载，未授权用户在列表、统计图表、实时推送与下载接口中完全不可见；仅**管理员与原上传者**可删除文件或调整权限，其余被授权用户只读下载。
   - 普通成员仅展示外观主题与个人账号面板；节点存储磁盘选择、路径切换（含已有文件一键跨盘迁移）及真实存储路径对普通用户严格隐藏，仅限管理员管理。
 - **深浅双主题与全端适配**：内置精致深/浅色模式切换，界面针对桌面端、平板及移动端重排优化。
@@ -127,7 +130,7 @@ docker compose logs quailnest
 也可以直接使用 `docker build` / `docker run` 手动运行：
 
 ```bash
-docker build -t quailnest:V0.11.25.0 .
+docker build -t quailnest:V1.11.25.1 .
 
 docker run -d \
   --name quailnest \
@@ -135,7 +138,7 @@ docker run -d \
   -p 8080:8080 \
   -p 53319:53319/udp \
   -v $(pwd)/quailnest-data:/data \
-  quailnest:V0.11.25.0 -data /data -port 8080 -expose-ip 192.168.1.100
+  quailnest:V1.11.25.1 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---

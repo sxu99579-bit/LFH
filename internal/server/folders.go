@@ -196,13 +196,34 @@ func addFolderWithAncestors(set map[string]struct{}, folderPath string) {
 	}
 }
 
+func canSeeUserFolderEntry(p auth.Principal, folderPath string) bool {
+	if p.User.CanAccessFolder(folderPath) {
+		return true
+	}
+	clean := storage.SanitizeFolderPath(folderPath)
+	if clean == "" {
+		return true
+	}
+	for _, rule := range p.User.AllowedFolders {
+		if auth.FolderMatchesPrefix(rule, clean) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) collectAccessibleFolderPaths(p auth.Principal) ([]string, []FolderEntry) {
 	explicit := s.getFolderStore().List()
 	pathSet := make(map[string]struct{})
+	visibleExplicit := make([]FolderEntry, 0, len(explicit))
 	for _, e := range explicit {
+		if !canSeeUserFolderEntry(p, e.Path) {
+			continue
+		}
 		if p.IsAgent && !p.CanReadFolder(e.Path) {
 			continue
 		}
+		visibleExplicit = append(visibleExplicit, e)
 		addFolderWithAncestors(pathSet, e.Path)
 	}
 	for _, rec := range s.filterAccessibleForPrincipal(s.cluster.AllClusterFiles(), p) {
@@ -213,7 +234,7 @@ func (s *Server) collectAccessibleFolderPaths(p auth.Principal) ([]string, []Fol
 		folders = append(folders, fp)
 	}
 	sort.Strings(folders)
-	return folders, explicit
+	return folders, visibleExplicit
 }
 
 func matchFolderTree(folderPath, root string) bool {
@@ -264,6 +285,10 @@ func (s *Server) handleListFolders(w http.ResponseWriter, r *http.Request, p aut
 }
 
 func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	if !p.User.EffectiveCanManageFolders() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号为只读权限或无权创建文件夹"})
+		return
+	}
 	var req struct {
 		Path string `json:"path"`
 	}
@@ -274,6 +299,10 @@ func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request, p au
 	clean := storage.SanitizeFolderPath(req.Path)
 	if clean == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件夹路径不能为空或包含非法字符"})
+		return
+	}
+	if !p.User.CanAccessFolder(clean) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号无权在该目录范围创建文件夹"})
 		return
 	}
 	if p.IsAgent && !p.CanWriteFolder(clean) {
@@ -301,6 +330,10 @@ func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request, p au
 
 func (s *Server) handleUpdateFileFolder(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	u := p.User
+	if !u.EffectiveCanManageFolders() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号为只读权限或无权移动文件夹内文件"})
+		return
+	}
 	id := r.PathValue("id")
 	rec, _, _, _, status, errMsg := s.findAccessibleFileForPrincipal(id, p)
 	if status != http.StatusOK {
@@ -324,6 +357,10 @@ func (s *Server) handleUpdateFileFolder(w http.ResponseWriter, r *http.Request, 
 	}
 	newFolder := storage.SanitizeFolderPath(req.FolderPath)
 	oldFolder := storage.SanitizeFolderPath(rec.FolderPath)
+	if !u.CanAccessFolder(oldFolder) || !u.CanAccessFolder(newFolder) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号无权操作来源或目标目录"})
+		return
+	}
 	if p.IsAgent && (!p.CanWriteFolder(oldFolder) || !p.CanWriteFolder(newFolder)) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权在来源或目标目录移动文件"})
 		return
@@ -352,6 +389,10 @@ func (s *Server) handleUpdateFileFolder(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) handleRenameFolder(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	u := p.User
+	if !u.EffectiveCanManageFolders() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号为只读权限或无权管理文件夹"})
+		return
+	}
 	var req struct {
 		OldPath string `json:"old_path"`
 		NewPath string `json:"new_path"`
@@ -364,6 +405,10 @@ func (s *Server) handleRenameFolder(w http.ResponseWriter, r *http.Request, p au
 	newPath := storage.SanitizeFolderPath(req.NewPath)
 	if oldPath == "" || newPath == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "原目录与新目录路径均不能为空"})
+		return
+	}
+	if !u.CanAccessFolder(oldPath) || !u.CanAccessFolder(newPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号无权操作该目录范围"})
 		return
 	}
 	if oldPath == newPath {
@@ -431,6 +476,10 @@ func (s *Server) handleRenameFolder(w http.ResponseWriter, r *http.Request, p au
 
 func (s *Server) handleDeleteFolder(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	u := p.User
+	if !u.EffectiveCanManageFolders() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号为只读权限或无权删除文件夹"})
+		return
+	}
 	var req struct {
 		Path string `json:"path"`
 		Mode string `json:"mode"` // empty_only | move_to_parent | delete_files
@@ -442,6 +491,10 @@ func (s *Server) handleDeleteFolder(w http.ResponseWriter, r *http.Request, p au
 	clean := storage.SanitizeFolderPath(req.Path)
 	if clean == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件夹路径不能为空"})
+		return
+	}
+	if !u.CanAccessFolder(clean) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号无权删除该目录范围"})
 		return
 	}
 	mode := strings.ToLower(strings.TrimSpace(req.Mode))

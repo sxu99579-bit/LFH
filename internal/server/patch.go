@@ -113,6 +113,9 @@ func (s *Server) patchFileForPrincipal(
 	if p.IsAgent && !p.CanWriteFolder(rec.FolderPath) {
 		return storage.FileRecord{}, http.StatusForbidden, errors.New("Agent 密钥无权修改该目录文件")
 	}
+	if !p.User.EffectiveCanUpload() || !p.User.CanAccessFolder(rec.FolderPath) {
+		return storage.FileRecord{}, http.StatusForbidden, errors.New("当前账号为只读权限或无权修改该目录文件")
+	}
 
 	effExpected := expectedVer
 	if effExpected == nil {
@@ -219,6 +222,9 @@ func (s *Server) batchCommitForPrincipal(
 		}
 		switch action {
 		case "write":
+			if !p.User.EffectiveCanUpload() || !p.User.CanAccessFolder(folderPath) {
+				return storage.BatchCommitResult{}, http.StatusForbidden, errors.New("当前账号为只读权限或无权写入目录: " + folderPath)
+			}
 			if p.IsAgent && !p.CanWriteFolder(folderPath) {
 				return storage.BatchCommitResult{}, http.StatusForbidden, errors.New("Agent 密钥无权写入目录: " + folderPath)
 			}
@@ -239,10 +245,16 @@ func (s *Server) batchCommitForPrincipal(
 			}
 			sanitizedOps[i].AllowedUsers = cleanUsers
 		case "patch":
+			if !p.User.EffectiveCanUpload() || !p.User.CanAccessFolder(folderPath) {
+				return storage.BatchCommitResult{}, http.StatusForbidden, errors.New("当前账号为只读权限或无权修改目录: " + folderPath)
+			}
 			if p.IsAgent && !p.CanWriteFolder(folderPath) {
 				return storage.BatchCommitResult{}, http.StatusForbidden, errors.New("Agent 密钥无权修改目录文件: " + folderPath)
 			}
 		case "delete":
+			if !p.User.EffectiveCanUpload() || !p.User.CanAccessFolder(folderPath) {
+				return storage.BatchCommitResult{}, http.StatusForbidden, errors.New("当前账号为只读权限或无权删除目录: " + folderPath)
+			}
 			if p.IsAgent && !p.CanDeleteFolder(folderPath) {
 				return storage.BatchCommitResult{}, http.StatusForbidden, errors.New("Agent 密钥无权删除目录文件: " + folderPath)
 			}
@@ -319,6 +331,11 @@ func (s *Server) batchCommitForPrincipal(
 		}
 	}
 
+	if newNonMountBytes > 0 {
+		if qStatus, qMsg := s.checkPrincipalQuota(p, newNonMountBytes); qStatus != http.StatusOK {
+			return storage.BatchCommitResult{}, qStatus, errors.New(qMsg)
+		}
+	}
 	if hasNewNonMountWrite && targetNodeID == "" {
 		selected, selErr := s.cluster.SelectUploadTarget("auto", newNonMountBytes)
 		if selErr != nil {

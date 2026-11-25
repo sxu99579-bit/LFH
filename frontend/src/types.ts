@@ -2,12 +2,90 @@ export type ThemeMode = 'dark' | 'light'
 
 export type NavTab = 'files' | 'tasks' | 'clipboard' | 'plugins' | 'health' | 'settings'
 
+export type UserRole = 'admin' | 'user' | 'readonly'
+
 export interface User {
   id: string
   username: string
-  role: 'admin' | 'user'
+  display_name?: string
+  note?: string
+  role: UserRole
   status?: string
   created_at?: string
+  expires_at?: string | null
+  expired?: boolean
+  last_login_at?: string | null
+  last_login_ip?: string
+  quota_bytes?: number
+  allowed_folders?: string[]
+  can_upload?: boolean
+  can_manage_folders?: boolean
+  can_use_agents?: boolean
+  must_change_password?: boolean
+  session_version?: number
+  has_api_token?: boolean
+}
+
+export interface AdminUserItem extends User {
+  status: string
+  file_count: number
+  used_bytes: number
+  agent_key_count: number
+  active_agent_key_count: number
+}
+
+export interface UserGovernanceSummary {
+  total: number
+  active: number
+  pending: number
+  banned: number
+  expired: number
+  admins: number
+  readonly: number
+}
+
+export interface AdminCreateUserPayload {
+  username: string
+  password?: string
+  role: UserRole
+  display_name?: string
+  note?: string
+  quota_bytes?: number
+  allowed_folders?: string[]
+  can_upload?: boolean
+  can_manage_folders?: boolean
+  can_use_agents?: boolean
+  must_change_password?: boolean
+  expire_hours?: number
+  expires_at?: string | null
+}
+
+export interface AdminUpdateUserPayload {
+  display_name?: string
+  note?: string
+  role?: UserRole
+  quota_bytes?: number
+  allowed_folders?: string[]
+  can_upload?: boolean
+  can_manage_folders?: boolean
+  can_use_agents?: boolean
+  must_change_password?: boolean
+  expire_hours?: number
+  expires_at?: string | null
+  clear_expires_at?: boolean
+}
+
+export interface UserBatchActionResult {
+  action: string
+  updated: string[]
+  skipped?: string[]
+}
+
+export interface UserDetailResponse {
+  ok: boolean
+  user: AdminUserItem
+  agent_keys: AgentKeyItem[]
+  audit_entries: AuditEntry[]
 }
 
 export interface NetworkAddr {

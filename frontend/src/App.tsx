@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { KeyRound, LogOut } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useTransferQueue } from '@/lib/transfers'
 import { isMobileLayout } from '@/lib/utils'
@@ -12,7 +13,17 @@ import type {
   ThemeMode,
   User,
 } from '@/types'
-import { ToastProvider, useToast } from '@/components/ui'
+import {
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Input,
+  ToastProvider,
+  useToast,
+} from '@/components/ui'
 import { AuthView } from '@/components/AuthView'
 import { AppShell } from '@/components/AppShell'
 import { CommandPalette } from '@/components/CommandPalette'
@@ -78,6 +89,12 @@ function WorkspaceApp() {
   const [editingFile, setEditingFile] = useState<FileRecord | null>(null)
   const [createTxtOpen, setCreateTxtOpen] = useState(false)
   const [localImportMode, setLocalImportMode] = useState<'import' | 'mount' | null>(null)
+  const [forceOldPwd, setForceOldPwd] = useState('')
+  const [forceNewPwd, setForceNewPwd] = useState('')
+  const [forceConfirmPwd, setForceConfirmPwd] = useState('')
+  const [forcePwdBusy, setForcePwdBusy] = useState(false)
+
+  const canUpload = Boolean(user && (user.role === 'admin' || (user.role !== 'readonly' && user.can_upload !== false)))
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const folderInputRef = useRef<HTMLInputElement | null>(null)
@@ -382,8 +399,20 @@ function WorkspaceApp() {
         pendingTasksCount={pendingTasksCount}
         onToggleTransferDrawer={() => transfers.setOpen(!transfers.open)}
         onOpenCommandPalette={() => setCmdOpen(true)}
-        onQuickUploadFiles={() => fileInputRef.current?.click()}
-        onQuickCreateTxt={() => setCreateTxtOpen(true)}
+        onQuickUploadFiles={() => {
+          if (!canUpload) {
+            toast('当前账号为只读权限或已被管理员禁止上传写入', 'error')
+            return
+          }
+          fileInputRef.current?.click()
+        }}
+        onQuickCreateTxt={() => {
+          if (!canUpload) {
+            toast('当前账号为只读权限或已被管理员禁止上传写入', 'error')
+            return
+          }
+          setCreateTxtOpen(true)
+        }}
         onQuickLocalImport={() => setLocalImportMode('import')}
         onReconcileClusterVersion={handleReconcileClusterVersion}
         onLogout={handleLogout}
@@ -499,6 +528,7 @@ function WorkspaceApp() {
             onToggleTheme={toggleTheme}
             onRefreshAll={refreshAll}
             onOpenMountModal={() => setLocalImportMode('mount')}
+            folders={folders}
             focusTab={settingsFocusTab}
           />
         )}
@@ -511,7 +541,13 @@ function WorkspaceApp() {
         isAdmin={user.role === 'admin'}
         onNavigate={(tab) => setActiveTab(tab)}
         onSelectFile={(rec) => setInspectedFile(rec)}
-        onCreateTxt={() => setCreateTxtOpen(true)}
+        onCreateTxt={() => {
+          if (!canUpload) {
+            toast('当前账号为只读权限或已被管理员禁止上传写入', 'error')
+            return
+          }
+          setCreateTxtOpen(true)
+        }}
         onProbeBandwidth={() => void handleProbeBandwidth()}
       />
 
@@ -578,6 +614,97 @@ function WorkspaceApp() {
         allowedUsers={[]}
         onSuccess={() => void refreshAll()}
       />
+
+      {user.must_change_password && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 backdrop-blur-xs p-4">
+          <Card className="w-full max-w-md shadow-2xl">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <KeyRound className="h-4 w-4 text-primary" />
+                <span>请修改初始或临时密码</span>
+              </CardTitle>
+              <CardDescription>
+                管理员已为账号「{user.username}」开启首次/重置登录强制改密要求，完成修改后即可进入工作区。
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault()
+                  if (!forceOldPwd) {
+                    toast('请输入当前/临时密码', 'error')
+                    return
+                  }
+                  if (forceNewPwd.length < 6) {
+                    toast('新密码长度至少为 6 位', 'error')
+                    return
+                  }
+                  if (forceNewPwd !== forceConfirmPwd) {
+                    toast('两次输入的新密码不一致', 'error')
+                    return
+                  }
+                  setForcePwdBusy(true)
+                  try {
+                    const res = await api.changePassword(forceOldPwd, forceNewPwd)
+                    setForceOldPwd('')
+                    setForceNewPwd('')
+                    setForceConfirmPwd('')
+                    if (res.user) {
+                      setUser(res.user)
+                    } else {
+                      setUser((prev) => (prev ? { ...prev, must_change_password: false } : prev))
+                    }
+                    toast('密码修改成功，欢迎进入 QuailNest 工作区', 'success')
+                  } catch (err) {
+                    toast(err instanceof Error ? err.message : '修改密码失败', 'error')
+                  } finally {
+                    setForcePwdBusy(false)
+                  }
+                }}
+                className="space-y-3 text-xs"
+              >
+                <div className="space-y-1">
+                  <label className="font-medium">当前 / 临时密码</label>
+                  <Input
+                    type="password"
+                    value={forceOldPwd}
+                    onChange={(e) => setForceOldPwd(e.target.value)}
+                    placeholder="输入管理员分配的初始或临时密码"
+                    autoFocus
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-medium">设置新密码（至少 6 位）</label>
+                  <Input
+                    type="password"
+                    value={forceNewPwd}
+                    onChange={(e) => setForceNewPwd(e.target.value)}
+                    placeholder="请输入新登录密码"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="font-medium">确认新密码</label>
+                  <Input
+                    type="password"
+                    value={forceConfirmPwd}
+                    onChange={(e) => setForceConfirmPwd(e.target.value)}
+                    placeholder="再次输入新登录密码"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 pt-2">
+                  <Button type="button" size="sm" variant="outline" onClick={() => void handleLogout()}>
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>退出登录</span>
+                  </Button>
+                  <Button type="submit" size="sm" disabled={forcePwdBusy}>
+                    {forcePwdBusy ? '保存中...' : '确认修改并进入'}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </>
   )
 }

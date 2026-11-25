@@ -237,6 +237,8 @@ export function FilesPage({
 }: FilesPageProps) {
   const { toast } = useToast()
   const isAdmin = user.role === 'admin'
+  const canUpload = isAdmin || (user.role !== 'readonly' && user.can_upload !== false)
+  const canManageFolders = isAdmin || (user.role !== 'readonly' && user.can_manage_folders !== false)
   const [viewMode, setViewModeState] = useState<'table' | 'grid'>(() => {
     if (isMobile) return 'grid'
     try {
@@ -331,6 +333,10 @@ export function FilesPage({
   const uploadPrefix = !hasActiveFilter && groupByFolder && currentFolder ? `${currentFolder}/` : ''
 
   const handleFilesSelected = (list: FileList | null) => {
+    if (!canUpload) {
+      toast('当前账号为只读权限或已被管理员禁止上传写入', 'error')
+      return
+    }
     if (!list || list.length === 0) return
     const items = Array.from(list).map((f) => {
       const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name
@@ -348,6 +354,10 @@ export function FilesPage({
     e.stopPropagation()
     dragDepthRef.current = 0
     setDragging(false)
+    if (!canUpload) {
+      toast('当前账号为只读权限或已被管理员禁止上传写入', 'error')
+      return
+    }
     if (!e.dataTransfer) return
     const items = await readAllEntriesFromDrop(e.dataTransfer)
     if (items.length === 0) {
@@ -551,33 +561,44 @@ export function FilesPage({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={() => fileInputRef.current?.click()}>
-            <Upload className="h-3.5 w-3.5" />
-            <span>上传文件</span>
-          </Button>
-          {!isMobile && (
-            <Button size="sm" variant="outline" onClick={() => folderInputRef.current?.click()}>
-              <FolderUp className="h-3.5 w-3.5" />
-              <span>上传目录</span>
+          {canUpload ? (
+            <>
+              <Button size="sm" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-3.5 w-3.5" />
+                <span>上传文件</span>
+              </Button>
+              {!isMobile && (
+                <Button size="sm" variant="outline" onClick={() => folderInputRef.current?.click()}>
+                  <FolderUp className="h-3.5 w-3.5" />
+                  <span>上传目录</span>
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={onOpenCreateTxt}>
+                <FilePlus2 className="h-3.5 w-3.5" />
+                <span>新建 TXT</span>
+              </Button>
+            </>
+          ) : (
+            <Badge variant="warning" className="gap-1 px-2.5 py-1">
+              <Lock className="h-3 w-3" />
+              <span>只读 / 禁止上传</span>
+            </Badge>
+          )}
+          {canManageFolders && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                setCreateFolderModal({
+                  parent: !hasActiveFilter && groupByFolder ? currentFolder : '',
+                  name: '',
+                })
+              }
+            >
+              <FolderPlus className="h-3.5 w-3.5 text-[#4aa1ec]" />
+              <span>新建文件夹</span>
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={onOpenCreateTxt}>
-            <FilePlus2 className="h-3.5 w-3.5" />
-            <span>新建 TXT</span>
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              setCreateFolderModal({
-                parent: !hasActiveFilter && groupByFolder ? currentFolder : '',
-                name: '',
-              })
-            }
-          >
-            <FolderPlus className="h-3.5 w-3.5 text-[#4aa1ec]" />
-            <span>新建文件夹</span>
-          </Button>
           {isAdmin && (
             <Button size="sm" variant="secondary" onClick={onOpenLocalImport}>
               <HardDrive className="h-3.5 w-3.5" />
@@ -1321,6 +1342,7 @@ export function FilesPage({
           user={user}
           capabilities={capabilities}
           writableMountIds={writableMountIds}
+          canManageFolders={canManageFolders}
           isMobile={isMobile}
           groupByFolder={groupByFolder}
           iconSize={iconSize}

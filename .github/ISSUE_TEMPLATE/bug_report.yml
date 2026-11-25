@@ -8,7 +8,7 @@ body:
     attributes:
       label: QuailNest 版本号 / Version
       description: 可在「设置 -> 版本升级」或启动日志中查看
-      placeholder: V0.11.25.0
+      placeholder: V1.11.25.1
     validations:
       required: true
   - type: input

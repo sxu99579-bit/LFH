@@ -18,8 +18,6 @@ import {
   Smartphone,
   Terminal,
   Trash2,
-  UserCheck,
-  Users,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn, copyTextToClipboard, formatQuotaDisplay, formatSize, formatTime } from '@/lib/utils'
@@ -56,6 +54,7 @@ import {
   useToast,
 } from '@/components/ui'
 import { AgentBridgeTab } from '@/components/AgentBridgeTab'
+import { UserGovernanceTab } from '@/components/UserGovernanceTab'
 import { VerifyPresetsEditor } from '@/components/VerifyPresetsEditor'
 
 interface SettingsPageProps {
@@ -66,6 +65,7 @@ interface SettingsPageProps {
   onToggleTheme: () => void
   onRefreshAll: () => Promise<void> | void
   onOpenMountModal: () => void
+  folders?: string[]
   focusTab?: { tab: SettingsTab; seq: number } | null
 }
 
@@ -79,6 +79,7 @@ export function SettingsPage({
   onToggleTheme,
   onRefreshAll,
   onOpenMountModal,
+  folders = [],
   focusTab,
 }: SettingsPageProps) {
   const { toast } = useToast()
@@ -115,9 +116,6 @@ export function SettingsPage({
   const [integrity, setIntegrity] = useState<IntegrityStatus | null>(null)
   const [scrubbing, setScrubbing] = useState(false)
   const [auditLogs, setAuditLogs] = useState<AuditEntry[]>([])
-
-  // Users state
-  const [users, setUsers] = useState<Array<User & { status: string }>>([])
 
   // Cluster & NIC & Mounts state
   const [exposeIps, setExposeIps] = useState<string[]>([])
@@ -254,9 +252,6 @@ export function SettingsPage({
           setInvites(inv.invites || [])
           setIntegrity(intg)
           setAuditLogs(aud.entries || [])
-        } else if (targetTab === 'users') {
-          const res = await api.getUsers()
-          setUsers(res.users || [])
         } else if (targetTab === 'cluster') {
           const [discRes, mntRes] = await Promise.all([api.getDiscoveredNodes(), api.getMounts()])
           setDiscovered(discRes.discovered || [])
@@ -1116,119 +1111,12 @@ export function SettingsPage({
 
       {/* ==================== TAB: USERS ==================== */}
       {tab === 'users' && isAdmin && (
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between gap-2">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Users className="h-4 w-4 text-primary" />
-                <span>成员账号与审核管理</span>
-              </CardTitle>
-              <CardDescription>审批待审核账号、调整管理员角色或封禁异常用户</CardDescription>
-            </div>
-            <Button size="xs" variant="outline" onClick={() => loadAdminTab('users')}>
-              <RefreshCw className="h-3 w-3" />
-              <span>刷新</span>
-            </Button>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-border text-muted-foreground">
-                  <tr>
-                    <th className="py-2 pr-3 font-medium">用户名</th>
-                    <th className="py-2 pr-3 font-medium">角色</th>
-                    <th className="py-2 pr-3 font-medium">状态</th>
-                    <th className="py-2 pr-3 font-medium">创建时间</th>
-                    <th className="py-2 text-right font-medium">管理操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {users.map((u) => {
-                    const isSelf = u.username === user.username
-                    return (
-                      <tr key={u.id || u.username}>
-                        <td className="py-2.5 pr-3 font-medium">{u.username}</td>
-                        <td className="py-2.5 pr-3">
-                          <Badge variant={u.role === 'admin' ? 'default' : 'secondary'}>
-                            {u.role === 'admin' ? '管理员' : '普通用户'}
-                          </Badge>
-                        </td>
-                        <td className="py-2.5 pr-3">
-                          <Badge
-                            variant={
-                              u.status === 'pending'
-                                ? 'warning'
-                                : u.status === 'banned'
-                                ? 'destructive'
-                                : 'success'
-                            }
-                          >
-                            {u.status === 'pending' ? '待审核' : u.status === 'banned' ? '已封禁' : '正常'}
-                          </Badge>
-                        </td>
-                        <td className="py-2.5 pr-3 text-muted-foreground">{formatTime(u.created_at)}</td>
-                        <td className="py-2.5 text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1">
-                            {u.status === 'pending' && (
-                              <Button
-                                size="xs"
-                                onClick={async () => {
-                                  await api.approveUser(u.username)
-                                  toast(`已同意 ${u.username} 注册`, 'success')
-                                  await loadAdminTab('users')
-                                }}
-                              >
-                                <UserCheck className="h-3 w-3" />
-                                <span>批准</span>
-                              </Button>
-                            )}
-                            {!isSelf && (
-                              <>
-                                <Button
-                                  size="xs"
-                                  variant="outline"
-                                  onClick={async () => {
-                                    await api.setUserRole(u.username, u.role === 'admin' ? 'user' : 'admin')
-                                    await loadAdminTab('users')
-                                  }}
-                                >
-                                  {u.role === 'admin' ? '设为普通' : '设为管理'}
-                                </Button>
-                                <Button
-                                  size="xs"
-                                  variant="outline"
-                                  onClick={async () => {
-                                    if (u.status === 'banned') await api.unbanUser(u.username)
-                                    else await api.banUser(u.username)
-                                    await loadAdminTab('users')
-                                  }}
-                                >
-                                  {u.status === 'banned' ? '解封' : '封禁'}
-                                </Button>
-                                <Button
-                                  size="xs"
-                                  variant="ghost"
-                                  className="text-destructive"
-                                  onClick={async () => {
-                                    if (!window.confirm(`确定彻底删除用户 ${u.username} 吗？`)) return
-                                    await api.deleteUser(u.username)
-                                    await loadAdminTab('users')
-                                  }}
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </Button>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
+        <UserGovernanceTab
+          currentUser={user}
+          folders={folders}
+          toast={toast}
+          onUsersChanged={() => void onRefreshAll()}
+        />
       )}
 
       {/* ==================== TAB: CLUSTER, NIC & MOUNTS ==================== */}

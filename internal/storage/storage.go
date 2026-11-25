@@ -455,6 +455,57 @@ func FilterAccessibleRecords(records []FileRecord, username, role string) []File
 	return out
 }
 
+// ReassignUploader transfers ownership of records uploaded by oldUser to newUser and replaces oldUser in AllowedUsers.
+func (s *Store) ReassignUploader(oldUser, newUser string) int {
+	oldClean := strings.TrimSpace(oldUser)
+	newClean := strings.TrimSpace(newUser)
+	if oldClean == "" || newClean == "" || oldClean == newClean {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := 0
+	for id, rec := range s.records {
+		modified := false
+		if rec.Uploader == oldClean {
+			rec.Uploader = newClean
+			modified = true
+		}
+		if len(rec.AllowedUsers) > 0 {
+			hasOld := false
+			for _, u := range rec.AllowedUsers {
+				if u == oldClean {
+					hasOld = true
+					break
+				}
+			}
+			if hasOld {
+				seen := make(map[string]bool, len(rec.AllowedUsers))
+				nextAllowed := make([]string, 0, len(rec.AllowedUsers))
+				for _, u := range rec.AllowedUsers {
+					if u == oldClean {
+						u = newClean
+					}
+					if !seen[u] {
+						seen[u] = true
+						nextAllowed = append(nextAllowed, u)
+					}
+				}
+				rec.AllowedUsers = NormalizeAllowedUsers(nextAllowed)
+				modified = true
+			}
+		}
+		if modified {
+			s.records[id] = rec
+			changed++
+		}
+	}
+	if changed > 0 {
+		_ = s.saveLocked()
+	}
+	return changed
+}
+
 func (s *Store) SaveUpload(origName, uploader string, dev DeviceInfo, r io.Reader) (FileRecord, error) {
 	return s.SaveUploadWithOptions(origName, "", uploader, nil, dev, r)
 }

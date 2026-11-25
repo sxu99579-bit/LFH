@@ -1,4 +1,7 @@
 import type {
+  AdminCreateUserPayload,
+  AdminUpdateUserPayload,
+  AdminUserItem,
   AgentAvatarId,
   AgentDeviceKind,
   AgentKeyItem,
@@ -35,6 +38,10 @@ import type {
   UpdateStatus,
   UploadPolicy,
   User,
+  UserBatchActionResult,
+  UserDetailResponse,
+  UserGovernanceSummary,
+  UserRole,
   VerifyPreset,
   VerifyResult,
   WebhookRuleItem,
@@ -87,7 +94,7 @@ export const api = {
     }),
   logout: () => apiFetch('/api/logout', { method: 'POST' }),
   changePassword: (old_password: string, new_password: string) =>
-    apiFetch('/api/password', {
+    apiFetch<{ ok: boolean; user?: User }>('/api/password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ old_password, new_password }),
@@ -231,10 +238,73 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  getUsers: () => apiFetch<{ users: Array<User & { status: string }>; pending_count: number }>('/api/admin/users'),
+  getUsers: () =>
+    apiFetch<{ users: AdminUserItem[]; summary: UserGovernanceSummary; pending_count: number }>('/api/admin/users'),
+  createUser: (payload: AdminCreateUserPayload) =>
+    apiFetch<{
+      ok: boolean
+      user: User
+      generated_password?: string
+      users: AdminUserItem[]
+      summary: UserGovernanceSummary
+      pending_count: number
+    }>('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateUser: (username: string, payload: AdminUpdateUserPayload) =>
+    apiFetch<{ ok: boolean; user: AdminUserItem; pending_count: number }>(
+      `/api/admin/users/${encodeURIComponent(username)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ),
+  resetUserPassword: (username: string, payload?: { new_password?: string; must_change_password?: boolean }) =>
+    apiFetch<{ ok: boolean; user: User; temporary_password: string }>(
+      `/api/admin/users/${encodeURIComponent(username)}/reset-password`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      }
+    ),
+  forceLogoutUser: (username: string) =>
+    apiFetch<{ ok: boolean; user: User }>(`/api/admin/users/${encodeURIComponent(username)}/force-logout`, {
+      method: 'POST',
+    }),
+  freezeUserAgents: (username: string, disabled: boolean) =>
+    apiFetch<{ ok: boolean; disabled: boolean; affected: number; keys: AgentKeyItem[] }>(
+      `/api/admin/users/${encodeURIComponent(username)}/agents/freeze`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disabled }),
+      }
+    ),
+  batchUsersAction: (payload: {
+    usernames: string[]
+    action: 'approve' | 'ban' | 'unban' | 'force_logout' | 'set_quota'
+    quota_bytes?: number
+  }) =>
+    apiFetch<{
+      ok: boolean
+      result: UserBatchActionResult
+      users: AdminUserItem[]
+      summary: UserGovernanceSummary
+      pending_count: number
+    }>('/api/admin/users/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  getUserDetail: (username: string) =>
+    apiFetch<UserDetailResponse>(`/api/admin/users/${encodeURIComponent(username)}/detail`),
   approveUser: (username: string) =>
     apiFetch(`/api/admin/users/${encodeURIComponent(username)}/approve`, { method: 'POST' }),
-  setUserRole: (username: string, role: 'admin' | 'user') =>
+  setUserRole: (username: string, role: UserRole) =>
     apiFetch(`/api/admin/users/${encodeURIComponent(username)}/role`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -243,8 +313,11 @@ export const api = {
   banUser: (username: string) => apiFetch(`/api/admin/users/${encodeURIComponent(username)}/ban`, { method: 'POST' }),
   unbanUser: (username: string) =>
     apiFetch(`/api/admin/users/${encodeURIComponent(username)}/unban`, { method: 'POST' }),
-  deleteUser: (username: string) =>
-    apiFetch(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
+  deleteUser: (username: string, fileAction: 'keep' | 'transfer' | 'delete' = 'keep') =>
+    apiFetch<{ ok: boolean; file_action?: string; affected_files?: number; pending_count?: number }>(
+      `/api/admin/users/${encodeURIComponent(username)}?file_action=${encodeURIComponent(fileAction)}`,
+      { method: 'DELETE' }
+    ),
 
   getInvites: () => apiFetch<{ invites: InviteCode[] }>('/api/admin/invites'),
   createInvite: (payload: { note: string; code: string; max_uses: number; expire_hours: number }) =>
@@ -260,7 +333,10 @@ export const api = {
     apiFetch<{ result: IntegrityStatus['last_scrub']; corrupted_count: number }>('/api/admin/integrity/scrub', {
       method: 'POST',
     }),
-  getAuditLogs: (limit = 100) => apiFetch<{ entries: AuditEntry[] }>(`/api/admin/audit?limit=${limit}`),
+  getAuditLogs: (limit = 100, actor = '') =>
+    apiFetch<{ entries: AuditEntry[] }>(
+      `/api/admin/audit?limit=${limit}${actor.trim() ? `&actor=${encodeURIComponent(actor.trim())}` : ''}`
+    ),
   getSystemLogs: (params?: { limit?: number; level?: string; q?: string }) => {
     const qs = new URLSearchParams()
     if (params?.limit) qs.set('limit', String(params.limit))

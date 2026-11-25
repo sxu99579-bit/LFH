@@ -32,23 +32,53 @@ const (
 	StatusActive  = "active"
 	StatusPending = "pending"
 	StatusBanned  = "banned"
+
+	RoleAdmin    = "admin"
+	RoleUser     = "user"
+	RoleReadonly = "readonly"
 )
 
 type User struct {
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"password_hash"`
-	Salt         string    `json:"salt"`
-	APIToken     string    `json:"api_token,omitempty"`
-	Role         string    `json:"role"`   // "admin" or "user"
-	Status       string    `json:"status"` // "active", "pending", "banned"
-	CreatedAt    time.Time `json:"created_at"`
+	Username           string     `json:"username"`
+	PasswordHash       string     `json:"password_hash"`
+	Salt               string     `json:"salt"`
+	APIToken           string     `json:"api_token,omitempty"`
+	Role               string     `json:"role"`   // "admin", "user", "readonly"
+	Status             string     `json:"status"` // "active", "pending", "banned"
+	DisplayName        string     `json:"display_name,omitempty"`
+	Note               string     `json:"note,omitempty"`
+	QuotaBytes         int64      `json:"quota_bytes,omitempty"`
+	AllowedFolders     []string   `json:"allowed_folders,omitempty"`
+	CanUpload          *bool      `json:"can_upload,omitempty"`
+	CanManageFolders   *bool      `json:"can_manage_folders,omitempty"`
+	CanUseAgents       *bool      `json:"can_use_agents,omitempty"`
+	MustChangePassword bool       `json:"must_change_password,omitempty"`
+	SessionVersion     int        `json:"session_version,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	LastLoginAt        *time.Time `json:"last_login_at,omitempty"`
+	LastLoginIP        string     `json:"last_login_ip,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 }
 
 type PublicUser struct {
-	Username  string    `json:"username"`
-	Role      string    `json:"role"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	Username           string     `json:"username"`
+	Role               string     `json:"role"`
+	Status             string     `json:"status"`
+	DisplayName        string     `json:"display_name,omitempty"`
+	Note               string     `json:"note,omitempty"`
+	QuotaBytes         int64      `json:"quota_bytes,omitempty"`
+	AllowedFolders     []string   `json:"allowed_folders,omitempty"`
+	CanUpload          bool       `json:"can_upload"`
+	CanManageFolders   bool       `json:"can_manage_folders"`
+	CanUseAgents       bool       `json:"can_use_agents"`
+	MustChangePassword bool       `json:"must_change_password,omitempty"`
+	SessionVersion     int        `json:"session_version,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	Expired            bool       `json:"expired,omitempty"`
+	HasAPIToken        bool       `json:"has_api_token,omitempty"`
+	LastLoginAt        *time.Time `json:"last_login_at,omitempty"`
+	LastLoginIP        string     `json:"last_login_ip,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 }
 
 type AuthSettings struct {
@@ -287,8 +317,8 @@ func (m *Manager) ImportSnapshot(raw []byte) error {
 		}
 		u.Username = username
 		u.Role = strings.ToLower(strings.TrimSpace(u.Role))
-		if u.Role != "admin" {
-			u.Role = "user"
+		if u.Role != RoleAdmin && u.Role != RoleReadonly {
+			u.Role = RoleUser
 		}
 		u.Status = strings.ToLower(strings.TrimSpace(u.Status))
 		if u.Status == "" {
@@ -460,17 +490,81 @@ func (m *Manager) createUserLocked(username, password, role, status string) erro
 	return nil
 }
 
+func isUserExpiredAt(u User, now time.Time) bool {
+	return u.ExpiresAt != nil && !now.Before(*u.ExpiresAt)
+}
+
+func resolveCapabilityFlag(role string, ptr *bool) bool {
+	if role == RoleAdmin {
+		return true
+	}
+	if role == RoleReadonly {
+		return false
+	}
+	if ptr == nil {
+		return true
+	}
+	return *ptr
+}
+
 func toPublicUser(u User) PublicUser {
 	st := u.Status
 	if st == "" {
 		st = StatusActive
 	}
-	return PublicUser{
-		Username:  u.Username,
-		Role:      u.Role,
-		Status:    st,
-		CreatedAt: u.CreatedAt,
+	role := strings.ToLower(strings.TrimSpace(u.Role))
+	if role != RoleAdmin && role != RoleReadonly {
+		role = RoleUser
 	}
+	now := time.Now()
+	return PublicUser{
+		Username:           u.Username,
+		Role:               role,
+		Status:             st,
+		DisplayName:        u.DisplayName,
+		Note:               u.Note,
+		QuotaBytes:         u.QuotaBytes,
+		AllowedFolders:     cloneStrings(u.AllowedFolders),
+		CanUpload:          resolveCapabilityFlag(role, u.CanUpload),
+		CanManageFolders:   resolveCapabilityFlag(role, u.CanManageFolders),
+		CanUseAgents:       resolveCapabilityFlag(role, u.CanUseAgents),
+		MustChangePassword: u.MustChangePassword,
+		SessionVersion:     u.SessionVersion,
+		ExpiresAt:          cloneTimePtr(u.ExpiresAt),
+		Expired:            isUserExpiredAt(u, now),
+		HasAPIToken:        u.APIToken != "",
+		LastLoginAt:        cloneTimePtr(u.LastLoginAt),
+		LastLoginIP:        u.LastLoginIP,
+		CreatedAt:          u.CreatedAt,
+	}
+}
+
+// EffectiveCanUpload reports whether this user is permitted to upload or modify files.
+func (u PublicUser) EffectiveCanUpload() bool {
+	return u.Role == RoleAdmin || (u.Role != RoleReadonly && u.CanUpload)
+}
+
+// EffectiveCanManageFolders reports whether this user may create, rename, move, or delete folders.
+func (u PublicUser) EffectiveCanManageFolders() bool {
+	return u.Role == RoleAdmin || (u.Role != RoleReadonly && u.CanManageFolders)
+}
+
+// EffectiveCanUseAgents reports whether this user may create or authenticate AI Agent keys.
+func (u PublicUser) EffectiveCanUseAgents() bool {
+	return u.Role == RoleAdmin || (u.Role != RoleReadonly && u.CanUseAgents)
+}
+
+// CanAccessFolder enforces per-user folder allowlists while keeping admins and unrestricted members open.
+func (u PublicUser) CanAccessFolder(folderPath string) bool {
+	if u.Role == RoleAdmin || len(u.AllowedFolders) == 0 {
+		return true
+	}
+	for _, prefix := range u.AllowedFolders {
+		if FolderMatchesPrefix(folderPath, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) AuthenticateWithReason(username, password string) (PublicUser, int, error) {
@@ -492,6 +586,9 @@ func (m *Manager) AuthenticateWithReason(username, password string) (PublicUser,
 	}
 	if st == StatusBanned {
 		return PublicUser{}, http.StatusForbidden, errors.New("该账号已被管理员封禁，无法登录")
+	}
+	if isUserExpiredAt(u, time.Now()) {
+		return PublicUser{}, http.StatusForbidden, errors.New("该账号已超过有效期，请联系管理员续期")
 	}
 	return toPublicUser(u), http.StatusOK, nil
 }
@@ -700,6 +797,8 @@ func (m *Manager) SetUserBanned(actorUsername, targetUsername string, banned boo
 	}
 	if banned {
 		u.Status = StatusBanned
+		u.SessionVersion++
+		u.APIToken = ""
 	} else {
 		u.Status = StatusActive
 	}
@@ -741,12 +840,12 @@ func (m *Manager) DeleteUser(actorUsername, targetUsername string) error {
 	return nil
 }
 
-// SetUserRole promotes an active user to admin or revokes admin privileges back to regular user.
+// SetUserRole updates an existing user's role across admin, user, and readonly while protecting the last admin.
 func (m *Manager) SetUserRole(actorUsername, targetUsername, role string) (PublicUser, error) {
 	actor := strings.TrimSpace(actorUsername)
 	target := strings.TrimSpace(targetUsername)
 	nextRole := strings.ToLower(strings.TrimSpace(role))
-	if nextRole != "admin" && nextRole != "user" {
+	if nextRole != RoleAdmin && nextRole != RoleUser && nextRole != RoleReadonly {
 		return PublicUser{}, errors.New("无效的角色类型")
 	}
 	if target == "" {
@@ -763,13 +862,13 @@ func (m *Manager) SetUserRole(actorUsername, targetUsername, role string) (Publi
 	if !ok {
 		return PublicUser{}, errors.New("用户不存在")
 	}
-	if nextRole == "admin" && u.Status != "" && u.Status != StatusActive {
+	if nextRole == RoleAdmin && u.Status != "" && u.Status != StatusActive {
 		return PublicUser{}, errors.New("仅可为正常状态的账号授予管理员权限")
 	}
-	if u.Role == "admin" && nextRole != "admin" {
+	if u.Role == RoleAdmin && nextRole != RoleAdmin {
 		activeAdmins := 0
 		for _, item := range m.users {
-			if item.Role == "admin" && (item.Status == "" || item.Status == StatusActive) {
+			if item.Role == RoleAdmin && (item.Status == "" || item.Status == StatusActive) {
 				activeAdmins++
 			}
 		}
@@ -779,6 +878,16 @@ func (m *Manager) SetUserRole(actorUsername, targetUsername, role string) (Publi
 	}
 
 	u.Role = nextRole
+	if nextRole == RoleReadonly {
+		f := false
+		u.CanUpload = &f
+		u.CanManageFolders = &f
+		u.CanUseAgents = &f
+	} else if nextRole == RoleAdmin || nextRole == RoleUser {
+		u.CanUpload = nil
+		u.CanManageFolders = nil
+		u.CanUseAgents = nil
+	}
 	m.users[target] = u
 	if err := m.saveLocked(); err != nil {
 		return PublicUser{}, err
@@ -786,13 +895,14 @@ func (m *Manager) SetUserRole(actorUsername, targetUsername, role string) (Publi
 	return toPublicUser(u), nil
 }
 
-// ListActiveUsers returns all active accounts sorted by username for file access selection.
+// ListActiveUsers returns all active, non-expired accounts sorted by username for file access selection.
 func (m *Manager) ListActiveUsers() []PublicUser {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	now := time.Now()
 	out := make([]PublicUser, 0, len(m.users))
 	for _, u := range m.users {
-		if u.Status != "" && u.Status != StatusActive {
+		if (u.Status != "" && u.Status != StatusActive) || isUserExpiredAt(u, now) {
 			continue
 		}
 		out = append(out, toPublicUser(u))
@@ -925,6 +1035,8 @@ func (m *Manager) ChangePassword(username, oldPwd, newPwd string) error {
 	}
 	u.Salt = salt
 	u.PasswordHash = hashPassword(newPwd, salt)
+	u.MustChangePassword = false
+	u.SessionVersion++
 	m.users[username] = u
 	return m.saveLocked()
 }
@@ -933,10 +1045,10 @@ func userSortRank(u PublicUser) int {
 	if u.Status == StatusPending {
 		return 0
 	}
-	if u.Role == "admin" {
+	if u.Role == RoleAdmin {
 		return 1
 	}
-	if u.Status == StatusActive {
+	if u.Status == StatusActive && !u.Expired {
 		return 2
 	}
 	return 3
@@ -965,6 +1077,7 @@ func (m *Manager) ListUsers() []PublicUser {
 type sessionPayload struct {
 	Username string `json:"u"`
 	Role     string `json:"r"`
+	Ver      int    `json:"v,omitempty"`
 	Exp      int64  `json:"e"`
 }
 
@@ -972,6 +1085,7 @@ func (m *Manager) IssueCookie(w http.ResponseWriter, u PublicUser) error {
 	payload := sessionPayload{
 		Username: u.Username,
 		Role:     u.Role,
+		Ver:      u.SessionVersion,
 		Exp:      time.Now().Add(7 * 24 * time.Hour).Unix(),
 	}
 	raw, err := json.Marshal(payload)
@@ -1074,6 +1188,7 @@ func (m *Manager) AuthenticateToken(token string) (PublicUser, bool) {
 	if clean == "" {
 		return PublicUser{}, false
 	}
+	now := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, u := range m.users {
@@ -1081,7 +1196,7 @@ func (m *Manager) AuthenticateToken(token string) (PublicUser, bool) {
 			continue
 		}
 		if len(u.APIToken) == len(clean) && subtle.ConstantTimeCompare([]byte(u.APIToken), []byte(clean)) == 1 {
-			if u.Status != "" && u.Status != StatusActive {
+			if (u.Status != "" && u.Status != StatusActive) || isUserExpiredAt(u, now) {
 				return PublicUser{}, false
 			}
 			return toPublicUser(u), true
@@ -1098,11 +1213,12 @@ func (m *Manager) CurrentUser(r *http.Request) (PublicUser, bool) {
 			if hmac.Equal([]byte(parts[1]), []byte(expectedSig)) {
 				if raw, decErr := base64.RawURLEncoding.DecodeString(parts[0]); decErr == nil {
 					var payload sessionPayload
-					if err := json.Unmarshal(raw, &payload); err == nil && time.Now().Unix() <= payload.Exp {
+					now := time.Now()
+					if err := json.Unmarshal(raw, &payload); err == nil && now.Unix() <= payload.Exp {
 						m.mu.RLock()
 						u, ok := m.users[payload.Username]
 						m.mu.RUnlock()
-						if ok && (u.Status == "" || u.Status == StatusActive) {
+						if ok && (u.Status == "" || u.Status == StatusActive) && !isUserExpiredAt(u, now) && payload.Ver == u.SessionVersion {
 							return toPublicUser(u), true
 						}
 					}

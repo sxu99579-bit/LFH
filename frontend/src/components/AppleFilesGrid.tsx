@@ -47,6 +47,7 @@ interface AppleFilesGridProps {
   user: User
   capabilities: ClusterCapabilityView[]
   writableMountIds?: Set<string>
+  canManageFolders?: boolean
   isMobile: boolean
   groupByFolder: boolean
   iconSize: AppleIconSize
@@ -122,6 +123,7 @@ export function AppleFilesGrid({
   user,
   capabilities,
   writableMountIds,
+  canManageFolders = true,
   isMobile,
   groupByFolder,
   iconSize,
@@ -443,35 +445,39 @@ export function AppleFilesGrid({
             <span className="text-[11px] text-muted-foreground tabular-nums mr-1">
               {childFolders.length + visibleFiles.length} 项
             </span>
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              onClick={() => onCreateFolder(currentFolder)}
-              title="在当前目录下新建子文件夹"
-            >
-              <FolderPlus className="h-3 w-3 text-[#4aa1ec]" />
-              <span>新建子目录</span>
-            </Button>
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost"
-              onClick={() => onRenameFolder(currentFolder)}
-              title="重命名或移动当前文件夹"
-            >
-              <Pencil className="h-3 w-3" />
-            </Button>
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              onClick={() => onDeleteFolder(currentFolder)}
-              title="删除当前文件夹"
-            >
-              <Trash2 className="h-3 w-3" />
-            </Button>
+            {canManageFolders && (
+              <>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => onCreateFolder(currentFolder)}
+                  title="在当前目录下新建子文件夹"
+                >
+                  <FolderPlus className="h-3 w-3 text-[#4aa1ec]" />
+                  <span>新建子目录</span>
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => onRenameFolder(currentFolder)}
+                  title="重命名或移动当前文件夹"
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => onDeleteFolder(currentFolder)}
+                  title="删除当前文件夹"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -839,45 +845,49 @@ export function AppleFilesGrid({
             <span>打开文件夹</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              const target = folderMenu.folder.fullPath
-              setFolderMenu(null)
-              onCreateFolder(target)
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
-          >
-            <FolderPlus className="h-3.5 w-3.5" />
-            <span>新建子文件夹</span>
-          </button>
+          {canManageFolders && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = folderMenu.folder.fullPath
+                  setFolderMenu(null)
+                  onCreateFolder(target)
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
+              >
+                <FolderPlus className="h-3.5 w-3.5" />
+                <span>新建子文件夹</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              const target = folderMenu.folder.fullPath
-              setFolderMenu(null)
-              onRenameFolder(target)
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-            <span>重命名 / 移动目录</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = folderMenu.folder.fullPath
+                  setFolderMenu(null)
+                  onRenameFolder(target)
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                <span>重命名 / 移动目录</span>
+              </button>
 
-          <div className="my-1 border-t border-border/60" />
-          <button
-            type="button"
-            onClick={() => {
-              const target = folderMenu.folder.fullPath
-              setFolderMenu(null)
-              onDeleteFolder(target)
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-destructive hover:bg-destructive hover:text-destructive-foreground cursor-pointer"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>删除文件夹...</span>
-          </button>
+              <div className="my-1 border-t border-border/60" />
+              <button
+                type="button"
+                onClick={() => {
+                  const target = folderMenu.folder.fullPath
+                  setFolderMenu(null)
+                  onDeleteFolder(target)
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-destructive hover:bg-destructive hover:text-destructive-foreground cursor-pointer"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>删除文件夹...</span>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

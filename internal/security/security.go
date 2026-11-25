@@ -247,3 +247,29 @@ func (al *AuditLogger) List(limit int) []AuditEntry {
 	copy(out, al.entries[:n])
 	return out
 }
+
+// RecentByActor returns up to limit newest audit entries where actor or target matches username.
+func (al *AuditLogger) RecentByActor(actor string, limit int) []AuditEntry {
+	if al == nil {
+		return nil
+	}
+	clean := strings.TrimSpace(actor)
+	if clean == "" {
+		return al.List(limit)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	out := make([]AuditEntry, 0, min(limit, len(al.entries)))
+	for _, e := range al.entries {
+		if strings.EqualFold(e.Actor, clean) || strings.EqualFold(e.Target, clean) {
+			out = append(out, e)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}

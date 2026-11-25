@@ -497,6 +497,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/cluster/files/batch-commit", s.requireClusterAuth(s.handleClusterBatchCommit))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/access", s.requireClusterAuth(s.handleClusterUpdateAccess))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/folder", s.requireClusterAuth(s.handleClusterUpdateFolder))
+	mux.HandleFunc("POST /internal/cluster/users/reassign-files", s.requireClusterAuth(s.handleClusterReassignUserFiles))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/edit", s.requireClusterAuth(s.handleClusterEditFile))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/patch", s.requireClusterAuth(s.handleClusterPatchFile))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/versions", s.requireClusterAuth(s.handleClusterNewVersion))
@@ -600,6 +601,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/settings", s.requireAdmin(s.handleGetAdminSettings))
 	mux.HandleFunc("POST /api/admin/settings", s.requireAdmin(s.handleUpdateAdminSettings))
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.handleListUsers))
+	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.handleAdminCreateUser))
+	mux.HandleFunc("POST /api/admin/users/batch", s.requireAdmin(s.handleAdminBatchUsers))
+	mux.HandleFunc("GET /api/admin/users/{username}/detail", s.requireAdmin(s.handleAdminUserDetail))
+	mux.HandleFunc("PATCH /api/admin/users/{username}", s.requireAdmin(s.handleAdminUpdateUser))
+	mux.HandleFunc("POST /api/admin/users/{username}/reset-password", s.requireAdmin(s.handleAdminResetUserPassword))
+	mux.HandleFunc("POST /api/admin/users/{username}/force-logout", s.requireAdmin(s.handleAdminForceLogoutUser))
+	mux.HandleFunc("POST /api/admin/users/{username}/agents/freeze", s.requireAdmin(s.handleAdminFreezeUserAgents))
 	mux.HandleFunc("POST /api/admin/users/{username}/approve", s.requireAdmin(s.handleApproveUser))
 	mux.HandleFunc("POST /api/admin/users/{username}/role", s.requireAdmin(s.handleSetUserRole))
 	mux.HandleFunc("POST /api/admin/users/{username}/ban", s.requireAdmin(s.handleBanUser))
@@ -1924,6 +1932,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
+	s.auth.RecordLogin(u.Username, ip)
+	if fresh, ok := s.auth.GetUser(u.Username); ok {
+		u = fresh
+	}
 	if err := s.auth.IssueCookie(w, u); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "签发会话失败"})
 		return
@@ -2215,7 +2227,16 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	updated := u
+	if fresh, ok := s.auth.GetUser(u.Username); ok {
+		updated = fresh
+		_ = s.auth.IssueCookie(w, updated)
+	}
+	s.logAudit(r, u.Username, "password_change", u.Username, "ok", "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"user": updated,
+	})
 }
 
 func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
@@ -3336,7 +3357,13 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request, u auth
 			limit = n
 		}
 	}
-	entries := s.audit.List(limit)
+	actor := strings.TrimSpace(r.URL.Query().Get("actor"))
+	var entries []security.AuditEntry
+	if actor != "" {
+		entries = s.audit.RecentByActor(actor, limit)
+	} else {
+		entries = s.audit.List(limit)
+	}
 	if entries == nil {
 		entries = []security.AuditEntry{}
 	}
@@ -3530,8 +3557,10 @@ func (s *Server) handleUpdateAdminSettings(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
+	enriched, summary := s.enrichUsers(s.auth.ListUsers())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"users":         s.auth.ListUsers(),
+		"users":         enriched,
+		"summary":       summary,
 		"pending_count": s.auth.PendingCount(),
 	})
 }
@@ -3543,6 +3572,7 @@ func (s *Server) handleApproveUser(w http.ResponseWriter, r *http.Request, u aut
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "user_approve", target, "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":          approved,
 		"pending_count": s.auth.PendingCount(),
@@ -3563,6 +3593,10 @@ func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request, u aut
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if !updated.EffectiveCanUseAgents() {
+		s.disconnectAllAgentSessionsForUser(target)
+	}
+	s.logAudit(r, u.Username, "user_role_change", target, "ok", updated.Role)
 	s.events.Publish(FileChangeEvent{
 		Kind:     "role_change",
 		Uploader: target,
@@ -3580,6 +3614,8 @@ func (s *Server) handleBanUser(w http.ResponseWriter, r *http.Request, u auth.Pu
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.disconnectAllAgentSessionsForUser(target)
+	s.logAudit(r, u.Username, "user_ban", target, "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{"user": updated})
 }
 
@@ -3590,18 +3626,46 @@ func (s *Server) handleUnbanUser(w http.ResponseWriter, r *http.Request, u auth.
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.logAudit(r, u.Username, "user_unban", target, "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{"user": updated})
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request, u auth.PublicUser) {
 	target := r.PathValue("username")
+	fileAction := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("file_action")))
+	if fileAction == "" {
+		fileAction = "keep"
+	}
+	if fileAction != "keep" && fileAction != "transfer" && fileAction != "delete" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的文件处理策略"})
+		return
+	}
+	keyIDs := make([]string, 0)
+	for _, ak := range s.auth.ListAgentKeys(target) {
+		keyIDs = append(keyIDs, ak.ID)
+	}
 	if err := s.auth.DeleteUser(u.Username, target); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if mcpSrv := s.getMCPServer(); mcpSrv != nil {
+		for _, id := range keyIDs {
+			mcpSrv.DisconnectByAgentKey(id)
+		}
+	}
+	affectedFiles := 0
+	switch fileAction {
+	case "transfer":
+		affectedFiles, _ = s.cluster.ReassignUserFiles(target, u.Username)
+	case "delete":
+		affectedFiles = s.deleteAllUserOwnedFiles(target)
+	}
+	s.logAudit(r, u.Username, "user_delete", target, "ok", fmt.Sprintf("file_action=%s affected_files=%d", fileAction, affectedFiles))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"pending_count": s.auth.PendingCount(),
+		"ok":             true,
+		"file_action":    fileAction,
+		"affected_files": affectedFiles,
+		"pending_count":  s.auth.PendingCount(),
 	})
 }
 
@@ -3696,7 +3760,7 @@ func (s *Server) findAccessibleFile(id string, u auth.PublicUser) (rec storage.F
 		rLocal.NodeOS = runtime.GOOS
 		rLocal.NodeOnline = true
 		rLocal.StorageDir = s.store.RecordDir(rLocal)
-		if !storage.CanUserAccess(rLocal, u.Username, u.Role) {
+		if !storage.CanUserAccess(rLocal, u.Username, u.Role) || !u.CanAccessFolder(rLocal.FolderPath) {
 			return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在或无权访问"
 		}
 		return rLocal, fp, cluster.NodeStatus{}, true, http.StatusOK, ""
@@ -3705,7 +3769,7 @@ func (s *Server) findAccessibleFile(id string, u auth.PublicUser) (rec storage.F
 	if !ok {
 		return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在"
 	}
-	if !storage.CanUserAccess(rPeer, u.Username, u.Role) {
+	if !storage.CanUserAccess(rPeer, u.Username, u.Role) || !u.CanAccessFolder(rPeer.FolderPath) {
 		return storage.FileRecord{}, "", cluster.NodeStatus{}, false, http.StatusNotFound, "文件不存在或无权访问"
 	}
 	if !p.Online {
@@ -3716,14 +3780,15 @@ func (s *Server) findAccessibleFile(id string, u auth.PublicUser) (rec storage.F
 
 func (s *Server) filterAccessibleForPrincipal(records []storage.FileRecord, p auth.Principal) []storage.FileRecord {
 	accessible := storage.FilterAccessibleRecords(records, p.User.Username, p.User.Role)
-	if !p.IsAgent {
-		return accessible
-	}
 	out := make([]storage.FileRecord, 0, len(accessible))
 	for _, rec := range accessible {
-		if p.CanReadFolder(rec.FolderPath) {
-			out = append(out, rec)
+		if !p.User.CanAccessFolder(rec.FolderPath) {
+			continue
 		}
+		if p.IsAgent && !p.CanReadFolder(rec.FolderPath) {
+			continue
+		}
+		out = append(out, rec)
 	}
 	return out
 }
@@ -3813,6 +3878,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, p auth.Pri
 	fallbackFolder := storage.SanitizeFolderPath(r.FormValue("folder_path"))
 
 	folders := make([]string, len(headers))
+	var totalUploadBytes int64
 	for i, fh := range headers {
 		if err := s.auth.CheckUploadAllowed(fh.Filename); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -3832,7 +3898,18 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, p auth.Pri
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入目录: " + folderPath})
 			return
 		}
+		if st, msg := s.checkPrincipalCanUpload(p, folderPath, 0); st != http.StatusOK {
+			writeJSON(w, st, map[string]string{"error": msg})
+			return
+		}
+		if fh.Size > 0 {
+			totalUploadBytes += fh.Size
+		}
 		folders[i] = folderPath
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, fallbackFolder, totalUploadBytes); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
+		return
 	}
 
 	uploaded := make([]storage.FileRecord, 0, len(headers))
@@ -4124,6 +4201,14 @@ func (s *Server) handleShortcutUpload(w http.ResponseWriter, r *http.Request, p 
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
 		return
 	}
+	var preBytes int64
+	if r.ContentLength > 0 {
+		preBytes = r.ContentLength
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, folderPath, preBytes); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
+		return
+	}
 	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(nil)
 	if resolveErr != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": resolveErr.Error()})
@@ -4163,6 +4248,10 @@ func (s *Server) handleShortcutUpload(w http.ResponseWriter, r *http.Request, p 
 	}
 	if sz <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未收到任何文件内容"})
+		return
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, folderPath, sz); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
 		return
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
@@ -4241,6 +4330,10 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request, p auth
 	folderPath := storage.SanitizeFolderPath(req.FolderPath)
 	if p.IsAgent && !p.CanWriteFolder(folderPath) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
+		return
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, folderPath, req.FileSize); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
 		return
 	}
 	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(req.AllowedUsers)
@@ -4465,6 +4558,10 @@ func (s *Server) handleCreateTxtFile(w http.ResponseWriter, r *http.Request, p a
 	folderPath := storage.SanitizeFolderPath(req.FolderPath)
 	if p.IsAgent && !p.CanWriteFolder(folderPath) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权写入该目录"})
+		return
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, folderPath, int64(len(req.Content))); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
 		return
 	}
 	resolvedAllowed, resolveErr := p.ResolveAllowedUsers(req.AllowedUsers)
@@ -4808,6 +4905,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, p auth.Pri
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅上传者或管理员可删除该文件"})
 		return
 	}
+	if !u.EffectiveCanUpload() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号为只读权限或已被禁止写入删除操作"})
+		return
+	}
 	if p.IsAgent && !p.CanDeleteFolder(rec.FolderPath) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权删除该目录文件"})
 		return
@@ -4876,6 +4977,10 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, p auth.P
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Agent 密钥无权修改该目录文件"})
 		return
 	}
+	if !u.EffectiveCanUpload() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号为只读权限或已被禁止修改文件"})
+		return
+	}
 	if !preview.IsTextPreviewExt(rec.Ext) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "该文件类型不支持在线文本编辑"})
 		return
@@ -4888,6 +4993,10 @@ func (s *Server) handleEditFile(w http.ResponseWriter, r *http.Request, p auth.P
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "解析编辑内容失败"})
+		return
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, rec.FolderPath, int64(len(req.Content))); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
 		return
 	}
 	expectedVer, verErr := resolveExpectedVersion(req.ExpectedVersion, r.URL.Query().Get("expected_version"), r)
@@ -5007,6 +5116,10 @@ func (s *Server) handleUploadFileVersion(w http.ResponseWriter, r *http.Request,
 	}
 	if err := s.auth.CheckUploadAllowed(fh.Filename); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if st, msg := s.checkPrincipalCanUpload(p, rec.FolderPath, fh.Size); st != http.StatusOK {
+		writeJSON(w, st, map[string]string{"error": msg})
 		return
 	}
 	dev := extractDeviceInfoForPrincipal(r, p)

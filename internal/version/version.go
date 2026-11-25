@@ -2,6 +2,6 @@ package version
 
 var (
 	AppName     = "QuailNest"
-	Version     = "V0.11.25.0"
+	Version     = "V1.11.25.1"
 	DefaultRepo = "sxu99579-bit/QuailNest"
 )
