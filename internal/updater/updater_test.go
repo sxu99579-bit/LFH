@@ -374,3 +374,44 @@ func TestListReleasesAndSwitchRollbackVersion(t *testing.T) {
 		t.Fatalf("expected binary rolled back to oldBytes, got %q", string(got))
 	}
 }
+
+func TestQuailNestAndLegacyLFHCompatibility(t *testing.T) {
+	dir := t.TempDir()
+	cfgRaw := `{"repo":"https://github.com/sxu99579-bit/LFH","proxy_url":"","auto_check":true}`
+	if err := os.WriteFile(filepath.Join(dir, "updater.json"), []byte(cfgRaw), 0600); err != nil {
+		t.Fatalf("write legacy updater.json: %v", err)
+	}
+	mgr, err := NewManager(dir, "")
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if got := mgr.Status().Repo; got != "sxu99579-bit/QuailNest" {
+		t.Fatalf("expected legacy repo auto-migrated to sxu99579-bit/QuailNest, got %q", got)
+	}
+
+	assets := []ReleaseAsset{
+		{Name: "checksums.txt", BrowserDownloadURL: "https://example.com/checksums.txt"},
+		{Name: "quailnest-linux-amd64", Size: 100, BrowserDownloadURL: "https://example.com/quailnest-linux-amd64"},
+		{Name: "quailnest-windows-amd64.exe", Size: 200, BrowserDownloadURL: "https://example.com/quailnest-windows-amd64.exe"},
+		{Name: "quailnest-darwin-arm64", Size: 300, BrowserDownloadURL: "https://example.com/quailnest-darwin-arm64"},
+	}
+	winAsset, cs := SelectAsset(assets, "windows", "amd64")
+	if winAsset.Name != "quailnest-windows-amd64.exe" || cs == "" {
+		t.Fatalf("expected quailnest windows asset + checksums, got %+v cs=%q", winAsset, cs)
+	}
+	linAsset, _ := SelectAsset(assets, "linux", "amd64")
+	if linAsset.Name != "quailnest-linux-amd64" {
+		t.Fatalf("expected quailnest linux asset, got %+v", linAsset)
+	}
+	macAsset, _ := SelectAsset(assets, "darwin", "arm64")
+	if macAsset.Name != "quailnest-darwin-arm64" {
+		t.Fatalf("expected quailnest darwin asset, got %+v", macAsset)
+	}
+
+	if !isMatchingBinaryEntryForOS("quailnest-windows-amd64.exe", "windows") || !isMatchingBinaryEntryForOS("lfh-windows-amd64.exe", "windows") {
+		t.Fatal("expected both quailnest and legacy lfh windows binaries to match")
+	}
+	if !isMatchingBinaryEntryForOS("quailnest-linux-amd64", "linux") || !isMatchingBinaryEntryForOS("lfh-linux-amd64", "linux") {
+		t.Fatal("expected both quailnest and legacy lfh linux binaries to match")
+	}
+}

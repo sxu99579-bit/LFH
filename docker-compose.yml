@@ -1,10 +1,10 @@
 services:
-  lfh:
+  quailnest:
     build:
       context: .
       dockerfile: Dockerfile
-    image: lfh:V0.11.25.0
-    container_name: lfh
+    image: quailnest:V0.11.25.0
+    container_name: quailnest
     restart: unless-stopped
     # Note:
     # 1. Replace YOUR_LAN_IP with your Docker host's LAN IP so the UI displays
@@ -15,7 +15,7 @@ services:
       - "8080:8080"
       - "53319:53319/udp"
     volumes:
-      - ./lfh-data:/data
+      - ./quailnest-data:/data
     command: ["-data", "/data", "-port", "8080"]
     # Example with custom host LAN IP & quota:
     # command: ["-data", "/data", "-port", "8080", "-expose-ip", "192.168.1.100", "-quota", "20GB"]

@@ -1326,7 +1326,7 @@ export function SettingsPage({
                     <Server className="h-4 w-4 text-primary" />
                     <span>局域网发现与主动纳管</span>
                   </CardTitle>
-                  <CardDescription>自动扫描同网段 LFH 实例一键纳管，或接入外部主节点</CardDescription>
+                  <CardDescription>自动扫描同网段 QuailNest 实例一键纳管，或接入外部主节点</CardDescription>
                 </div>
                 <Button size="xs" variant="outline" onClick={handleScanLan} disabled={scanningLan}>
                   <Search className={cn('h-3 w-3', scanningLan && 'animate-spin')} />
@@ -1493,7 +1493,7 @@ export function SettingsPage({
                           onChange={(e) =>
                             setStorageDrafts((prev) => ({ ...prev, [n.node_id]: e.target.value }))
                           }
-                          placeholder="如：E:\LFH-Storage"
+                          placeholder="如：E:\QuailNest-Storage"
                         />
                         <Button
                           size="sm"
@@ -1884,7 +1884,7 @@ export function SettingsPage({
                   const url = URL.createObjectURL(blob)
                   const a = document.createElement('a')
                   a.href = url
-                  a.download = logsSubTab === 'runtime' ? 'lfh-runtime.log' : 'lfh-audit.json'
+                  a.download = logsSubTab === 'runtime' ? 'quailnest-runtime.log' : 'quailnest-audit.json'
                   document.body.appendChild(a)
                   a.click()
                   a.remove()

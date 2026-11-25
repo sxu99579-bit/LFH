@@ -105,8 +105,8 @@ func (m *Manager) ProbeNodeURL(ctx context.Context, rawURL, source string) (Disc
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&info); err != nil {
 		return DiscoveredNode{}, fmt.Errorf("解析 %s 响应失败: %w", cleanURL, err)
 	}
-	if !strings.EqualFold(info.AppName, "LFH") || len(info.Pool.Nodes) == 0 {
-		return DiscoveredNode{}, errors.New("目标地址不是有效的 LFH 节点服务")
+	if (!strings.EqualFold(info.AppName, "QuailNest") && !strings.EqualFold(info.AppName, "LFH")) || len(info.Pool.Nodes) == 0 {
+		return DiscoveredNode{}, errors.New("目标地址不是有效的 QuailNest 节点服务")
 	}
 
 	selfNode := info.Pool.Nodes[0]

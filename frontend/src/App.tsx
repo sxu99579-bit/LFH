@@ -345,10 +345,10 @@ function WorkspaceApp() {
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-background text-foreground">
         <img
           src={theme === 'dark' ? '/logo-dark.png' : '/logo-light.png'}
-          alt="LFH"
+          alt="QuailNest"
           className="h-14 w-14 object-contain animate-pulse"
         />
-        <div className="text-xs text-muted-foreground">正在连接 LFH 分布式中枢...</div>
+        <div className="text-xs text-muted-foreground">正在连接 QuailNest 鹌鹑窝中枢...</div>
       </div>
     )
   }

@@ -1731,7 +1731,7 @@ func TestPrimarySwitchEvictOnlineNodeAndWorkerLeaveSelf(t *testing.T) {
 	}
 	workerBody, _ := io.ReadAll(workerPageRes.Body)
 	workerPageRes.Body.Close()
-	if workerPageRes.StatusCode != http.StatusOK || !strings.Contains(string(workerBody), "LFH 本机节点控制台") {
+	if workerPageRes.StatusCode != http.StatusOK || !strings.Contains(string(workerBody), "QuailNest 本机节点控制台") {
 		t.Fatalf("expected /worker 200 HTML, got status=%d", workerPageRes.StatusCode)
 	}
 
@@ -3281,7 +3281,7 @@ func TestPersonalTokenAndIOSShortcutUpload(t *testing.T) {
 	clipRes, err := http.Post(
 		ts.URL+"/api/shortcut/upload?folder="+url.QueryEscape("超级剪贴板")+"&token="+url.QueryEscape(tokOut.Token),
 		"text/plain; charset=utf-8",
-		strings.NewReader("https://github.com/sxu99579-bit/LFH"),
+		strings.NewReader("https://github.com/sxu99579-bit/QuailNest"),
 	)
 	if err != nil {
 		t.Fatalf("POST clipboard /api/shortcut/upload: %v", err)

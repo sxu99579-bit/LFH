@@ -151,7 +151,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("%s %s\n", version.AppName, version.Version)
+		fmt.Printf("%s %s (LFH)\n", version.AppName, version.Version)
 		return
 	}
 
@@ -405,8 +405,8 @@ func main() {
 	}()
 
 	st := clusterMgr.SelfStatus()
-	log.Printf("[system] LFH %s started (role=%s node=%s url=%s entry=%s)",
-		version.Version, st.Role, st.NodeName, st.HTTPURL, clusterMgr.EntryURL())
+	log.Printf("[system] %s %s started (role=%s node=%s url=%s entry=%s)",
+		version.AppName, version.Version, st.Role, st.NodeName, st.HTTPURL, clusterMgr.EntryURL())
 	fmt.Printf("%s %s 已启动:\n", version.AppName, version.Version)
 	fmt.Printf("  节点角色: %s (%s)\n", st.Role, st.NodeName)
 	fmt.Printf("  预留空间: %s\n", formatQuotaText(st.QuotaBytes))

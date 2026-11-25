@@ -504,7 +504,7 @@ export function AgentLiveConsole({
           </div>
           {connectTab === 'oauth' && (
             <div className="text-[11px] text-muted-foreground">
-              支持标准 MCP OAuth 2.1 的客户端仅需添加上述 URL（无需 Header 或令牌），连接时会自动唤起浏览器打开 LFH 授权页由你点击同意。
+              支持标准 MCP OAuth 2.1 的客户端仅需添加上述 URL（无需 Header 或令牌），连接时会自动唤起浏览器打开 QuailNest 授权页由你点击同意。
             </div>
           )}
         </CardContent>

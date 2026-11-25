@@ -1,14 +1,14 @@
 name: Bug Report / 问题反馈
-description: 反馈在使用 LFH 过程中遇到的 Bug、报错或界面/组网异常
+description: 反馈在使用 QuailNest 过程中遇到的 Bug、报错或界面/组网异常
 title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: input
     id: version
     attributes:
-      label: LFH 版本号 / Version
+      label: QuailNest 版本号 / Version
       description: 可在「设置 -> 版本升级」或启动日志中查看
-      placeholder: V0.11.22.6
+      placeholder: V0.11.25.0
     validations:
       required: true
   - type: input

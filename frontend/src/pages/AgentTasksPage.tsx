@@ -617,7 +617,7 @@ export function AgentTasksPage({
     if (setupTab === 'sh') {
       return `curl -fsSL "${effectiveBaseUrl}/agent/worker.sh?interval=${interval}${promptPart}" | sh`
     }
-    return `/schedule 请连接 LFH MCP 服务（list_tasks）检查「${effectiveBaseUrl}」上的 AI 任务板：
+    return `/schedule 请连接 QuailNest MCP 服务（list_tasks）检查「${effectiveBaseUrl}」上的 AI 任务板：
 1. 若有指派给我或公开待抢单（claimable_for_me > 0）或 @提及我的任务，立即用 claim_task 接单并按要求执行；
 2. 若任务复杂（allow_split=true），用 split_task 拆分子任务并与其它 Agent 通过 post_task_comment @接力协同；
 3. 完成后提交成果文件并调用 complete_task 自动勾选完成；若无待办则保持静默等待下次巡检。`

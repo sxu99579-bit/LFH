@@ -2,28 +2,28 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./web/logo-dark.png" />
     <source media="(prefers-color-scheme: light)" srcset="./web/logo-light.png" />
-    <img src="./web/logo.png" width="112" alt="LFH Logo" />
+    <img src="./web/logo.png" width="112" alt="QuailNest Logo" />
   </picture>
 </p>
 
-<h1 align="center">LFH — LAN FileHub</h1>
+<h1 align="center">QuailNest — 鹌鹑窝</h1>
 
 <p align="center">
-  轻量、零依赖的分布式局域网文件中心 · 单入口聚合多主机闲置空间 · 实时协作与在线预览
+  轻量、零依赖的分布式局域网私有文件与多 AI 协同中枢 · 单入口聚合多主机闲置空间 · Apple 极简交互与在线预览
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">问题反馈</a> · <code>V0.11.25.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">问题反馈</a> · <code>V0.11.25.0</code>
 </p>
 
 ---
 
-**LFH（LAN FileHub）** 是一个面向个人工作区与小型局域网团队的自托管文件中心。它采用纯 Go 标准库编写，将多台接入同一局域网的 Windows / Linux / macOS 设备自动组网为统一的存储池——外部访问只需记住一个入口地址，文件会自动按节点剩余空间分配并支持跨节点透明预览、下载与在线解压。
+**QuailNest（鹌鹑窝，原 LFH / LAN FileHub）** 是一个面向个人工作区与小型局域网团队的自托管文件与 AI 协同中心。它采用纯 Go 标准库编写，将多台接入同一局域网的 Windows / Linux / macOS 设备自动组网为统一的存储池——外部访问只需记住一个入口地址，文件会自动按节点剩余空间分配并支持跨节点透明预览、下载与在线解压。
 
 单二进制开箱即用，无外部数据库或第三方运行时依赖；支持 Docker 容器部署与本地一键运行。
 
 <p align="center">
-  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="LFH 桌面端与移动端工作台概览" />
+  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="QuailNest 桌面端与移动端工作台概览" />
 </p>
 
 ## 核心特性
@@ -43,7 +43,7 @@
   - 上传写入期流式计算并持久化整文件 SHA-256，后台定期与管理员按需执行 **Bit-Rot 静默损坏巡检**，发现异常自动标记并计入存储读错误告警；
   - **安全机制加固**：节点间 HMAC-SHA256 通信增加 `X-LFH-Nonce` 随机防重放保护，登录接口提供基于 IP 滑动窗口的防爆破限流与持久化**安全审计日志**。
 - **本机零拷贝存储与目录虚拟挂载（Zero-Copy & Mounts）**：
-  - 支持主/从节点管理员直接通过本机绝对路径导入文件或文件夹：**同盘分区自动创建操作系统硬链接（`os.Link`）**（0 额外磁盘空间，且原文件重命名/移动/删除后 LFH 仍 100% 完整可读），**跨盘自动转为只读外链引用**（后台自动检测源路径有效性，失效时返回提示而不误删文件）；
+  - 支持主/从节点管理员直接通过本机绝对路径导入文件或文件夹：**同盘分区自动创建操作系统硬链接（`os.Link`）**（0 额外磁盘空间，且原文件重命名/移动/删除后 QuailNest 仍 100% 完整可读），**跨盘自动转为只读外链引用**（后台自动检测源路径有效性，失效时返回提示而不误删文件）；
   - 支持将主机已有海量目录直接**挂载为只读共享库**（如 `D:\电影`、`/mnt/media`），不复制任何实体文件、不占用上传配额、后台每 15 秒增量同步索引，卸载挂载时严格保留原始文件。
 
 - **异构局域网自动组网与网页端可视化探测接入（Entry / Worker）**：
@@ -92,21 +92,21 @@
 
 ### 方式一：Docker 部署（推荐）
 
-仓库根目录已提供多阶段构建的 [`Dockerfile`](./Dockerfile) 与 [`docker-compose.yml`](./docker-compose.yml)，镜像内置 Alpine 运行环境并将数据持久化挂载至 `./lfh-data`：
+仓库根目录已提供多阶段构建的 [`Dockerfile`](./Dockerfile) 与 [`docker-compose.yml`](./docker-compose.yml)，镜像内置 Alpine 运行环境并将数据持久化挂载至 `./quailnest-data`：
 
 ```bash
 # 1. 克隆空白源码仓库
-git clone https://github.com/sxu99579-bit/LFH.git
-cd LFH
+git clone https://github.com/sxu99579-bit/QuailNest.git
+cd QuailNest
 
 # 2. 启动服务（首次启动将自动构建镜像并初始化管理员凭据）
 docker compose up -d
 
 # 3. 查看首启生成的随机管理员账号与密码
-docker compose logs lfh
+docker compose logs quailnest
 ```
 
-首次生成的高随机度管理员凭据同时保存在宿主机 `./lfh-data/initial-admin.txt` 中。
+首次生成的高随机度管理员凭据同时保存在宿主机 `./quailnest-data/initial-admin.txt` 中。
 
 > **局域网提示**：
 > - 若在 Docker Bridge 网络下运行，建议修改 `docker-compose.yml` 的 `command` 增加 `-expose-ip 你的宿主机局域网IP`（例如 `192.168.1.100`），首页展示的访问入口即会自动对应宿主机地址。
@@ -115,15 +115,15 @@ docker compose logs lfh
 也可以直接使用 `docker build` / `docker run` 手动运行：
 
 ```bash
-docker build -t lfh:V0.11.21.7 .
+docker build -t quailnest:V0.11.25.0 .
 
 docker run -d \
-  --name lfh \
+  --name quailnest \
   --restart unless-stopped \
   -p 8080:8080 \
   -p 53319:53319/udp \
-  -v $(pwd)/lfh-data:/data \
-  lfh:V0.11.21.7 -data /data -port 8080 -expose-ip 192.168.1.100
+  -v $(pwd)/quailnest-data:/data \
+  quailnest:V0.11.25.0 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---
@@ -135,15 +135,15 @@ docker run -d \
 #### 1. 从源码构建运行
 
 ```bash
-git clone https://github.com/sxu99579-bit/LFH.git
-cd LFH
+git clone https://github.com/sxu99579-bit/QuailNest.git
+cd QuailNest
 
 # 编译
-go build -trimpath -ldflags="-s -w" -o lfh .      # Linux / macOS
-go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
+go build -trimpath -ldflags="-s -w" -o quailnest .      # Linux / macOS
+go build -trimpath -ldflags="-s -w" -o quailnest.exe .  # Windows
 
 # 启动主入口节点（默认监听 8080 端口，数据存放在 ./data）
-./lfh -data ./data -port 8080
+./quailnest -data ./data -port 8080
 ```
 
 启动后控制台与 `./data/initial-admin.txt` 会输出本次随机生成的管理员用户名和密码，浏览器访问控制台打印的局域网入口地址即可使用。
@@ -154,7 +154,7 @@ go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
 
 ```bash
 # 示例：将第二台机器作为存储节点接入，贡献 50GB 空间
-./lfh -role worker -quota 50GB -secret "主节点设置的集群密钥" -entry "http://192.168.1.100:8080"
+./quailnest -role worker -quota 50GB -secret "主节点设置的集群密钥" -entry "http://192.168.1.100:8080"
 ```
 
 ---
@@ -166,7 +166,7 @@ go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
 | `-port` | `8080` | HTTP 服务监听端口 |
 | `-data` | `./data` | 用户数据、文件索引、缓存与上传目录 |
 | `-role` | `entry` | 节点角色：`entry`（主入口）或 `worker`（扩展存储节点） |
-| `-quota` | 自动 | 预留给 LFH 使用的最大空间配额（支持 `MB` / `GB` / `TB`） |
+| `-quota` | 自动 | 预留给 QuailNest 使用的最大空间配额（支持 `MB` / `GB` / `TB`） |
 | `-storage-dir` | `<data>/uploads` | 自定义当前节点实际保存上传文件的磁盘盘符或目录路径（也可在界面「集群与入口」中由管理员在线切换并迁移） |
 | `-expose-ip` | 自动探测 | 自定义首页展示的对外访问 IP 或主机名 |
 | `-secret` | 随机/配置 | 集群节点互信密钥 |
@@ -174,7 +174,7 @@ go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
 | `-name` | 主机名 | 节点在界面中的展示名称 |
 | `-config` | 空 | 指定初始化读取的 `cluster-config.json` 路径 |
 | `-discovery-port` | `53319` | 局域网 UDP 自动发现端口（设为 `0` 关闭广播发现） |
-| `-repo` | `sxu99579-bit/LFH` | 用于新版本检测的 GitHub 仓库（`owner/repo`） |
+| `-repo` | `sxu99579-bit/QuailNest` | 用于新版本检测的 GitHub 仓库（`owner/repo`） |
 | `-init-user` / `-init-pass` | 随机生成 | 仅在首次初始化空数据目录时指定初始管理员账号密码 |
 | `-version` | `false` | 输出当前版本号并退出 |
 
@@ -214,8 +214,8 @@ go test -count=1 ./...
 
 欢迎任何部署反馈、改进建议或功能点子：
 
-- **自由留言与讨论区**：前往 [GitHub Discussions](https://github.com/sxu99579-bit/LFH/discussions) 发帖交流、晒出你的局域网部署方案或提问答疑。
-- **Bug 反馈与功能建议**：前往 [GitHub Issues](https://github.com/sxu99579-bit/LFH/issues) 选择对应模板提交，附带「设置 -> 系统日志」导出日志能帮我们更快定位问题。
+- **自由留言与讨论区**：前往 [GitHub Discussions](https://github.com/sxu99579-bit/QuailNest/discussions) 发帖交流、晒出你的局域网部署方案或提问答疑。
+- **Bug 反馈与功能建议**：前往 [GitHub Issues](https://github.com/sxu99579-bit/QuailNest/issues) 选择对应模板提交，附带「设置 -> 系统日志」导出日志能帮我们更快定位问题。
 
 ## 开源协议
 

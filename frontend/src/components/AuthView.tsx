@@ -72,16 +72,16 @@ export function AuthView({
           <div className="mb-3 flex h-13 w-13 items-center justify-center">
             <img
               src={theme === 'dark' ? '/logo-icon-dark.png' : '/logo-icon-light.png'}
-              alt="LFH"
+              alt="QuailNest"
               className="h-12 w-12 object-contain"
             />
           </div>
           <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight">LAN File Hub</h1>
+            <h1 className="text-xl font-bold tracking-tight">QuailNest</h1>
             <Badge variant="default" className="font-mono">{ver}</Badge>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            异构局域网分布式文件库 · 零拷贝共享池 · 分布式算力集群
+            鹌鹑窝 · 局域网私有文件库 · 超级剪贴板 · 多 AI 协同中枢
           </p>
         </div>
 

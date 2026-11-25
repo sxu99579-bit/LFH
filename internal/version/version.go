@@ -1,7 +1,7 @@
 package version
 
 var (
-	AppName     = "LFH"
+	AppName     = "QuailNest"
 	Version     = "V0.11.25.0"
-	DefaultRepo = "sxu99579-bit/LFH"
+	DefaultRepo = "sxu99579-bit/QuailNest"
 )

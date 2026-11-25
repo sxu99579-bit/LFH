@@ -620,7 +620,7 @@ func (s *Store) ImportLocalPath(srcPath, folderPath, uploader string, allowedUse
 	}
 	activeDir := s.UploadDir()
 	if isSubOrSamePath(cleanSrc, activeDir) || isSubOrSamePath(cleanSrc, s.defaultUploadDir) {
-		return nil, ImportSummary{}, errors.New("不能零拷贝导入 LFH 自身内部存储目录")
+		return nil, ImportSummary{}, errors.New("不能零拷贝导入 QuailNest 自身内部存储目录")
 	}
 
 	isDir, items, skipped, walkErr := collectLocalFiles(cleanSrc, maxZeroCopyWalkFiles)
@@ -983,7 +983,7 @@ func (s *Store) AddMountWithOptions(dirPath, alias, addedBy string, allowedUsers
 	}
 	activeDir := s.UploadDir()
 	if isSubOrSamePath(cleanDir, activeDir) || isSubOrSamePath(cleanDir, s.defaultUploadDir) {
-		return MountEntry{}, 0, errors.New("不能挂载 LFH 自身内部存储目录")
+		return MountEntry{}, 0, errors.New("不能挂载 QuailNest 自身内部存储目录")
 	}
 
 	cleanAlias := SanitizeFolderPath(alias)

@@ -182,6 +182,9 @@ func (m *Manager) loadConfig() {
 		return
 	}
 	if clean := NormalizeRepo(cfg.Repo); clean != "" {
+		if strings.EqualFold(clean, "sxu99579-bit/LFH") {
+			clean = version.DefaultRepo
+		}
 		m.cfg.Repo = clean
 	}
 	m.cfg.ProxyURL = NormalizeProxyURL(cfg.ProxyURL)
@@ -236,7 +239,7 @@ func (m *Manager) UpdateConfig(repo string, proxyURL string, autoCheck *bool) (S
 	if strings.TrimSpace(repo) != "" {
 		clean := NormalizeRepo(repo)
 		if clean == "" {
-			return Status{}, errors.New("GitHub 仓库格式错误，请使用 owner/repo（如 sxu99579-bit/LFH）")
+			return Status{}, errors.New("GitHub 仓库格式错误，请使用 owner/repo（如 sxu99579-bit/QuailNest）")
 		}
 		m.cfg.Repo = clean
 	}
@@ -440,7 +443,7 @@ func (m *Manager) CheckNow(ctx context.Context) (Status, error) {
 		return m.failCheck("构建请求失败: " + err.Error())
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -511,7 +514,7 @@ func (m *Manager) checkTagsFallback(ctx context.Context, repo, nowStr string) (S
 		return m.failCheck("构建标签请求失败: " + err.Error())
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -598,7 +601,7 @@ func (m *Manager) ListReleases(ctx context.Context) ([]ReleaseSummary, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -639,7 +642,7 @@ func (m *Manager) listTagsFallback(ctx context.Context, base, repo string, clien
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -713,7 +716,7 @@ func (m *Manager) FetchReleaseByTag(ctx context.Context, targetVersion string) (
 			continue
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("User-Agent", "LFH/"+version.Version)
+		req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("连接 GitHub 失败: %w", err)
@@ -902,18 +905,24 @@ func (m *Manager) LocalBinaryForPlatform(targetOS, targetArch string) (string, s
 		}
 	}
 
-	assetName := fmt.Sprintf("lfh-%s-%s", goos, goarch)
+	ext := ""
 	if goos == "windows" {
-		assetName += ".exe"
+		ext = ".exe"
 	}
-	candidates = append(candidates, filepath.Join("dist", assetName))
-	if exeFn != nil {
-		if exePath, err := exeFn(); err == nil && exePath != "" {
-			candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "dist", assetName))
+	assetNames := []string{
+		fmt.Sprintf("quailnest-%s-%s%s", goos, goarch, ext),
+		fmt.Sprintf("lfh-%s-%s%s", goos, goarch, ext),
+	}
+	for _, assetName := range assetNames {
+		candidates = append(candidates, filepath.Join("dist", assetName))
+		if exeFn != nil {
+			if exePath, err := exeFn(); err == nil && exePath != "" {
+				candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "dist", assetName))
+			}
 		}
 	}
 	if goos == "windows" && goarch == "amd64" {
-		candidates = append(candidates, "lfh.exe")
+		candidates = append(candidates, "quailnest.exe", "lfh.exe")
 	}
 
 	for _, p := range candidates {
@@ -1162,7 +1171,7 @@ func (m *Manager) downloadFile(ctx context.Context, client *http.Client, urlStr,
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1226,7 +1235,7 @@ func (m *Manager) verifyChecksum(ctx context.Context, client *http.Client, urlSt
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "LFH/"+version.Version)
+	req.Header.Set("User-Agent", "QuailNest/"+version.Version)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("下载 SHA256 校验文件失败: %w", err)
@@ -1262,8 +1271,9 @@ func defaultVerifyBinary(ctx context.Context, binPath string) error {
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
-	if !strings.Contains(string(out), version.AppName) {
-		return fmt.Errorf("输出异常: %q", strings.TrimSpace(string(out)))
+	outStr := string(out)
+	if !strings.Contains(outStr, version.AppName) && !strings.Contains(outStr, "LFH") {
+		return fmt.Errorf("输出异常: %q", strings.TrimSpace(outStr))
 	}
 	return nil
 }
@@ -1292,9 +1302,11 @@ func CleanupOldBinary(exePath string) {
 func isMatchingBinaryEntryForOS(name, targetOS string) bool {
 	base := strings.ToLower(filepath.Base(name))
 	if strings.EqualFold(targetOS, "windows") {
-		return base == "lfh.exe" || (strings.HasPrefix(base, "lfh") && strings.HasSuffix(base, ".exe"))
+		return base == "quailnest.exe" || base == "lfh.exe" ||
+			((strings.HasPrefix(base, "quailnest") || strings.HasPrefix(base, "lfh")) && strings.HasSuffix(base, ".exe"))
 	}
-	return base == "lfh" || (strings.HasPrefix(base, "lfh-") && !strings.HasSuffix(base, ".exe") && !strings.HasSuffix(base, ".txt"))
+	return base == "quailnest" || base == "lfh" ||
+		((strings.HasPrefix(base, "quailnest-") || strings.HasPrefix(base, "lfh-")) && !strings.HasSuffix(base, ".exe") && !strings.HasSuffix(base, ".txt"))
 }
 
 func extractFromZipForOS(zipPath, dstDir, targetOS string) (string, error) {

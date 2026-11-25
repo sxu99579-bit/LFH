@@ -2,28 +2,28 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./web/logo-dark.png" />
     <source media="(prefers-color-scheme: light)" srcset="./web/logo-light.png" />
-    <img src="./web/logo.png" width="112" alt="LFH Logo" />
+    <img src="./web/logo.png" width="112" alt="QuailNest Logo" />
   </picture>
 </p>
 
-<h1 align="center">LFH — LAN FileHub</h1>
+<h1 align="center">QuailNest — Local-First File Hub & Agent Workspace</h1>
 
 <p align="center">
-  Lightweight, zero-dependency distributed LAN file hub · Unified entry URL across pooled host storage · Real-time sync & inline preview
+  Lightweight, zero-dependency distributed LAN file hub & multi-AI Agent workspace · Unified entry URL · Apple-inspired UI & live preview
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.25.0</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/QuailNest/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/QuailNest/issues">Issues</a> · <code>V0.11.25.0</code>
 </p>
 
 ---
 
-**LFH (LAN FileHub)** is a self-hosted distributed file hub built for personal workspaces and local teams. Written solely with the Go standard library and embedded frontend assets, it lets multiple Windows, Linux, and macOS machines on the same LAN form a unified storage pool while exposing a single clean entry address to users.
+**QuailNest (formerly LFH / LAN FileHub)** is a self-hosted distributed file hub and AI collaboration workspace built for personal desks and local teams. Written solely with the Go standard library and embedded frontend assets, it lets multiple Windows, Linux, and macOS machines on the same LAN form a unified storage pool while exposing a single clean entry address to users.
 
 Ships as a single binary with zero database setup required—ready for both Docker containers and native local deployment.
 
 <p align="center">
-  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="LFH Desktop and Mobile Workspaces" />
+  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="QuailNest Desktop and Mobile Workspaces" />
 </p>
 
 ## Key Features
@@ -48,7 +48,7 @@ Ships as a single binary with zero database setup required—ready for both Dock
 
 - **Heterogeneous LAN Clustering & Web-Based Discovery / Join (`entry` / `worker`)**:
   - Combines passive UDP broadcast discovery (`53319/udp`) with **active LAN subnet scanning** and **manual IP:port probing** right inside **Settings -> Cluster & Entry**;
-  - Join or adopt standalone LFH hosts directly from the Web UI using the peer's admin credentials or cluster secret—zero CLI restart needed, with customizable storage quotas (`500MB`, `10GB`, `1.5TB`) behind one unified entry URL;
+  - Join or adopt standalone QuailNest hosts directly from the Web UI using the peer's admin credentials or cluster secret—zero CLI restart needed, with customizable storage quotas (`500MB`, `10GB`, `1.5TB`) behind one unified entry URL;
   - **Live Node Status & Online-Only File Visibility**: Real-time node health indicators appear in the top bar, sidebar, and cluster table. Files on **online nodes appear normally**, while files stored on **offline nodes are automatically hidden** and seamlessly restored when the node comes back online.
   - **Lossless Primary Node Switching & Node Exit Control**: Promote any online worker node into the cluster's new **Primary/Entry** node in one click (migrating accounts/permissions while preserving files across all hosts), evict online nodes or delete offline entries cleanly, dissolve an entire cluster, or visit `/worker` on any worker node to leave the cluster independently.
 - **Super Clipboard & Instant Create `.txt`**:
@@ -69,7 +69,7 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - **Designated User Visibility & Owner/Admin Deletion**: Restrict uploaded files to selected system users—unauthorized users never see them in file lists, charts, SSE notifications, or download/preview endpoints. Only **admins and the original uploader** may delete files or update visibility; other authorized recipients have read/download access only.
   - Standard users only see Appearance and Account settings. Storage drive selection, physical directory migration across disks, and server disk paths stay strictly hidden and accessible to administrators only.
 - **Light & Dark Themes across All Screens**: Polished light and dark themes with responsive layouts tuned for desktop, tablet, and mobile viewports.
-- **Zero-Downtime GitHub Self-Updater**: Checks the configured GitHub repository (`sxu99579-bit/LFH`) for new releases, verifies downloads, and swaps the running binary via graceful handoff.
+- **Zero-Downtime GitHub Self-Updater**: Checks the configured GitHub repository (`sxu99579-bit/QuailNest`) for new releases, verifies downloads, and swaps the running binary via graceful handoff.
 
 <table>
   <tr>
@@ -92,21 +92,21 @@ Ships as a single binary with zero database setup required—ready for both Dock
 
 ### Option 1: Docker (Recommended)
 
-This repository includes a multi-stage [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) with persistent storage mounted at `./lfh-data`:
+This repository includes a multi-stage [`Dockerfile`](./Dockerfile) and [`docker-compose.yml`](./docker-compose.yml) with persistent storage mounted at `./quailnest-data`:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/sxu99579-bit/LFH.git
-cd LFH
+git clone https://github.com/sxu99579-bit/QuailNest.git
+cd QuailNest
 
 # 2. Build and start in background
 docker compose up -d
 
 # 3. View the auto-generated initial admin username and password
-docker compose logs lfh
+docker compose logs quailnest
 ```
 
-Your generated initial credentials are also written to `./lfh-data/initial-admin.txt` on the host.
+Your generated initial credentials are also written to `./quailnest-data/initial-admin.txt` on the host.
 
 > **LAN Networking Notes**:
 > - Under Docker bridge mode, add `-expose-ip YOUR_HOST_LAN_IP` (for example `192.168.1.100`) to `command` in `docker-compose.yml` so the UI shows your host's reachable LAN URL rather than the container bridge IP.
@@ -115,15 +115,15 @@ Your generated initial credentials are also written to `./lfh-data/initial-admin
 Manual `docker build` / `docker run` equivalent:
 
 ```bash
-docker build -t lfh:V0.11.21.7 .
+docker build -t quailnest:V0.11.25.0 .
 
 docker run -d \
-  --name lfh \
+  --name quailnest \
   --restart unless-stopped \
   -p 8080:8080 \
   -p 53319:53319/udp \
-  -v $(pwd)/lfh-data:/data \
-  lfh:V0.11.21.7 -data /data -port 8080 -expose-ip 192.168.1.100
+  -v $(pwd)/quailnest-data:/data \
+  quailnest:V0.11.25.0 -data /data -port 8080 -expose-ip 192.168.1.100
 ```
 
 ---
@@ -135,15 +135,15 @@ Requires Go `1.23+` (or download a prebuilt binary from GitHub Releases).
 #### 1. Build & Start Entry Node
 
 ```bash
-git clone https://github.com/sxu99579-bit/LFH.git
-cd LFH
+git clone https://github.com/sxu99579-bit/QuailNest.git
+cd QuailNest
 
 # Build binary
-go build -trimpath -ldflags="-s -w" -o lfh .      # Linux / macOS
-go build -trimpath -ldflags="-s -w" -o lfh.exe .  # Windows
+go build -trimpath -ldflags="-s -w" -o quailnest .      # Linux / macOS
+go build -trimpath -ldflags="-s -w" -o quailnest.exe .  # Windows
 
 # Start entry server (default port 8080, data in ./data)
-./lfh -data ./data -port 8080
+./quailnest -data ./data -port 8080
 ```
 
 Open the LAN URL printed in the terminal (or `http://localhost:8080`) and sign in with the random admin credentials shown on first launch (also saved in `./data/initial-admin.txt`).
@@ -154,7 +154,7 @@ Copy [`cluster-config.example.json`](./cluster-config.example.json) to `cluster-
 
 ```bash
 # Example: contribute 50GB from a second machine to the cluster pool
-./lfh -role worker -quota 50GB -secret "your-cluster-secret" -entry "http://192.168.1.100:8080"
+./quailnest -role worker -quota 50GB -secret "your-cluster-secret" -entry "http://192.168.1.100:8080"
 ```
 
 ---
@@ -174,7 +174,7 @@ Copy [`cluster-config.example.json`](./cluster-config.example.json) to `cluster-
 | `-name` | hostname | Custom node display name |
 | `-config` | empty | Path to seed `cluster-config.json` |
 | `-discovery-port` | `53319` | UDP broadcast discovery port (`0` to disable) |
-| `-repo` | `sxu99579-bit/LFH` | GitHub repository (`owner/repo`) checked for updates |
+| `-repo` | `sxu99579-bit/QuailNest` | GitHub repository (`owner/repo`) checked for updates |
 | `-init-user` / `-init-pass` | random | Optional initial admin username/password for a fresh data directory |
 | `-version` | `false` | Print current version and exit |
 
@@ -214,8 +214,8 @@ go test -count=1 ./...
 
 Bug reports, feature ideas, and deployment showcases are always welcome:
 
-- **Community Discussions**: Join [GitHub Discussions](https://github.com/sxu99579-bit/LFH/discussions) for Q&A, ideas, or sharing your setup.
-- **Bug Reports & Feature Requests**: Open a structured issue on [GitHub Issues](https://github.com/sxu99579-bit/LFH/issues) (exporting runtime logs from **Settings -> System Logs** helps speed up diagnosis).
+- **Community Discussions**: Join [GitHub Discussions](https://github.com/sxu99579-bit/QuailNest/discussions) for Q&A, ideas, or sharing your setup.
+- **Bug Reports & Feature Requests**: Open a structured issue on [GitHub Issues](https://github.com/sxu99579-bit/QuailNest/issues) (exporting runtime logs from **Settings -> System Logs** helps speed up diagnosis).
 
 ## License
 
@@ -223,5 +223,5 @@ Released under the [**MIT License**](./LICENSE) — free to use, modify, redistr
 
 ## Acknowledgements
 
-- Special thanks to [**satnaing/shadcn-admin**](https://github.com/satnaing/shadcn-admin) (MIT License) and [**shadcn/ui**](https://ui.shadcn.com/) for the open-source admin UI architecture and design system that inspired LFH's desktop and mobile workspaces.
+- Special thanks to [**satnaing/shadcn-admin**](https://github.com/satnaing/shadcn-admin) (MIT License) and [**shadcn/ui**](https://ui.shadcn.com/) for the open-source admin UI architecture and design system that inspired QuailNest's desktop and mobile workspaces.
 - Thanks to **Google Antigravity** and **Gemini** for assistance throughout architecture design, distributed LAN clustering iteration, UI polish, and engineering delivery.

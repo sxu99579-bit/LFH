@@ -31,7 +31,7 @@ func builtinMarketplaceCatalog() []MarketplaceItem {
 			ID:             PluginOCRVision,
 			Name:           "OCR 图文识别",
 			Version:        "1.0.0",
-			Author:         "LFH Official",
+			Author:         "QuailNest Official",
 			Description:    "识别图片中的文字与截图元数据，自动生成 .ocr.txt 提取文本并回传入库；本机若安装 tesseract 可自动调用本地识别引擎。",
 			Category:       "图像识别 / OCR",
 			Capabilities:   []string{CapOCRImage},
@@ -46,7 +46,7 @@ func builtinMarketplaceCatalog() []MarketplaceItem {
 			ID:             PluginAutoOrganizer,
 			Name:           "智能文件整理",
 			Version:        "1.0.0",
-			Author:         "LFH Official",
+			Author:         "QuailNest Official",
 			Description:    "基于文件名、格式特征与正文关键词分析文件语义类别，输出推荐虚拟分类目录与标签摘要（.organize.json）。",
 			Category:       "效率与归档",
 			Capabilities:   []string{CapAutoClassify},
@@ -61,7 +61,7 @@ func builtinMarketplaceCatalog() []MarketplaceItem {
 			ID:             PluginPDFToWord,
 			Name:           "PDF 转 Word (DOCX)",
 			Version:        "1.0.0",
-			Author:         "LFH Official",
+			Author:         "QuailNest Official",
 			Description:    "将 PDF 文档提取正文结构并转换为标准 Microsoft Word (.docx) 文档；本机若安装 LibreOffice (soffice) 可优先使用排版级无损转换。",
 			Category:       "文档转换",
 			Capabilities:   []string{CapPDFToDocx},
@@ -384,7 +384,7 @@ func runBuiltinPDFToWord(ctx context.Context, req ExecRequest) (ExecResponse, er
 	lines := extractPDFTextLines(raw)
 	if len(lines) == 0 {
 		lines = []string{
-			fmt.Sprintf("文档 %s 已由 LFH PDF 转 Word 插件转换。", req.FileName),
+			fmt.Sprintf("文档 %s 已由 QuailNest PDF 转 Word 插件转换。", req.FileName),
 			"未在该 PDF 中检测到可直接提取的纯文本流（可能为扫描版图像 PDF；建议在算力节点安装 LibreOffice 或配合 OCR 插件）。",
 		}
 	}

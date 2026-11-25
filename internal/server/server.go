@@ -736,7 +736,7 @@ func (s *Server) serveEmbeddedHTML(w http.ResponseWriter, filename string) {
 		raw, err = fs.ReadFile(s.webFS, "index.html")
 	}
 	if err != nil {
-		raw = []byte("<!DOCTYPE html><html><body>LFH (" + filename + ")</body></html>")
+		raw = []byte("<!DOCTYPE html><html><body>QuailNest (" + filename + ")</body></html>")
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Vary", "User-Agent, Sec-CH-UA-Mobile, Cookie")
@@ -764,7 +764,7 @@ func (s *Server) redirectWorkerToEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = w.Write([]byte(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>LFH 存储节点</title></head><body style="font-family:sans-serif;background:#0b1120;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="text-align:center;"><h2>本机为 LFH 存储扩容节点（Worker）</h2><p>正在等待主入口节点上线或自动发现中，请从唯一主入口访问平台。</p><p style="margin-top:16px;"><a href="/worker" style="color:#38bdf8;text-decoration:underline;">打开本机节点管理 / 退出集群</a></p></div></body></html>`))
+	_, _ = w.Write([]byte(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>QuailNest 存储节点</title></head><body style="font-family:sans-serif;background:#0b1120;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="text-align:center;"><h2>本机为 QuailNest 存储扩容节点（Worker）</h2><p>正在等待主入口节点上线或自动发现中，请从唯一主入口访问平台。</p><p style="margin-top:16px;"><a href="/worker" style="color:#38bdf8;text-decoration:underline;">打开本机节点管理 / 退出集群</a></p></div></body></html>`))
 }
 
 type authedHandler func(http.ResponseWriter, *http.Request, auth.PublicUser)
@@ -1586,7 +1586,7 @@ const workerControlHTML = `<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LFH 本机节点管理</title>
+  <title>QuailNest 本机节点管理</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -1686,7 +1686,7 @@ const workerControlHTML = `<!DOCTYPE html>
 <body>
   <div class="card">
     <div class="head">
-      <h1 class="title">LFH 本机节点控制台</h1>
+      <h1 class="title">QuailNest 本机节点控制台</h1>
       <span id="role-badge" class="badge">加载中...</span>
     </div>
     <div class="meta">
@@ -1712,7 +1712,7 @@ const workerControlHTML = `<!DOCTYPE html>
     <div id="entry-box" class="hidden">
       <div class="tip">当前本机已是主入口节点（Entry），可以直接打开完整 Web 控制台。</div>
       <div class="actions">
-        <a class="btn btn-primary" href="/">进入 LFH 主界面</a>
+        <a class="btn btn-primary" href="/">进入 QuailNest 主界面</a>
       </div>
     </div>
 
@@ -1756,7 +1756,7 @@ const workerControlHTML = `<!DOCTYPE html>
           : {};
         document.getElementById("m-name").textContent = selfNode.node_name || "-";
         document.getElementById("m-id").textContent = selfNode.node_id || "-";
-        document.getElementById("m-ver").textContent = (data.app_name || "LFH") + " " + (data.version || "");
+        document.getElementById("m-ver").textContent = (data.app_name || "QuailNest") + " " + (data.version || "");
         document.getElementById("m-entry").textContent = data.entry_url || (data.role === "entry" ? "本机即主入口" : "未连接");
         const dirRow = document.getElementById("m-dir-row");
         if (selfNode.storage_dir) {

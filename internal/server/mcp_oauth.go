@@ -281,7 +281,7 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 
 var oauthLoginTpl = template.Must(template.New("oauthLogin").Parse(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 LFH 审批接入 — {{.ClientName}}</title>
+<title>登录 QuailNest 审批接入 — {{.ClientName}}</title>
 <style>
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}
 .card{width:100%;max-width:400px;background:#1e293b;border:1px solid #334155;border-radius:14px;padding:24px;box-sizing:border-box}
@@ -292,7 +292,7 @@ input{width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border
 button{width:100%;margin-top:18px;padding:10px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
 .err{margin-top:10px;color:#f87171;font-size:12px;min-height:16px}
 </style></head><body><div class="card">
-<h1>登录 LFH 以审批 Agent 接入</h1>
+<h1>登录 QuailNest 以审批 Agent 接入</h1>
 <p>客户端 <strong>{{.ClientName}}</strong> 请求通过 MCP 协议接入你的工作区。请先验证身份。</p>
 <form id="f">
 <label>用户名</label><input id="u" required autocomplete="username">
@@ -315,7 +315,7 @@ document.getElementById('f').addEventListener('submit', async function(ev){
 
 var oauthApproveTpl = template.Must(template.New("oauthApprove").Parse(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>授权 AI Agent 接入 — LFH</title>
+<title>授权 AI Agent 接入 — QuailNest</title>
 <style>
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}
 .card{width:100%;max-width:520px;background:#1e293b;border:1px solid #334155;border-radius:14px;padding:24px;box-sizing:border-box}
@@ -331,7 +331,7 @@ button{flex:1;padding:10px;border-radius:8px;border:0;font-size:14px;font-weight
 .ok{background:#10b981;color:#06281e}
 .no{background:#334155;color:#e2e8f0}
 </style></head><body><div class="card">
-<h1>允许 AI Agent 接入 LFH 吗？</h1>
+<h1>允许 AI Agent 接入 QuailNest 吗？</h1>
 <p class="sub">批准后将为账号 <strong>{{.Username}}</strong> 签发专属受限密钥（仅回传给本地客户端，不会放宽管理员隔离边界）。</p>
 <div class="meta">客户端：<strong>{{.ClientName}}</strong><br>回调目标：<code>{{.RedirectHost}}</code></div>
 <form method="POST" action="/oauth/authorize">

@@ -7,7 +7,7 @@ body:
     id: summary
     attributes:
       label: 期望的功能或改进 / Feature Summary
-      description: 简述你想让 LFH 支持什么新能力或交互优化
+      description: 简述你想让 QuailNest 支持什么新能力或交互优化
     validations:
       required: true
   - type: textarea

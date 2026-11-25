@@ -1,7 +1,7 @@
 {
-  "name": "LFH - 分布式局域网文件中心",
-  "short_name": "LFH",
-  "description": "轻量分布式局域网文件与算力平台",
+  "name": "QuailNest 鹌鹑窝 - 局域网文件与 AI 协同中枢",
+  "short_name": "QuailNest",
+  "description": "轻量、零依赖的局域网私有文件与多 AI 协同小窝",
   "start_url": "/?view=mobile",
   "display": "standalone",
   "background_color": "#09090b",

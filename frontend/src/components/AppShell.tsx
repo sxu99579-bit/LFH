@@ -125,13 +125,13 @@ export function AppShell({
       <div className="flex h-14 items-center gap-2.5 border-b border-sidebar-border px-4">
         <img
           src={theme === 'dark' ? '/logo-icon-dark.png' : '/logo-icon-light.png'}
-          alt="LFH"
+          alt="QuailNest"
           className="h-8 w-8 object-contain shrink-0"
         />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold tracking-tight">LFH</div>
+          <div className="truncate text-sm font-semibold tracking-tight">QuailNest</div>
           <div className="truncate text-[11px] text-muted-foreground">
-            {info?.version || 'V0.11.25.0'} · 分布式共享池
+            {info?.version || 'V0.11.25.0'} · 鹌鹑窝中枢
           </div>
         </div>
         {sidebarOpen && (
@@ -249,11 +249,11 @@ export function AppShell({
           <div className="flex items-center gap-2 min-w-0">
             <img
               src={theme === 'dark' ? '/logo-icon-dark.png' : '/logo-icon-light.png'}
-              alt="LFH"
+              alt="QuailNest"
               className="h-7 w-7 object-contain shrink-0"
             />
             <div className="min-w-0">
-              <div className="truncate text-sm font-semibold">LFH 局域网中枢</div>
+              <div className="truncate text-sm font-semibold">QuailNest 鹌鹑窝</div>
               <div className="truncate text-[10px] text-muted-foreground">
                 {user.username} · {pool?.online_nodes ?? 1}/{pool?.total_nodes ?? 1} 节点在线
               </div>
