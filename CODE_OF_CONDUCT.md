@@ -1,13 +1,13 @@
-# LFH 社区与评论区公约 / Community Code of Conduct
+# QuailNest 社区与评论区公约 / Community Code of Conduct
 
-感谢你关注并使用 **LFH（LAN FileHub）**！为了保持 Issue、Pull Request 与 Discussions 讨论区的高效、友善与纯洁技术氛围，所有参与本仓库提问、评论与贡献的成员均需遵守以下约定：
+感谢你关注并使用 **QuailNest（鹌鹑窝）**！为了保持 Issue、Pull Request 与 Discussions 讨论区的高效、友善与纯洁技术氛围，所有参与本仓库提问、评论与贡献的成员均需遵守以下约定：
 
 ---
 
 ## 一、我们倡导的交流方式（Our Pledge）
 
 1. **友善尊重，理性讨论**：欢迎提问、报错、晒部署效果与提出改进思路；请尊重维护者与其他用户的时间与付出，不因技术水平差异进行嘲讽或人身攻击。
-2. **有效沟通，信息完整**：反馈问题时尽量附带 LFH 版本号、系统环境以及「设置 -> 系统日志」中导出的关键信息，帮助更快排查定位。
+2. **有效沟通，信息完整**：反馈问题时尽量附带 QuailNest 版本号、系统环境以及「设置 -> 系统日志」中导出的关键信息，帮助更快排查定位。
 3. **专注项目本身**：保持讨论主题围绕自托管局域网文件共享、存储池、分布式算力、软件架构与使用体验展开。
 
 ## 二、零容忍的违规行为（Unacceptable Behavior）
@@ -28,7 +28,7 @@
 
 ## English Summary
 
-All participants in **LFH** Issues, Pull Requests, and Discussions agree to foster an open, welcoming, and constructive technical community:
+All participants in **QuailNest** Issues, Pull Requests, and Discussions agree to foster an open, welcoming, and constructive technical community:
 
 - **Be respectful and constructive**: Critique code and ideas politely; no harassment, hate speech, personal attacks, or trolling.
 - **Keep threads relevant**: Provide actionable environment details when reporting bugs or proposing improvements.

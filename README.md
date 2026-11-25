@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./web/logo-dark.png" />
-    <source media="(prefers-color-scheme: light)" srcset="./web/logo-light.png" />
-    <img src="./web/logo.png" width="112" alt="QuailNest Logo" />
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo/quailnest-icon-dark-512.png" />
+    <source media="(prefers-color-scheme: light)" srcset="./assets/logo/quailnest-icon-light-512.png" />
+    <img src="./assets/logo/quailnest-icon-light-512.png" width="112" alt="QuailNest Logo" />
   </picture>
 </p>
 
