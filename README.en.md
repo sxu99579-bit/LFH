@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.24.4</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">Discussions</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">Issues</a> · <code>V0.11.25.0</code>
 </p>
 
 ---
@@ -55,10 +55,10 @@ Ships as a single binary with zero database setup required—ready for both Dock
   - Opt-in **Super Clipboard** per node (`-clipboard`, local `/worker` toggle, or centralized Primary-to-Worker remote toggle in Cluster Settings): automatically watches copied text/images on enabled machines, auto-names them with timestamps, and uploads into `超级剪贴板/YYYY-MM` for cross-device access;
   - Create `.txt` files directly from the Web toolbar with an inline editor and immediate versioning.
 - **Instant Drag-and-Drop & Folder Structure**: Drop individual files, entire directory trees, or archives directly into the workspace with real-time progress and configurable extension allow/deny policies.
-- **Apple Finder / iPadOS Files Icon View, True Cover Thumbnails & Live Auto-Refresh**:
-  - Clean borderless **Apple Icon View** (default, alongside the detailed **List** and **Chart** views) featuring layered folder aggregation with breadcrumbs, `S / M / L` icon scaling, and middle-ellipsis filenames that preserve both leading title and extension;
+- **Apple Finder / iPadOS Files Icon View, Folder Management & Exact Day/Range Filtering**:
+  - Clean borderless **Apple Icon View** (default, alongside **List** and **Chart** views) with **create / rename / delete virtual folders** (including safe move-to-parent mode), breadcrumbs, context-menu & **drag-to-folder file moving**, upload-into-current-folder support, desktop `S / M / L` & mobile **`3-col / 2-col`** scaling, and middle-ellipsis filenames;
   - Lazy offline Page-1 PDF paper thumbnails (`pdfjs-dist` + Range requests), miniature typography paper previews for text/code/Office files (`?snippet=1`), and pure-Go disk-cached image thumbnails (`GET /api/files/{id}/thumb` with `ETag` and PNG alpha preservation);
-  - Desktop selection highlights, hover frosted quick-action pills, `Space` QuickLook preview, and right-click frosted context menus, kept live across clients via Server-Sent Events (SSE).
+  - **Exact single-day (`YYYY-MM-DD`) and start-to-end date range filtering** (with quick Today / Yesterday / 7d / 30d presets), clickable **Preview / Download / Inspect** chips on AI Task Board output files, refined mobile Clipboard & File Center toolbars, and live SSE refresh.
 - **Online Preview, In-Browser Text Editor & Full Version Provenance**:
   - Preview images, audio/video, text/Markdown, common document formats, and inspect/extract archive contents in-browser;
   - **Online Text / JSON / Markdown / Code Editor**: Edit uploaded `.txt`, `.json`, `.md`, `.yaml`, `.csv`, `.log`, `.ini`, `.conf`, `.sql`, and source code files directly in the browser with line numbers, JSON formatting/minifying/validation, and live split Markdown preview—saving creates a new version automatically;

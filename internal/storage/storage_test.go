@@ -313,3 +313,43 @@ func TestFileVersionControlAndTelemetryCounters(t *testing.T) {
 		t.Fatalf("unexpected IOStats: r=%d w=%d", rErr, wErr)
 	}
 }
+
+func TestFilterRecordsWithDateRangeAndSetFolderPath(t *testing.T) {
+	records := []FileRecord{
+		{ID: "a", Name: "day1.txt", Category: "document", MonthKey: "2026-11", DateKey: "2026-11-20", Size: 10},
+		{ID: "b", Name: "day2.txt", Category: "document", MonthKey: "2026-11", DateKey: "2026-11-23", Size: 20},
+		{ID: "c", Name: "day3.txt", Category: "document", MonthKey: "2026-11", DateKey: "2026-11-25", Size: 30},
+	}
+
+	exact := FilterRecordsWithDateRange(records, "", "", "2026-11-23", "", "", "", "", "")
+	if len(exact) != 1 || exact[0].ID != "b" {
+		t.Fatalf("unexpected exact day filter result: %+v", exact)
+	}
+
+	rng := FilterRecordsWithDateRange(records, "", "", "", "2026-11-21", "2026-11-25", "", "", "")
+	if len(rng) != 2 {
+		t.Fatalf("expected 2 records in range [2026-11-21..2026-11-25], got %+v", rng)
+	}
+
+	sum := SummarizeRecordsFiltered(records, "", "", "", "2026-11-21", "2026-11-25", "")
+	if sum.TotalCount != 2 || sum.TotalSize != 50 {
+		t.Fatalf("unexpected filtered summary: %+v", sum)
+	}
+
+	dir := t.TempDir()
+	st, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	rec, err := st.SaveUpload("memo.txt", "admin", DeviceInfo{}, strings.NewReader("note"))
+	if err != nil {
+		t.Fatalf("SaveUpload: %v", err)
+	}
+	moved, err := st.SetFolderPath(rec.ID, "/docs/final/")
+	if err != nil {
+		t.Fatalf("SetFolderPath: %v", err)
+	}
+	if moved.FolderPath != "docs/final" {
+		t.Fatalf("expected sanitized FolderPath 'docs/final', got %q", moved.FolderPath)
+	}
+}

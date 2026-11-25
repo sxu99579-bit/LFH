@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: lfh:V0.11.24.4
+    image: lfh:V0.11.25.0
     container_name: lfh
     restart: unless-stopped
     # Note:

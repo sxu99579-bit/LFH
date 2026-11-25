@@ -487,6 +487,8 @@ export function CreateTxtModal({
   isAdmin,
   nodes,
   defaultNode,
+  defaultFolder = '',
+  folders = [],
   allowedUsers,
   onCreated,
 }: {
@@ -495,6 +497,8 @@ export function CreateTxtModal({
   isAdmin: boolean
   nodes: NodeStatus[]
   defaultNode: string
+  defaultFolder?: string
+  folders?: string[]
   allowedUsers: string[]
   onCreated: () => void
 }) {
@@ -508,11 +512,11 @@ export function CreateTxtModal({
   useEffect(() => {
     if (open) {
       setName('')
-      setFolder('')
+      setFolder(defaultFolder || '')
       setContent('')
       setTargetNode(defaultNode || 'auto')
     }
-  }, [defaultNode, open])
+  }, [defaultFolder, defaultNode, open])
 
   const submit = async () => {
     if (!name.trim()) {
@@ -548,7 +552,17 @@ export function CreateTxtModal({
           </div>
           <div className="space-y-1">
             <label className="font-medium">目标文件夹（可选）</label>
-            <Input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="留空存入根目录" />
+            <Input
+              list="lfh-createtxt-folders"
+              value={folder}
+              onChange={(e) => setFolder(e.target.value)}
+              placeholder="留空存入根目录"
+            />
+            <datalist id="lfh-createtxt-folders">
+              {folders.map((fp) => (
+                <option key={fp} value={fp} />
+              ))}
+            </datalist>
           </div>
         </div>
         {isAdmin && (

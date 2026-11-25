@@ -68,6 +68,8 @@ type Server struct {
 	agentPairing         *agentPairingManager
 	mcpOAuth             *mcpOAuthManager
 	tasks                *bridge.TaskManager
+	folderStoreMu        sync.Mutex
+	folderStore          *FolderStore
 	thumbCacheMu         sync.Mutex
 	thumbCache           *preview.ThumbCache
 	jobsMu       sync.RWMutex
@@ -494,6 +496,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /internal/cluster/files/{id}", s.requireClusterAuth(s.handleClusterDelete))
 	mux.HandleFunc("POST /internal/cluster/files/batch-commit", s.requireClusterAuth(s.handleClusterBatchCommit))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/access", s.requireClusterAuth(s.handleClusterUpdateAccess))
+	mux.HandleFunc("POST /internal/cluster/files/{id}/folder", s.requireClusterAuth(s.handleClusterUpdateFolder))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/edit", s.requireClusterAuth(s.handleClusterEditFile))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/patch", s.requireClusterAuth(s.handleClusterPatchFile))
 	mux.HandleFunc("POST /internal/cluster/files/{id}/versions", s.requireClusterAuth(s.handleClusterNewVersion))
@@ -633,6 +636,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/uploads/{uploadID}/chunk/{index}", s.requirePrincipal(auth.ScopeWrite, s.handleUploadChunk))
 	mux.HandleFunc("POST /api/uploads/{uploadID}/complete", s.requirePrincipal(auth.ScopeWrite, s.handleUploadComplete))
 	mux.HandleFunc("DELETE /api/uploads/{uploadID}", s.requirePrincipal(auth.ScopeWrite, s.handleUploadCancel))
+	mux.HandleFunc("GET /api/folders", s.requirePrincipal(auth.ScopeRead, s.handleListFolders))
+	mux.HandleFunc("POST /api/folders", s.requirePrincipal(auth.ScopeWrite, s.handleCreateFolder))
+	mux.HandleFunc("PATCH /api/folders", s.requirePrincipal(auth.ScopeWrite, s.handleRenameFolder))
+	mux.HandleFunc("DELETE /api/folders", s.requirePrincipal(auth.ScopeWrite, s.handleDeleteFolder))
 	mux.HandleFunc("POST /api/files/create-txt", s.requirePrincipal(auth.ScopeWrite, s.handleCreateTxtFile))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requirePrincipal(auth.ScopeRead, s.handleDownload))
 	mux.HandleFunc("GET /api/files/{id}/raw", s.requirePrincipal(auth.ScopeRead, s.handleRaw))
@@ -641,6 +648,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/files/{id}/meta", s.requirePrincipal(auth.ScopeRead, s.handleFileMeta))
 	mux.HandleFunc("GET /api/files/{id}/archive-entry", s.requirePrincipal(auth.ScopeRead, s.handleArchiveEntry))
 	mux.HandleFunc("POST /api/files/{id}/access", s.requirePrincipal(auth.ScopeShare, s.handleUpdateFileAccess))
+	mux.HandleFunc("POST /api/files/{id}/folder", s.requirePrincipal(auth.ScopeWrite, s.handleUpdateFileFolder))
 	mux.HandleFunc("POST /api/files/{id}/edit", s.requirePrincipal(auth.ScopeWrite, s.handleEditFile))
 	mux.HandleFunc("POST /api/files/{id}/patch", s.requirePrincipal(auth.ScopeWrite, s.handlePatchFile))
 	mux.HandleFunc("POST /api/files/batch-commit", s.requirePrincipal(auth.ScopeWrite, s.handleBatchCommit))
@@ -3723,11 +3731,13 @@ func (s *Server) filterAccessibleForPrincipal(records []storage.FileRecord, p au
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	q := r.URL.Query()
 	accessible := s.filterAccessibleForPrincipal(s.cluster.AllClusterFiles(), p)
-	list := storage.FilterRecords(
+	list := storage.FilterRecordsWithDateRange(
 		accessible,
 		q.Get("category"),
 		q.Get("month"),
 		q.Get("date"),
+		q.Get("date_from"),
+		q.Get("date_to"),
 		q.Get("device"),
 		q.Get("node"),
 		q.Get("q"),
@@ -3738,10 +3748,13 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, p auth.
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	q := r.URL.Query()
 	accessible := s.filterAccessibleForPrincipal(s.cluster.AllClusterFiles(), p)
-	sum := storage.SummarizeRecords(
+	sum := storage.SummarizeRecordsFiltered(
 		accessible,
 		q.Get("category"),
 		q.Get("month"),
+		q.Get("date"),
+		q.Get("date_from"),
+		q.Get("date_to"),
 		q.Get("node"),
 	)
 	writeJSON(w, http.StatusOK, sum)

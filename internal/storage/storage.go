@@ -768,6 +768,24 @@ func (s *Store) SetAllowedUsers(id string, allowedUsers []string) (FileRecord, e
 	return rec, nil
 }
 
+func (s *Store) SetFolderPath(id, folderPath string) (FileRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return FileRecord{}, errors.New("文件不存在")
+	}
+	if rec.MountID != "" {
+		return FileRecord{}, errors.New("外部虚拟挂载目录内的文件不支持移动虚拟目录")
+	}
+	rec.FolderPath = SanitizeFolderPath(folderPath)
+	s.records[id] = rec
+	if err := s.appendWALUpsertLocked(rec); err != nil {
+		return FileRecord{}, err
+	}
+	return rec, nil
+}
+
 func (s *Store) SetUploadDir(newDir string, migrateExisting bool) (int, error) {
 	trimmed := strings.TrimSpace(newDir)
 	if trimmed == "" {
@@ -1016,7 +1034,14 @@ func (s *Store) Summary(category, monthKey string) SummaryResponse {
 }
 
 func FilterRecords(records []FileRecord, category, monthKey, dateKey, deviceFP, nodeID, query string) []FileRecord {
+	return FilterRecordsWithDateRange(records, category, monthKey, dateKey, "", "", deviceFP, nodeID, query)
+}
+
+func FilterRecordsWithDateRange(records []FileRecord, category, monthKey, dateKey, dateFrom, dateTo, deviceFP, nodeID, query string) []FileRecord {
 	q := strings.ToLower(strings.TrimSpace(query))
+	dateKey = strings.TrimSpace(dateKey)
+	dateFrom = strings.TrimSpace(dateFrom)
+	dateTo = strings.TrimSpace(dateTo)
 	out := make([]FileRecord, 0, len(records))
 	for _, rec := range records {
 		if category != "" && category != "all" && rec.Category != category {
@@ -1026,6 +1051,12 @@ func FilterRecords(records []FileRecord, category, monthKey, dateKey, deviceFP, 
 			continue
 		}
 		if dateKey != "" && dateKey != "all" && rec.DateKey != dateKey {
+			continue
+		}
+		if dateFrom != "" && rec.DateKey < dateFrom {
+			continue
+		}
+		if dateTo != "" && rec.DateKey > dateTo {
 			continue
 		}
 		if deviceFP != "" && deviceFP != "all" && rec.DeviceFP != deviceFP {
@@ -1053,7 +1084,14 @@ func FilterRecords(records []FileRecord, category, monthKey, dateKey, deviceFP, 
 }
 
 func SummarizeRecords(records []FileRecord, category, monthKey, nodeID string) SummaryResponse {
+	return SummarizeRecordsFiltered(records, category, monthKey, "", "", "", nodeID)
+}
+
+func SummarizeRecordsFiltered(records []FileRecord, category, monthKey, dateKey, dateFrom, dateTo, nodeID string) SummaryResponse {
 	resp := SummaryResponse{}
+	dateKey = strings.TrimSpace(dateKey)
+	dateFrom = strings.TrimSpace(dateFrom)
+	dateTo = strings.TrimSpace(dateTo)
 	timeMap := make(map[string]*SummaryBucket)
 	catMap := make(map[string]*SummaryBucket)
 	devMap := make(map[string]*SummaryBucket)
@@ -1064,6 +1102,15 @@ func SummarizeRecords(records []FileRecord, category, monthKey, nodeID string) S
 			continue
 		}
 		if monthKey != "" && monthKey != "all" && rec.MonthKey != monthKey {
+			continue
+		}
+		if dateKey != "" && dateKey != "all" && rec.DateKey != dateKey {
+			continue
+		}
+		if dateFrom != "" && rec.DateKey < dateFrom {
+			continue
+		}
+		if dateTo != "" && rec.DateKey > dateTo {
 			continue
 		}
 		if nodeID != "" && nodeID != "all" && rec.NodeID != nodeID {

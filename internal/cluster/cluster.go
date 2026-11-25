@@ -2998,6 +2998,81 @@ func (m *Manager) UpdateFileAccess(fileID string, allowedUsers []string) (storag
 	return updated, nil
 }
 
+func (m *Manager) UpdateFileFolder(fileID, folderPath string) (storage.FileRecord, error) {
+	if _, _, ok := m.store.Get(fileID); ok {
+		rec, err := m.store.SetFolderPath(fileID, folderPath)
+		if err != nil {
+			return storage.FileRecord{}, err
+		}
+		self := m.SelfStatus()
+		rec.NodeID = self.NodeID
+		rec.NodeName = self.NodeName
+		rec.NodeOS = self.OS
+		rec.NodeOnline = true
+		if rec.StorageDir == "" {
+			rec.StorageDir = m.store.RecordDir(rec)
+		}
+		return rec, nil
+	}
+
+	_, peer, ok := m.LocateFile(fileID)
+	if !ok {
+		return storage.FileRecord{}, errors.New("文件不存在")
+	}
+	if !peer.Online {
+		return storage.FileRecord{}, fmt.Errorf("文件所在节点 %s 当前离线，无法移动目录", peer.NodeName)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"folder_path": folderPath,
+	})
+	targetURL := strings.TrimRight(peer.HTTPURL, "/") + "/internal/cluster/files/" + url.PathEscape(fileID) + "/folder"
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return storage.FileRecord{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, m.Secret(), m.NodeID())
+
+	resp, err := m.apiClient.Do(req)
+	if err != nil {
+		return storage.FileRecord{}, fmt.Errorf("通知节点 %s 移动文件目录失败: %w", peer.NodeName, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+			return storage.FileRecord{}, errors.New(errBody.Error)
+		}
+		return storage.FileRecord{}, fmt.Errorf("移动文件目录失败 (%d)", resp.StatusCode)
+	}
+
+	var updated storage.FileRecord
+	if err := json.Unmarshal(body, &updated); err != nil {
+		return storage.FileRecord{}, err
+	}
+	updated.NodeID = peer.NodeID
+	updated.NodeName = peer.NodeName
+	updated.NodeOS = peer.OS
+	updated.NodeOnline = true
+
+	m.mu.Lock()
+	if cur, exists := m.peers[peer.NodeID]; exists {
+		for i := range cur.files {
+			if cur.files[i].ID == fileID {
+				cur.files[i].FolderPath = updated.FolderPath
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+	return updated, nil
+}
+
 // ==================== Discovery & Heartbeat Loops ====================
 
 func (m *Manager) Start(ctx context.Context) {

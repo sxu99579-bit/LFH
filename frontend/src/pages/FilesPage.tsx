@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react'
 import {
   Archive,
   Bot,
+  Calendar,
   Code2,
   Cpu,
   Download,
@@ -14,6 +15,8 @@ import {
   FileText,
   FileVideo,
   Folder,
+  FolderInput,
+  FolderPlus,
   FolderUp,
   HardDrive,
   Info,
@@ -25,7 +28,9 @@ import {
   SlidersHorizontal,
   Upload,
   Users,
+  X,
 } from 'lucide-react'
+import { api } from '@/lib/api'
 import type {
   ClusterCapabilityView,
   FileRecord,
@@ -46,13 +51,16 @@ import {
   isAgentDeviceName,
   isEditableTextFile,
 } from '@/lib/utils'
-import { Badge, Button, Card, Input, Select, useToast } from '@/components/ui'
+import { Badge, Button, Card, Dialog, Input, Select, useToast } from '@/components/ui'
 import type { AppleIconSize } from '@/components/AppleFileIcons'
 import { AppleFilesGrid } from '@/components/AppleFilesGrid'
 
 interface FilesPageProps {
   user: User
   files: FileRecord[]
+  folders: string[]
+  currentFolder: string
+  onCurrentFolderChange: (folder: string) => void
   summary: SummaryStats | null
   nodes: NodeStatus[]
   capabilities: ClusterCapabilityView[]
@@ -63,12 +71,18 @@ interface FilesPageProps {
   searchQuery: string
   categoryFilter: string
   monthFilter: string
+  dateFilter: string
+  dateFromFilter: string
+  dateToFilter: string
   nodeFilter: string
   deviceFilter: string
   onFilterChange: (patch: {
     searchQuery?: string
     categoryFilter?: string
     monthFilter?: string
+    dateFilter?: string
+    dateFromFilter?: string
+    dateToFilter?: string
     nodeFilter?: string
     deviceFilter?: string
   }) => void
@@ -108,6 +122,26 @@ function CategoryIcon({ category, className = 'h-4 w-4' }: { category: string; c
 }
 
 const IMAGE_THUMB_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'])
+
+function shortMobileCategoryLabel(rawLabel: string): string {
+  const clean = String(rawLabel || '')
+    .replace(/\s*[（(][^）)]*[）)]\s*/g, '')
+    .trim()
+  return clean || rawLabel
+}
+
+function toLocalDateKey(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function shiftDateKey(offsetDays: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() + offsetDays)
+  return toLocalDateKey(d)
+}
 
 async function readAllEntriesFromDrop(dt: DataTransfer): Promise<Array<{ file: File; relativePath: string }>> {
   const items = Array.from(dt.items || [])
@@ -171,6 +205,9 @@ async function readAllEntriesFromDrop(dt: DataTransfer): Promise<Array<{ file: F
 export function FilesPage({
   user,
   files,
+  folders,
+  currentFolder,
+  onCurrentFolderChange,
   summary,
   nodes,
   capabilities,
@@ -181,6 +218,9 @@ export function FilesPage({
   searchQuery,
   categoryFilter,
   monthFilter,
+  dateFilter,
+  dateFromFilter,
+  dateToFilter,
   nodeFilter,
   deviceFilter,
   onFilterChange,
@@ -249,28 +289,61 @@ export function FilesPage({
     }
   }
 
-  const hasActiveFilter = Boolean(
-    searchQuery.trim() || categoryFilter || monthFilter || nodeFilter || deviceFilter
-  )
   const [targetNode, setTargetNode] = useState('auto')
   const [allowedUsers, setAllowedUsers] = useState<string[]>([])
   const [showVisibilityPicker, setShowVisibilityPicker] = useState(false)
+  const hasActiveFilter = Boolean(
+    searchQuery.trim() ||
+      categoryFilter ||
+      monthFilter ||
+      dateFilter ||
+      dateFromFilter ||
+      dateToFilter ||
+      nodeFilter ||
+      deviceFilter
+  )
+  const hasExtraFilters = Boolean(
+    monthFilter ||
+      dateFilter ||
+      dateFromFilter ||
+      dateToFilter ||
+      nodeFilter ||
+      deviceFilter ||
+      allowedUsers.length > 0 ||
+      targetNode !== 'auto'
+  )
   const [showFilters, setShowFilters] = useState(false)
   const [dragging, setDragging] = useState(false)
   const dragDepthRef = useRef(0)
 
+  // Folder management & file move modals
+  const [createFolderModal, setCreateFolderModal] = useState<{ parent: string; name: string } | null>(null)
+  const [renameFolderModal, setRenameFolderModal] = useState<{ oldPath: string; newPath: string } | null>(null)
+  const [deleteFolderModal, setDeleteFolderModal] = useState<{
+    path: string
+    mode: 'move_to_parent' | 'delete_files'
+  } | null>(null)
+  const [moveFileModal, setMoveFileModal] = useState<{ rec: FileRecord; folderPath: string } | null>(null)
+  const [folderBusy, setFolderBusy] = useState(false)
+
   const onlineNodes = useMemo(() => nodes.filter((n) => n.online), [nodes])
+
+  const uploadPrefix = !hasActiveFilter && groupByFolder && currentFolder ? `${currentFolder}/` : ''
 
   const handleFilesSelected = (list: FileList | null) => {
     if (!list || list.length === 0) return
-    const items = Array.from(list).map((f) => ({
-      file: f,
-      relativePath: (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name,
-    }))
+    const items = Array.from(list).map((f) => {
+      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name
+      return {
+        file: f,
+        relativePath: uploadPrefix ? `${uploadPrefix}${rel}` : rel,
+      }
+    })
     onUploadFiles(items, targetNode, allowedUsers)
   }
 
   const handleDrop = async (e: React.DragEvent) => {
+    if (e.dataTransfer?.types?.includes('text/lfh-file-id')) return
     e.preventDefault()
     e.stopPropagation()
     dragDepthRef.current = 0
@@ -281,7 +354,120 @@ export function FilesPage({
       toast('未检测到可上传的文件', 'info')
       return
     }
-    onUploadFiles(items, targetNode, allowedUsers)
+    const prefixed = uploadPrefix
+      ? items.map((it) => ({ ...it, relativePath: `${uploadPrefix}${it.relativePath}` }))
+      : items
+    onUploadFiles(prefixed, targetNode, allowedUsers)
+  }
+
+  const handleMoveFile = async (rec: FileRecord, explicitTargetFolder?: string) => {
+    if (explicitTargetFolder !== undefined) {
+      const cleanTarget = explicitTargetFolder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+      const cleanCur = String(rec.folder_path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+      if (cleanTarget === cleanCur) return
+      try {
+        await api.moveFileToFolder(rec.id, cleanTarget)
+        toast(cleanTarget ? `已移动到 /${cleanTarget}` : '已移动到根目录', 'success')
+        onRefresh()
+      } catch (err) {
+        toast(err instanceof Error ? err.message : '移动文件失败', 'error')
+      }
+      return
+    }
+    setMoveFileModal({
+      rec,
+      folderPath: String(rec.folder_path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''),
+    })
+  }
+
+  const submitCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!createFolderModal) return
+    const cleanName = createFolderModal.name.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+    if (!cleanName) {
+      toast('请输入文件夹名称', 'error')
+      return
+    }
+    const fullPath = createFolderModal.parent ? `${createFolderModal.parent}/${cleanName}` : cleanName
+    setFolderBusy(true)
+    try {
+      const res = await api.createFolder(fullPath)
+      toast(`已创建文件夹 /${res.path}`, 'success')
+      setCreateFolderModal(null)
+      onRefresh()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '创建文件夹失败', 'error')
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
+  const submitRenameFolder = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!renameFolderModal) return
+    const oldP = renameFolderModal.oldPath.trim()
+    const newP = renameFolderModal.newPath.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+    if (!newP) {
+      toast('请输入新的文件夹路径', 'error')
+      return
+    }
+    setFolderBusy(true)
+    try {
+      const res = await api.renameFolder(oldP, newP)
+      toast(`已重命名为 /${res.path}（同步迁移 ${res.moved} 个文件）`, 'success')
+      if (currentFolder === oldP || currentFolder.startsWith(`${oldP}/`)) {
+        onCurrentFolderChange(`${newP}${currentFolder.slice(oldP.length)}`)
+      }
+      setRenameFolderModal(null)
+      onRefresh()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '重命名文件夹失败', 'error')
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
+  const submitDeleteFolder = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!deleteFolderModal) return
+    setFolderBusy(true)
+    try {
+      const res = await api.deleteFolder(deleteFolderModal.path, deleteFolderModal.mode)
+      toast(
+        deleteFolderModal.mode === 'delete_files'
+          ? `已删除文件夹及 ${res.affected} 个文件`
+          : `已移除文件夹，${res.affected} 个文件已移出目录`,
+        'success'
+      )
+      if (currentFolder === deleteFolderModal.path || currentFolder.startsWith(`${deleteFolderModal.path}/`)) {
+        const parts = deleteFolderModal.path.split('/')
+        parts.pop()
+        onCurrentFolderChange(parts.join('/'))
+      }
+      setDeleteFolderModal(null)
+      onRefresh()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '删除文件夹失败', 'error')
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
+  const submitMoveFile = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!moveFileModal) return
+    const cleanTarget = moveFileModal.folderPath.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+    setFolderBusy(true)
+    try {
+      await api.moveFileToFolder(moveFileModal.rec.id, cleanTarget)
+      toast(cleanTarget ? `已将「${moveFileModal.rec.name}」移至 /${cleanTarget}` : `已移至根目录`, 'success')
+      setMoveFileModal(null)
+      onRefresh()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '移动文件失败', 'error')
+    } finally {
+      setFolderBusy(false)
+    }
   }
 
   const toggleAllowedUser = (username: string) => {
@@ -298,6 +484,7 @@ export function FilesPage({
     <div
       className="relative space-y-4"
       onDragEnter={(e) => {
+        if (e.dataTransfer?.types?.includes('text/lfh-file-id')) return
         e.preventDefault()
         dragDepthRef.current++
         setDragging(true)
@@ -378,6 +565,19 @@ export function FilesPage({
             <FilePlus2 className="h-3.5 w-3.5" />
             <span>新建 TXT</span>
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setCreateFolderModal({
+                parent: !hasActiveFilter && groupByFolder ? currentFolder : '',
+                name: '',
+              })
+            }
+          >
+            <FolderPlus className="h-3.5 w-3.5 text-[#4aa1ec]" />
+            <span>新建文件夹</span>
+          </Button>
           {isAdmin && (
             <Button size="sm" variant="secondary" onClick={onOpenLocalImport}>
               <HardDrive className="h-3.5 w-3.5" />
@@ -388,28 +588,145 @@ export function FilesPage({
       </div>
 
       {/* Upload Routing & Search / Filter Toolbar */}
-      <Card className="p-3 sm:p-4 space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative flex-1 min-w-[200px]">
-            <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input
-              value={searchQuery}
-              onChange={(e) => onFilterChange({ searchQuery: e.target.value })}
-              placeholder="搜索文件名、目录路径或上传者..."
-              className="pl-8 h-9"
-            />
+      <Card
+        className={cn(
+          isMobile
+            ? 'rounded-2xl p-2.5 space-y-2.5 border-border/75 shadow-2xs'
+            : 'p-3 sm:p-4 space-y-3'
+        )}
+      >
+        {isMobile ? (
+          <div className="space-y-2">
+            {/* Mobile Row 1: Full-width iOS pill search bar */}
+            <div className="relative w-full">
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => onFilterChange({ searchQuery: e.target.value })}
+                placeholder="搜索文件名、目录或上传者"
+                className="h-9 w-full rounded-xl border-transparent bg-muted/65 pl-8.5 pr-8 text-[13px] shadow-none focus-visible:border-primary/40 focus-visible:bg-background"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  aria-label="清空搜索"
+                  onClick={() => onFilterChange({ searchQuery: '' })}
+                  className="absolute right-2.5 top-2.5 flex h-4 w-4 items-center justify-center rounded-full bg-muted-foreground/20 text-foreground hover:bg-muted-foreground/30"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+
+            {/* Mobile Row 2: Single balanced horizontal control strip */}
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setGroupByFolder(!groupByFolder)}
+                  disabled={hasActiveFilter}
+                  className={cn(
+                    'inline-flex h-7.5 items-center gap-1 rounded-lg border px-2.5 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50',
+                    groupByFolder && !hasActiveFilter
+                      ? 'border-border/80 bg-secondary text-secondary-foreground'
+                      : 'border-border/80 bg-background text-muted-foreground'
+                  )}
+                >
+                  <Folder className="h-3.5 w-3.5 text-[#4aa1ec]" />
+                  <span>{groupByFolder && !hasActiveFilter ? '按目录' : '平铺'}</span>
+                </button>
+
+                <div className="flex h-7.5 items-center rounded-lg border border-border/80 bg-muted/35 p-0.5 text-[11px]">
+                  {(
+                    [
+                      { id: 'md', label: '3列' },
+                      { id: 'lg', label: '2列' },
+                    ] as Array<{ id: AppleIconSize; label: string }>
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setIconSize(opt.id)}
+                      className={cn(
+                        'rounded-md px-2 py-0.5 cursor-pointer transition-colors',
+                        iconSize === opt.id || (iconSize === 'sm' && opt.id === 'md')
+                          ? 'bg-background text-foreground font-medium shadow-2xs'
+                          : 'text-muted-foreground'
+                      )}
+                      title={`切换为每行 ${opt.label}`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowFilters((v) => !v)}
+                  className={cn(
+                    'relative inline-flex h-7.5 items-center gap-1 rounded-lg border px-2.5 text-xs font-medium transition-colors cursor-pointer',
+                    showFilters || hasExtraFilters
+                      ? 'border-primary/40 bg-primary/10 text-primary'
+                      : 'border-border/80 bg-background text-foreground'
+                  )}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                  <span>筛选</span>
+                  {hasExtraFilters && !showFilters && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onRefresh}
+                  disabled={loading}
+                  aria-label="刷新列表"
+                  title="刷新列表"
+                  className="inline-flex h-7.5 w-7.5 items-center justify-center rounded-lg border border-border/80 bg-background text-muted-foreground hover:text-foreground disabled:opacity-50 cursor-pointer"
+                >
+                  <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+                </button>
+              </div>
+            </div>
           </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-full md:flex-1 min-w-[200px]">
+              <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => onFilterChange({ searchQuery: e.target.value })}
+                placeholder="搜索文件名、目录路径或上传者..."
+                className="pl-8 pr-8 h-9"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  aria-label="清空搜索"
+                  onClick={() => onFilterChange({ searchQuery: '' })}
+                  className="absolute right-2.5 top-2.5 flex h-4 w-4 items-center justify-center rounded-full bg-muted text-muted-foreground hover:text-foreground cursor-pointer"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
 
-          <Button
-            size="sm"
-            variant={showFilters ? 'secondary' : 'outline'}
-            onClick={() => setShowFilters((v) => !v)}
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            <span>筛选与路由</span>
-          </Button>
+            <Button
+              size="sm"
+              variant={showFilters || hasExtraFilters ? 'secondary' : 'outline'}
+              onClick={() => setShowFilters((v) => !v)}
+              className="relative"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              <span>筛选与路由</span>
+              {hasExtraFilters && !showFilters && (
+                <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+              )}
+            </Button>
 
-          {!isMobile && (
             <div className="flex items-center rounded-md border border-border p-0.5">
               <button
                 type="button"
@@ -434,52 +751,26 @@ export function FilesPage({
                 <LayoutGrid className="h-3.5 w-3.5" />
               </button>
             </div>
-          )}
 
-          {(viewMode === 'grid' || isMobile) && (
-            <>
-              <Button
-                size="sm"
-                variant={groupByFolder && !hasActiveFilter ? 'secondary' : 'outline'}
-                onClick={() => setGroupByFolder(!groupByFolder)}
-                disabled={hasActiveFilter}
-                title={
-                  hasActiveFilter
-                    ? '筛选或搜索时自动平铺显示匹配文件'
-                    : groupByFolder
-                    ? '按目录层级聚合（点击切换平铺）'
-                    : '全部平铺（点击按目录聚合）'
-                }
-              >
-                <Folder className="h-3.5 w-3.5 text-[#4aa1ec]" />
-                <span>{groupByFolder && !hasActiveFilter ? '按目录' : '平铺'}</span>
-              </Button>
+            {viewMode === 'grid' && (
+              <>
+                <Button
+                  size="sm"
+                  variant={groupByFolder && !hasActiveFilter ? 'secondary' : 'outline'}
+                  onClick={() => setGroupByFolder(!groupByFolder)}
+                  disabled={hasActiveFilter}
+                  title={
+                    hasActiveFilter
+                      ? '筛选或搜索时自动平铺显示匹配文件'
+                      : groupByFolder
+                      ? '按目录层级聚合（点击切换平铺）'
+                      : '全部平铺（点击按目录聚合）'
+                  }
+                >
+                  <Folder className="h-3.5 w-3.5 text-[#4aa1ec]" />
+                  <span>{groupByFolder && !hasActiveFilter ? '按目录' : '平铺'}</span>
+                </Button>
 
-              {isMobile ? (
-                <div className="flex items-center rounded-md border border-border p-0.5 text-[11px]">
-                  {(
-                    [
-                      { id: 'md', label: '3列' },
-                      { id: 'lg', label: '2列' },
-                    ] as Array<{ id: AppleIconSize; label: string }>
-                  ).map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setIconSize(opt.id)}
-                      className={cn(
-                        'rounded px-2 py-1 cursor-pointer transition-colors',
-                        (iconSize === opt.id || (iconSize === 'sm' && opt.id === 'md'))
-                          ? 'bg-accent text-accent-foreground font-medium'
-                          : 'text-muted-foreground hover:text-foreground'
-                      )}
-                      title={`切换为每行 ${opt.label}`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              ) : (
                 <div className="flex items-center rounded-md border border-border p-0.5 text-[11px]">
                   {(
                     [
@@ -504,54 +795,233 @@ export function FilesPage({
                     </button>
                   ))}
                 </div>
-              )}
-            </>
-          )}
-
-          <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading} title="刷新列表">
-            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-          </Button>
-        </div>
-
-        {/* Category Quick Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-          <button
-            type="button"
-            onClick={() => onFilterChange({ categoryFilter: '' })}
-            className={cn(
-              'shrink-0 rounded-full border px-2.5 py-1 text-xs transition-colors cursor-pointer',
-              !categoryFilter
-                ? 'border-primary bg-primary text-primary-foreground'
-                : 'border-border bg-background text-muted-foreground hover:text-foreground'
+              </>
             )}
-          >
-            全部 ({summary?.total_count ?? files.length})
-          </button>
-          {categoryBuckets.map((b) => (
+
+            <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading} title="刷新列表">
+              <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+            </Button>
+          </div>
+        )}
+
+        {/* Category Quick Pills (hidden scrollbar + right fade on mobile) */}
+        <div className="relative">
+          <div className="no-scrollbar flex items-center gap-1.5 overflow-x-auto pr-5">
             <button
-              key={b.key}
               type="button"
-              onClick={() => onFilterChange({ categoryFilter: categoryFilter === b.key ? '' : b.key })}
+              onClick={() => onFilterChange({ categoryFilter: '' })}
               className={cn(
-                'shrink-0 rounded-full border px-2.5 py-1 text-xs transition-colors cursor-pointer tabular-nums',
-                categoryFilter === b.key
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                'shrink-0 rounded-full border border-transparent px-2.5 py-1 text-[11px] sm:text-xs transition-colors cursor-pointer tabular-nums',
+                !categoryFilter
+                  ? 'bg-primary text-primary-foreground font-medium shadow-2xs'
+                  : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
               )}
             >
-              {b.label || categoryNames[b.key] || b.key} ({b.count})
+              全部 ({summary?.total_count ?? files.length})
             </button>
-          ))}
+            {categoryBuckets.map((b) => {
+              const rawLabel = b.label || categoryNames[b.key] || b.key
+              const label = isMobile ? shortMobileCategoryLabel(rawLabel) : rawLabel
+              return (
+                <button
+                  key={b.key}
+                  type="button"
+                  onClick={() => onFilterChange({ categoryFilter: categoryFilter === b.key ? '' : b.key })}
+                  className={cn(
+                    'shrink-0 rounded-full border border-transparent px-2.5 py-1 text-[11px] sm:text-xs transition-colors cursor-pointer tabular-nums',
+                    categoryFilter === b.key
+                      ? 'bg-primary text-primary-foreground font-medium shadow-2xs'
+                      : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
+                  )}
+                >
+                  {label} ({b.count})
+                </button>
+              )
+            })}
+          </div>
+          <div className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-card to-transparent" />
         </div>
+
+        {/* Active Date / Range Summary Strip */}
+        {(dateFilter || dateFromFilter || dateToFilter || monthFilter) && (
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <Badge variant="default" className="gap-1.5 py-0.5">
+              <Calendar className="h-3 w-3" />
+              <span>
+                {dateFilter
+                  ? `精确日期：${dateFilter}`
+                  : dateFromFilter || dateToFilter
+                  ? `日期区间：${dateFromFilter || '...'} 至 ${dateToFilter || '...'}`
+                  : `归档月份：${monthFilter}`}
+              </span>
+              <button
+                type="button"
+                aria-label="清除日期筛选"
+                onClick={() =>
+                  onFilterChange({
+                    monthFilter: '',
+                    dateFilter: '',
+                    dateFromFilter: '',
+                    dateToFilter: '',
+                  })
+                }
+                className="hover:opacity-75 cursor-pointer"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </Badge>
+          </div>
+        )}
 
         {/* Collapsible Filter + Upload Target Bar */}
         {showFilters && (
           <div className="grid gap-2.5 border-t border-border pt-3 sm:grid-cols-2 lg:grid-cols-5 text-xs">
+            {/* Exact Day & Date Range Picker Block */}
+            <div className="sm:col-span-2 lg:col-span-5 rounded-xl border border-border/80 bg-muted/25 p-2.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+                  <Calendar className="h-3.5 w-3.5 text-primary" />
+                  <span>按日期筛选（支持精确到日或起止范围）</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  {[
+                    {
+                      label: '全部日期',
+                      active: !dateFilter && !dateFromFilter && !dateToFilter && !monthFilter,
+                      onClick: () =>
+                        onFilterChange({
+                          monthFilter: '',
+                          dateFilter: '',
+                          dateFromFilter: '',
+                          dateToFilter: '',
+                        }),
+                    },
+                    {
+                      label: '今天',
+                      active: dateFilter === shiftDateKey(0),
+                      onClick: () =>
+                        onFilterChange({
+                          monthFilter: '',
+                          dateFilter: shiftDateKey(0),
+                          dateFromFilter: '',
+                          dateToFilter: '',
+                        }),
+                    },
+                    {
+                      label: '昨天',
+                      active: dateFilter === shiftDateKey(-1),
+                      onClick: () =>
+                        onFilterChange({
+                          monthFilter: '',
+                          dateFilter: shiftDateKey(-1),
+                          dateFromFilter: '',
+                          dateToFilter: '',
+                        }),
+                    },
+                    {
+                      label: '近 7 天',
+                      active:
+                        dateFromFilter === shiftDateKey(-6) && dateToFilter === shiftDateKey(0),
+                      onClick: () =>
+                        onFilterChange({
+                          monthFilter: '',
+                          dateFilter: '',
+                          dateFromFilter: shiftDateKey(-6),
+                          dateToFilter: shiftDateKey(0),
+                        }),
+                    },
+                    {
+                      label: '近 30 天',
+                      active:
+                        dateFromFilter === shiftDateKey(-29) && dateToFilter === shiftDateKey(0),
+                      onClick: () =>
+                        onFilterChange({
+                          monthFilter: '',
+                          dateFilter: '',
+                          dateFromFilter: shiftDateKey(-29),
+                          dateToFilter: shiftDateKey(0),
+                        }),
+                    },
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={preset.onClick}
+                      className={cn(
+                        'rounded-md border px-2 py-0.5 text-[11px] cursor-pointer transition-colors',
+                        preset.active
+                          ? 'border-primary bg-primary text-primary-foreground font-medium'
+                          : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                      )}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div className="space-y-1">
+                  <div className="text-[11px] text-muted-foreground">精确某一天</div>
+                  <Input
+                    type="date"
+                    value={dateFilter}
+                    onChange={(e) =>
+                      onFilterChange({
+                        monthFilter: '',
+                        dateFilter: e.target.value,
+                        dateFromFilter: '',
+                        dateToFilter: '',
+                      })
+                    }
+                    className="h-8 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-[11px] text-muted-foreground">开始日期（含）</div>
+                  <Input
+                    type="date"
+                    value={dateFromFilter}
+                    onChange={(e) =>
+                      onFilterChange({
+                        monthFilter: '',
+                        dateFilter: '',
+                        dateFromFilter: e.target.value,
+                      })
+                    }
+                    className="h-8 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-[11px] text-muted-foreground">结束日期（含）</div>
+                  <Input
+                    type="date"
+                    value={dateToFilter}
+                    onChange={(e) =>
+                      onFilterChange({
+                        monthFilter: '',
+                        dateFilter: '',
+                        dateToFilter: e.target.value,
+                      })
+                    }
+                    className="h-8 text-xs"
+                  />
+                </div>
+              </div>
+            </div>
+
             <div className="space-y-1">
               <div className="text-[11px] text-muted-foreground">按归档月份筛选</div>
               <Select
                 value={monthFilter}
-                onChange={(e) => onFilterChange({ monthFilter: e.target.value })}
+                onChange={(e) =>
+                  onFilterChange({
+                    monthFilter: e.target.value,
+                    dateFilter: '',
+                    dateFromFilter: '',
+                    dateToFilter: '',
+                  })
+                }
                 className="w-full h-8 text-xs"
               >
                 <option value="">全部月份</option>
@@ -662,11 +1132,11 @@ export function FilesPage({
       </Card>
 
       {/* File List / Grid */}
-      {files.length === 0 ? (
+      {files.length === 0 && (!groupByFolder || hasActiveFilter || (folders.length === 0 && !currentFolder)) ? (
         <Card className="p-10 text-center space-y-2">
           <div className="text-sm font-medium">暂无匹配文件</div>
           <p className="text-xs text-muted-foreground">
-            可以直接将本地文件或文件夹拖拽到此处上传，或点击上方按钮入库。
+            可以直接将本地文件或文件夹拖拽到此处上传，或点击上方「上传文件 / 新建文件夹」。
           </p>
         </Card>
       ) : viewMode === 'table' && !isMobile ? (
@@ -812,6 +1282,17 @@ export function FilesPage({
                           >
                             <Download className="h-3.5 w-3.5" />
                           </Button>
+                          {(user.role === 'admin' || rec.uploader === user.username) && !rec.mount_id && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => void handleMoveFile(rec)}
+                              title="移动到文件夹"
+                            >
+                              <FolderInput className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -834,6 +1315,9 @@ export function FilesPage({
         /* Apple Finder / iPadOS Files style borderless icon canvas */
         <AppleFilesGrid
           files={files}
+          folders={folders}
+          currentFolder={currentFolder}
+          onCurrentFolderChange={onCurrentFolderChange}
           user={user}
           capabilities={capabilities}
           writableMountIds={writableMountIds}
@@ -845,9 +1329,199 @@ export function FilesPage({
           onPreviewFile={onPreviewFile}
           onEditFile={onEditFile}
           onDownloadFile={onDownloadFile}
+          onCreateFolder={(parent) => setCreateFolderModal({ parent, name: '' })}
+          onMoveFile={(rec, target) => void handleMoveFile(rec, target)}
+          onRenameFolder={(fp) => setRenameFolderModal({ oldPath: fp, newPath: fp })}
+          onDeleteFolder={(fp) => setDeleteFolderModal({ path: fp, mode: 'move_to_parent' })}
           onRefresh={onRefresh}
         />
       )}
+
+      {/* Create Folder Dialog */}
+      <Dialog
+        open={Boolean(createFolderModal)}
+        onClose={() => setCreateFolderModal(null)}
+        size="sm"
+        title="新建文件夹"
+        description={
+          createFolderModal?.parent
+            ? `将在 /${createFolderModal.parent} 下创建子目录（支持用 / 一次创建多级）`
+            : '支持输入多级路径，例如：考研数学/线性代数'
+        }
+      >
+        {createFolderModal && (
+          <form onSubmit={submitCreateFolder} className="space-y-3 text-xs">
+            <div className="space-y-1">
+              <label className="font-medium">文件夹名称</label>
+              <Input
+                value={createFolderModal.name}
+                onChange={(e) => setCreateFolderModal({ ...createFolderModal, name: e.target.value })}
+                placeholder="例如：项目归档"
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button type="button" size="sm" variant="outline" onClick={() => setCreateFolderModal(null)}>
+                取消
+              </Button>
+              <Button type="submit" size="sm" disabled={folderBusy}>
+                {folderBusy ? '创建中...' : '确定创建'}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Dialog>
+
+      {/* Rename / Move Folder Dialog */}
+      <Dialog
+        open={Boolean(renameFolderModal)}
+        onClose={() => setRenameFolderModal(null)}
+        size="sm"
+        title="重命名 / 移动文件夹"
+        description="修改目录路径将自动同步更新其下所有文件与子目录归属"
+      >
+        {renameFolderModal && (
+          <form onSubmit={submitRenameFolder} className="space-y-3 text-xs">
+            <div className="space-y-1">
+              <label className="font-medium">当前路径</label>
+              <Input value={renameFolderModal.oldPath} disabled className="font-mono" />
+            </div>
+            <div className="space-y-1">
+              <label className="font-medium">新路径</label>
+              <Input
+                value={renameFolderModal.newPath}
+                onChange={(e) => setRenameFolderModal({ ...renameFolderModal, newPath: e.target.value })}
+                className="font-mono"
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button type="button" size="sm" variant="outline" onClick={() => setRenameFolderModal(null)}>
+                取消
+              </Button>
+              <Button type="submit" size="sm" disabled={folderBusy}>
+                {folderBusy ? '保存中...' : '确认重命名'}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Dialog>
+
+      {/* Delete Folder Confirm Dialog */}
+      <Dialog
+        open={Boolean(deleteFolderModal)}
+        onClose={() => setDeleteFolderModal(null)}
+        size="sm"
+        title={`删除文件夹 — /${deleteFolderModal?.path || ''}`}
+        description="请选择如何处理该文件夹内的文件"
+      >
+        {deleteFolderModal && (
+          <form onSubmit={submitDeleteFolder} className="space-y-3 text-xs">
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 rounded-lg border border-border p-2.5 cursor-pointer hover:bg-muted/40">
+                <input
+                  type="radio"
+                  name="del-folder-mode"
+                  checked={deleteFolderModal.mode === 'move_to_parent'}
+                  onChange={() => setDeleteFolderModal({ ...deleteFolderModal, mode: 'move_to_parent' })}
+                  className="mt-0.5"
+                />
+                <div>
+                  <div className="font-medium">仅移除文件夹（推荐）</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    目录内文件自动移回上级目录或根目录，不会丢失任何数据。
+                  </div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 cursor-pointer hover:bg-destructive/10">
+                <input
+                  type="radio"
+                  name="del-folder-mode"
+                  checked={deleteFolderModal.mode === 'delete_files'}
+                  onChange={() => setDeleteFolderModal({ ...deleteFolderModal, mode: 'delete_files' })}
+                  className="mt-0.5"
+                />
+                <div>
+                  <div className="font-medium text-destructive">彻底删除文件夹及其中所有文件</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    不可撤销！该目录及全部子目录内的文件都会被永久清除。
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button type="button" size="sm" variant="outline" onClick={() => setDeleteFolderModal(null)}>
+                取消
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                variant={deleteFolderModal.mode === 'delete_files' ? 'destructive' : 'default'}
+                disabled={folderBusy}
+              >
+                {folderBusy ? '处理中...' : '确认执行'}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Dialog>
+
+      {/* Move File to Folder Dialog */}
+      <Dialog
+        open={Boolean(moveFileModal)}
+        onClose={() => setMoveFileModal(null)}
+        size="sm"
+        title={`移动文件 — ${moveFileModal?.rec.name || ''}`}
+        description="选择已有文件夹或输入新目录路径（留空表示移回根目录）"
+      >
+        {moveFileModal && (
+          <form onSubmit={submitMoveFile} className="space-y-3 text-xs">
+            <div className="space-y-1">
+              <label className="font-medium">快速选择已有目录</label>
+              <Select
+                value={folders.includes(moveFileModal.folderPath) ? moveFileModal.folderPath : '__custom__'}
+                onChange={(e) => {
+                  if (e.target.value !== '__custom__') {
+                    setMoveFileModal({ ...moveFileModal, folderPath: e.target.value })
+                  }
+                }}
+                className="w-full text-xs"
+              >
+                <option value="">/（根目录）</option>
+                {folders.map((fp) => (
+                  <option key={fp} value={fp}>
+                    /{fp}
+                  </option>
+                ))}
+                {moveFileModal.folderPath !== '' && !folders.includes(moveFileModal.folderPath) && (
+                  <option value="__custom__">自定义：/{moveFileModal.folderPath}</option>
+                )}
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="font-medium">或直接输入目标路径</label>
+              <Input
+                value={moveFileModal.folderPath}
+                onChange={(e) => setMoveFileModal({ ...moveFileModal, folderPath: e.target.value })}
+                placeholder="留空表示根目录，多级用 / 分隔"
+                className="font-mono"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button type="button" size="sm" variant="outline" onClick={() => setMoveFileModal(null)}>
+                取消
+              </Button>
+              <Button type="submit" size="sm" disabled={folderBusy}>
+                {folderBusy ? '移动中...' : '确认移动'}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Dialog>
     </div>
   )
 }

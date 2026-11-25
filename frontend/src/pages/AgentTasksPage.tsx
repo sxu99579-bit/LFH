@@ -11,9 +11,13 @@ import {
   Circle,
   Clock,
   Copy,
+  Download,
+  Eye,
+  FileText,
   Filter,
   Folder,
   GitBranch,
+  Info,
   ListTodo,
   Loader2,
   MessageSquare,
@@ -31,7 +35,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { cn, copyTextToClipboard, formatRelativeTime } from '@/lib/utils'
+import { canPreviewFile, cn, copyTextToClipboard, formatRelativeTime, formatSize } from '@/lib/utils'
 import type {
   AgentKeyItem,
   AgentPresenceItem,
@@ -40,6 +44,7 @@ import type {
   AgentTaskPriority,
   AgentTaskStatus,
   AgentTaskSummary,
+  FileRecord,
   ServerInfo,
   User,
 } from '@/types'
@@ -71,9 +76,14 @@ import {
 interface AgentTasksPageProps {
   user: User
   info: ServerInfo | null
+  files: FileRecord[]
+  folders: string[]
   isMobile: boolean
   onSummaryChange?: (summary: AgentTaskSummary) => void
   onOpenAgentSettings?: () => void
+  onPreviewFile: (rec: FileRecord) => void
+  onDownloadFile: (rec: FileRecord) => void
+  onInspectFile: (rec: FileRecord) => void
 }
 
 type StatusFilter = 'all' | 'pending' | 'in_progress' | 'scheduled' | 'paused' | 'done'
@@ -162,9 +172,14 @@ function renderCommentBody(body: string) {
 export function AgentTasksPage({
   user,
   info,
+  files,
+  folders,
   isMobile,
   onSummaryChange,
   onOpenAgentSettings,
+  onPreviewFile,
+  onDownloadFile,
+  onInspectFile,
 }: AgentTasksPageProps) {
   const { toast } = useToast()
 
@@ -610,6 +625,103 @@ export function AgentTasksPage({
 
   const activeFilterAgent = agentFilterId ? agentLookup.byId.get(agentFilterId) : undefined
 
+  const resolveOutputFile = useCallback(
+    (refPath: string): FileRecord | undefined => {
+      const clean = String(refPath || '').trim().replace(/\\/g, '/').replace(/^\/+/, '')
+      if (!clean) return undefined
+      const byId = files.find((f) => f.id === clean)
+      if (byId) return byId
+      const byExactPath = files.find((f) => {
+        const fp = String(f.folder_path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+        const full = fp ? `${fp}/${f.name}` : f.name
+        return full === clean
+      })
+      if (byExactPath) return byExactPath
+      const byName = files.find((f) => f.name === clean)
+      if (byName) return byName
+      const base = clean.split('/').pop() || clean
+      return files.find((f) => f.name === base)
+    },
+    [files]
+  )
+
+  const renderOutputFileChip = (refPath: string, keyVal: string | number) => {
+    const matched = resolveOutputFile(refPath)
+    if (!matched) {
+      return (
+        <span
+          key={keyVal}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-background px-2.5 py-1 text-[11px] font-mono text-foreground shadow-2xs"
+        >
+          <FileText className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+          <span className="break-all">{refPath}</span>
+          <button
+            type="button"
+            onClick={async () => {
+              const ok = await copyTextToClipboard(refPath)
+              toast(ok ? '已复制文件路径' : '复制失败', ok ? 'success' : 'error')
+            }}
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer"
+            title="复制路径"
+          >
+            <Copy className="h-3 w-3" />
+          </button>
+        </span>
+      )
+    }
+
+    const previewable = canPreviewFile(matched)
+    return (
+      <span
+        key={keyVal}
+        className="inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-background px-2.5 py-1 text-[11px] text-foreground shadow-2xs"
+      >
+        <FileText className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+        <button
+          type="button"
+          onClick={() => (previewable ? onPreviewFile(matched) : onInspectFile(matched))}
+          className="font-medium hover:text-primary hover:underline break-all text-left cursor-pointer"
+          title="点击直接打开"
+        >
+          {matched.folder_path ? `${matched.folder_path}/${matched.name}` : matched.name}
+        </button>
+        <span className="text-[10px] text-muted-foreground tabular-nums">
+          ({formatSize(matched.size)})
+        </span>
+        <span className="inline-flex items-center gap-0.5 ml-0.5 border-l border-border/70 pl-1.5">
+          {previewable && (
+            <button
+              type="button"
+              onClick={() => onPreviewFile(matched)}
+              className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10 cursor-pointer"
+              title="预览文件"
+            >
+              <Eye className="h-3 w-3" />
+              <span>预览</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onDownloadFile(matched)}
+            className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium hover:bg-accent cursor-pointer"
+            title="下载文件"
+          >
+            <Download className="h-3 w-3" />
+            <span>下载</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onInspectFile(matched)}
+            className="inline-flex items-center rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer"
+            title="查看文件详情与版本"
+          >
+            <Info className="h-3 w-3" />
+          </button>
+        </span>
+      </span>
+    )
+  }
+
   return (
     <div className="space-y-5">
       {/* Page Header */}
@@ -700,17 +812,29 @@ export function AgentTasksPage({
             {composerExpanded && (
               <CardContent>
                 <form onSubmit={handleCreateTask} className="space-y-3 text-xs">
-                  {/* Title input + @ mention autocomplete */}
-                  <div className="relative space-y-1.5">
+                  {/* Title input + @ mention autocomplete + quick agent pills */}
+                  <div className="relative space-y-2">
                     <div className="flex flex-wrap gap-2">
                       <div className="relative flex-1 min-w-[220px]">
                         <Input
                           id="lfh-task-title-input"
                           value={newTitle}
                           onChange={(e) => handleTitleChange(e.target.value)}
-                          placeholder="输入任务标题，例如：整理项目周报汇总并输出 Markdown，支持输入 @ 选 Agent"
-                          className="h-9 text-sm"
+                          placeholder="输入任务标题，例如：整理项目周报汇总并输出 Markdown，支持 @ 选 Agent"
+                          className="h-9 pr-16 text-sm"
                         />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setComposerMentionQuery((prev) => (prev === null ? '' : null))
+                            focusTitleInput()
+                          }}
+                          className="absolute right-1.5 top-1.5 inline-flex h-6 items-center gap-0.5 rounded-md border border-border bg-muted/70 px-1.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer"
+                          title="按 Agent 选人"
+                        >
+                          <AtSign className="h-3 w-3 text-primary" />
+                          <span>选人</span>
+                        </button>
                         {composerMentionQuery !== null && filteredAgentsForComposer.length > 0 && (
                           <div className="absolute left-0 right-0 top-10 z-30 max-h-56 overflow-y-auto rounded-lg border border-border bg-card p-1.5 shadow-xl space-y-1">
                             <div className="px-2 py-0.5 text-[10px] text-muted-foreground">
@@ -749,7 +873,7 @@ export function AgentTasksPage({
                       <Select
                         value={newAssignedId}
                         onChange={(e) => setNewAssignedId(e.target.value)}
-                        className="h-9 text-xs sm:w-52"
+                        className="h-9 text-xs w-full sm:w-52"
                         title="定向指派对象"
                       >
                         <option value="">全员自由抢单（不指定）</option>
@@ -760,6 +884,36 @@ export function AgentTasksPage({
                         ))}
                       </Select>
                     </div>
+
+                    {sortedAgents.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[11px] text-muted-foreground mr-0.5">快捷指派：</span>
+                        {sortedAgents.slice(0, 6).map((item) => {
+                          const picked = newAssignedId === item.key.id
+                          return (
+                            <button
+                              key={`quick-${item.key.id}`}
+                              type="button"
+                              onClick={() => setNewAssignedId((prev) => (prev === item.key.id ? '' : item.key.id))}
+                              className={cn(
+                                'inline-flex items-center gap-1.5 rounded-full border pl-1 pr-2 py-0.5 text-[11px] transition-colors cursor-pointer',
+                                picked
+                                  ? 'border-primary bg-primary/12 text-primary font-medium'
+                                  : 'border-border bg-background/80 text-muted-foreground hover:bg-accent hover:text-foreground'
+                              )}
+                            >
+                              <AgentAvatarBadge
+                                agentKey={item.key}
+                                onlineStatus={item.status}
+                                size="xs"
+                                showDeviceCorner={false}
+                              />
+                              <span>@{agentDisplayName(item.key)}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
 
                     {selectedAssignedAgent && (
                       <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/8 px-2.5 py-1.5">
@@ -796,14 +950,14 @@ export function AgentTasksPage({
                     className="min-h-[60px] text-xs"
                   />
 
-                  {/* Task Options Grid */}
-                  <div className="flex flex-wrap items-center gap-2.5">
+                  {/* Unified Composer Options Toolbar */}
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-muted/35 p-2">
                     <div className="flex items-center gap-1.5">
-                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0 ml-1" />
                       <Select
                         value={schedulePreset}
                         onChange={(e) => setSchedulePreset(e.target.value as SchedulePreset)}
-                        className="h-8 text-xs"
+                        className="h-8 text-xs bg-background"
                       >
                         <option value="now">立即发布</option>
                         <option value="5m">5 分钟后激活</option>
@@ -818,14 +972,14 @@ export function AgentTasksPage({
                         type="datetime-local"
                         value={customScheduleAt}
                         onChange={(e) => setCustomScheduleAt(e.target.value)}
-                        className="h-8 w-48 text-xs"
+                        className="h-8 w-48 bg-background text-xs"
                       />
                     )}
 
                     <Select
                       value={newPriority}
                       onChange={(e) => setNewPriority(e.target.value as AgentTaskPriority)}
-                      className="h-8 text-xs"
+                      className="h-8 bg-background text-xs"
                       title="任务优先级"
                     >
                       <option value="normal">普通优先级</option>
@@ -833,23 +987,29 @@ export function AgentTasksPage({
                       <option value="urgent">紧急插队</option>
                     </Select>
 
-                    <div className="relative flex items-center">
-                      <Folder className="absolute left-2.5 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                    <div className="relative flex items-center flex-1 sm:flex-initial min-w-[160px]">
+                      <Folder className="absolute left-2.5 h-3.5 w-3.5 text-[#4aa1ec] pointer-events-none" />
                       <Input
+                        list="lfh-task-folder-list"
                         value={newFolderPrefix}
                         onChange={(e) => setNewFolderPrefix(e.target.value)}
-                        placeholder="限定目录前缀（可选）"
-                        className="h-8 w-44 pl-8 text-xs font-mono"
+                        placeholder="选择或输入目录前缀（可选）"
+                        className="h-8 w-full sm:w-48 bg-background pl-8 text-xs font-mono"
                       />
+                      <datalist id="lfh-task-folder-list">
+                        {folders.map((fp) => (
+                          <option key={fp} value={fp} />
+                        ))}
+                      </datalist>
                     </div>
 
-                    <div className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1">
+                    <div className="flex h-8 items-center gap-2 rounded-md border border-border bg-background px-2.5">
                       <GitBranch className="h-3.5 w-3.5 text-primary" />
                       <span>允许拆块协同</span>
                       <Switch checked={newAllowSplit} onCheckedChange={setNewAllowSplit} />
                     </div>
 
-                    <Button type="submit" size="sm" disabled={creatingTask} className="ml-auto">
+                    <Button type="submit" size="sm" disabled={creatingTask} className="h-8 w-full sm:w-auto sm:ml-auto">
                       {creatingTask ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : schedulePreset !== 'now' ? (
@@ -966,7 +1126,7 @@ export function AgentTasksPage({
                     key={task.id}
                     className={cn(
                       'transition-colors',
-                      task.status === 'done' && 'opacity-85',
+                      task.status === 'done' && 'border-emerald-500/35',
                       task.status === 'paused' && 'border-amber-500/50'
                     )}
                   >
@@ -1177,13 +1337,13 @@ export function AgentTasksPage({
                             </div>
                           )}
                           {task.output_files && task.output_files.length > 0 && (
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="text-[11px] text-muted-foreground">产出文件：</span>
-                              {task.output_files.map((fp, idx) => (
-                                <Badge key={idx} variant="success" className="font-mono text-[10px]">
-                                  {fp}
-                                </Badge>
-                              ))}
+                            <div className="space-y-1.5 pt-0.5">
+                              <div className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                                产出文件（点击可直接预览 / 下载）：
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {task.output_files.map((fp, idx) => renderOutputFileChip(fp, idx))}
+                              </div>
                             </div>
                           )}
                         </div>
@@ -1238,8 +1398,8 @@ export function AgentTasksPage({
                                         </div>
                                       )}
                                       {st.output_file && (
-                                        <div className="text-[10px] font-mono text-muted-foreground mt-0.5">
-                                          产物：{st.output_file}
+                                        <div className="mt-1">
+                                          {renderOutputFileChip(st.output_file, `sub-${st.id}`)}
                                         </div>
                                       )}
                                     </div>

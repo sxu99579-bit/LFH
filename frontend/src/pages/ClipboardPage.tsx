@@ -219,28 +219,41 @@ export function ClipboardPage({
             <div className="space-y-2.5">
               {clipboardFiles.map((rec) => {
                 const isTextLike = rec.category === 'doc' || rec.category === 'code' || rec.ext === 'txt' || rec.ext === 'md'
+                const uploaderText = String(rec.uploader || '').trim()
+                const devText = String(rec.device_name || '').trim()
+                const showDev = Boolean(
+                  devText &&
+                  !uploaderText.toLowerCase().includes(devText.toLowerCase()) &&
+                  (!rec.node_name || !devText.toLowerCase().includes(rec.node_name.toLowerCase()))
+                )
                 return (
                   <Card key={rec.id} className="p-3.5 hover:border-primary/40 transition-colors">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium">{rec.name}</span>
-                          <Badge variant="outline" className="tabular-nums">
+                    <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0 flex-1 space-y-1.5">
+                        <div className="text-sm font-medium leading-snug break-all sm:truncate" title={rec.name}>
+                          {rec.name}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <Badge variant="outline" className="tabular-nums whitespace-nowrap shrink-0">
                             {formatSize(rec.size)}
                           </Badge>
-                          <Badge variant="secondary">{rec.node_name || '本机'}</Badge>
-                        </div>
-                        <div className="text-[11px] text-muted-foreground">
-                          来自 {rec.uploader}
-                          {rec.device_name ? ` (${rec.device_name})` : ''} · {formatTime(rec.uploaded_at)}
+                          <Badge variant="secondary" className="whitespace-nowrap shrink-0">
+                            {rec.node_name || '本机'}
+                          </Badge>
+                          <span className="truncate">
+                            来自 {uploaderText}
+                            {showDev ? ` (${devText})` : ''}
+                          </span>
+                          <span className="tabular-nums whitespace-nowrap">· {formatTime(rec.uploaded_at)}</span>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-border/60 pt-2 sm:border-t-0 sm:pt-0 shrink-0">
                         {isTextLike && (
                           <Button
                             size="xs"
                             variant="secondary"
+                            className="whitespace-nowrap shrink-0"
                             disabled={copyingId === rec.id}
                             onClick={() => copyFileText(rec)}
                           >
@@ -249,21 +262,21 @@ export function ClipboardPage({
                           </Button>
                         )}
                         {canPreviewFile(rec) && (
-                          <Button size="xs" variant="outline" onClick={() => onPreviewFile(rec)}>
+                          <Button size="xs" variant="outline" className="whitespace-nowrap shrink-0" onClick={() => onPreviewFile(rec)}>
                             <Eye className="h-3 w-3" />
                             <span>预览</span>
                           </Button>
                         )}
-                        <Button size="xs" variant="ghost" onClick={() => onDownloadFile(rec)} title="下载">
+                        <Button size="xs" variant="ghost" className="shrink-0" onClick={() => onDownloadFile(rec)} title="下载">
                           <Download className="h-3.5 w-3.5" />
                         </Button>
-                        <Button size="xs" variant="ghost" onClick={() => onInspectFile(rec)} title="详情">
+                        <Button size="xs" variant="ghost" className="shrink-0" onClick={() => onInspectFile(rec)} title="详情">
                           <Info className="h-3.5 w-3.5" />
                         </Button>
                         <Button
                           size="xs"
                           variant="ghost"
-                          className="text-destructive hover:text-destructive"
+                          className="shrink-0 text-destructive hover:text-destructive"
                           onClick={() => handleDelete(rec)}
                           title="删除"
                         >

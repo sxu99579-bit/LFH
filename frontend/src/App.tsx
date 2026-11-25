@@ -58,11 +58,16 @@ function WorkspaceApp() {
   const [capabilities, setCapabilities] = useState<ClusterCapabilityView[]>([])
   const [selectableUsers, setSelectableUsers] = useState<Array<{ username: string; role: string }>>([])
   const [writableMountIds, setWritableMountIds] = useState<Set<string>>(() => new Set())
+  const [folders, setFolders] = useState<string[]>([])
+  const [currentFolder, setCurrentFolder] = useState('')
 
   // File filters
   const [searchQuery, setSearchQuery] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
   const [monthFilter, setMonthFilter] = useState('')
+  const [dateFilter, setDateFilter] = useState('')
+  const [dateFromFilter, setDateFromFilter] = useState('')
+  const [dateToFilter, setDateToFilter] = useState('')
   const [nodeFilter, setNodeFilter] = useState('')
   const [deviceFilter, setDeviceFilter] = useState('')
 
@@ -107,6 +112,9 @@ function WorkspaceApp() {
       const sumParams = new URLSearchParams()
       if (categoryFilter) sumParams.set('category', categoryFilter)
       if (monthFilter) sumParams.set('month', monthFilter)
+      if (dateFilter) sumParams.set('date', dateFilter)
+      if (dateFromFilter) sumParams.set('date_from', dateFromFilter)
+      if (dateToFilter) sumParams.set('date_to', dateToFilter)
       if (nodeFilter) sumParams.set('node', nodeFilter)
       if (deviceFilter) sumParams.set('device', deviceFilter)
 
@@ -124,17 +132,19 @@ function WorkspaceApp() {
     } finally {
       setFilesLoading(false)
     }
-  }, [categoryFilter, deviceFilter, monthFilter, nodeFilter, searchQuery, toast])
+  }, [categoryFilter, dateFilter, dateFromFilter, dateToFilter, deviceFilter, monthFilter, nodeFilter, searchQuery, toast])
 
   const loadAuxData = useCallback(async () => {
     try {
-      const [capRes, selRes, taskRes] = await Promise.all([
+      const [capRes, selRes, taskRes, folderRes] = await Promise.all([
         api.getPluginCapabilities(),
         api.getSelectableUsers(),
         api.listAgentTasks({ limit: 1 }).catch(() => null),
+        api.listFolders().catch(() => ({ folders: [] })),
       ])
       setCapabilities(capRes.capabilities || [])
       setSelectableUsers(selRes.users || [])
+      setFolders(folderRes.folders || [])
       if (taskRes?.summary) {
         setPendingTasksCount((taskRes.summary.pending || 0) + (taskRes.summary.paused || 0))
       }
@@ -227,13 +237,20 @@ function WorkspaceApp() {
             .catch(() => {})
           if (data.kind === 'agent_task' && data.node_name === 'completed') {
             void loadFilesAndSummary()
+            void loadAuxData()
           }
+          return
+        }
+        if (data.kind === 'folder') {
+          void loadFilesAndSummary()
+          void loadAuxData()
           return
         }
       } catch {
         // ignore parse error
       }
       handleEvent()
+      void loadAuxData()
     })
     es.addEventListener('upload', handleEvent)
     es.addEventListener('extract', handleEvent)
@@ -253,7 +270,7 @@ function WorkspaceApp() {
     return () => {
       es.close()
     }
-  }, [user, loadCluster, loadFilesAndSummary, toast])
+  }, [user, loadAuxData, loadCluster, loadFilesAndSummary, toast])
 
   // 3s telemetry polling while viewing health or cluster/plugins
   useEffect(() => {
@@ -375,6 +392,9 @@ function WorkspaceApp() {
           <FilesPage
             user={user}
             files={files}
+            folders={folders}
+            currentFolder={currentFolder}
+            onCurrentFolderChange={setCurrentFolder}
             summary={summary}
             nodes={nodes}
             capabilities={capabilities}
@@ -385,12 +405,18 @@ function WorkspaceApp() {
             searchQuery={searchQuery}
             categoryFilter={categoryFilter}
             monthFilter={monthFilter}
+            dateFilter={dateFilter}
+            dateFromFilter={dateFromFilter}
+            dateToFilter={dateToFilter}
             nodeFilter={nodeFilter}
             deviceFilter={deviceFilter}
             onFilterChange={(patch) => {
               if (patch.searchQuery !== undefined) setSearchQuery(patch.searchQuery)
               if (patch.categoryFilter !== undefined) setCategoryFilter(patch.categoryFilter)
               if (patch.monthFilter !== undefined) setMonthFilter(patch.monthFilter)
+              if (patch.dateFilter !== undefined) setDateFilter(patch.dateFilter)
+              if (patch.dateFromFilter !== undefined) setDateFromFilter(patch.dateFromFilter)
+              if (patch.dateToFilter !== undefined) setDateToFilter(patch.dateToFilter)
               if (patch.nodeFilter !== undefined) setNodeFilter(patch.nodeFilter)
               if (patch.deviceFilter !== undefined) setDeviceFilter(patch.deviceFilter)
             }}
@@ -417,12 +443,20 @@ function WorkspaceApp() {
           <AgentTasksPage
             user={user}
             info={info}
+            files={files}
+            folders={folders}
             isMobile={isMobile}
             onSummaryChange={(s) => setPendingTasksCount((s.pending || 0) + (s.paused || 0))}
             onOpenAgentSettings={() => {
               setSettingsFocusTab({ tab: 'agent', seq: Date.now() })
               setActiveTab('settings')
             }}
+            onPreviewFile={(rec) => setPreviewFile(rec)}
+            onDownloadFile={(rec) => {
+              transfers.enqueueDownload(rec)
+              transfers.setOpen(true)
+            }}
+            onInspectFile={(rec) => setInspectedFile(rec)}
           />
         )}
 
@@ -530,6 +564,8 @@ function WorkspaceApp() {
         isAdmin={user.role === 'admin'}
         nodes={nodes}
         defaultNode="auto"
+        defaultFolder={currentFolder}
+        folders={folders}
         allowedUsers={[]}
         onCreated={() => void refreshAll()}
       />

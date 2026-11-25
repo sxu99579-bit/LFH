@@ -6,8 +6,12 @@ import {
   Edit3,
   Eye,
   Folder,
+  FolderInput,
+  FolderOpen,
+  FolderPlus,
   Info,
   MoreHorizontal,
+  Pencil,
   Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -37,6 +41,9 @@ interface AppleFolderEntry {
 
 interface AppleFilesGridProps {
   files: FileRecord[]
+  folders: string[]
+  currentFolder: string
+  onCurrentFolderChange: (folder: string) => void
   user: User
   capabilities: ClusterCapabilityView[]
   writableMountIds?: Set<string>
@@ -48,6 +55,10 @@ interface AppleFilesGridProps {
   onPreviewFile: (rec: FileRecord) => void
   onEditFile: (rec: FileRecord) => void
   onDownloadFile: (rec: FileRecord) => void
+  onCreateFolder: (parentFolder: string) => void
+  onMoveFile: (rec: FileRecord, targetFolder?: string) => void
+  onRenameFolder: (folderPath: string) => void
+  onDeleteFolder: (folderPath: string) => void
   onRefresh: () => void
 }
 
@@ -105,6 +116,9 @@ function isEditableElementFocused(target: EventTarget | null): boolean {
 
 export function AppleFilesGrid({
   files,
+  folders,
+  currentFolder,
+  onCurrentFolderChange,
   user,
   capabilities,
   writableMountIds,
@@ -116,13 +130,22 @@ export function AppleFilesGrid({
   onPreviewFile,
   onEditFile,
   onDownloadFile,
+  onCreateFolder,
+  onMoveFile,
+  onRenameFolder,
+  onDeleteFolder,
   onRefresh,
 }: AppleFilesGridProps) {
   const { toast } = useToast()
-  const [currentFolder, setCurrentFolder] = useState('')
   const [selectedId, setSelectedId] = useState('')
+  const [dropTargetFolder, setDropTargetFolder] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{
     rec: FileRecord
+    x: number
+    y: number
+  } | null>(null)
+  const [folderMenu, setFolderMenu] = useState<{
+    folder: AppleFolderEntry
     x: number
     y: number
   } | null>(null)
@@ -135,24 +158,28 @@ export function AppleFilesGrid({
       .replace(/\\/g, '/')
       .replace(/^\/+|\/+$/g, '')
 
-  // Reset currentFolder if no files belong under it anymore (e.g. deleted or unmounted).
+  // Reset currentFolder if no files and no explicit folders match it anymore.
   useEffect(() => {
     if (!effectiveGrouping || !currentFolder) return
     const prefix = `${currentFolder}/`
-    const stillExists = files.some((rec) => {
+    const fileMatch = files.some((rec) => {
       const fp = normalizeFolder(rec.folder_path)
       return fp === currentFolder || fp.startsWith(prefix)
     })
-    if (!stillExists) {
-      setCurrentFolder('')
+    const folderMatch = folders.some((raw) => {
+      const fp = normalizeFolder(raw)
+      return fp === currentFolder || fp.startsWith(prefix)
+    })
+    if (!fileMatch && !folderMatch) {
+      onCurrentFolderChange('')
     }
-  }, [currentFolder, effectiveGrouping, files])
+  }, [currentFolder, effectiveGrouping, files, folders, onCurrentFolderChange])
 
   useEffect(() => {
-    if (!effectiveGrouping) {
-      setCurrentFolder('')
+    if (!effectiveGrouping && currentFolder) {
+      onCurrentFolderChange('')
     }
-  }, [effectiveGrouping])
+  }, [currentFolder, effectiveGrouping, onCurrentFolderChange])
 
   const { childFolders, visibleFiles } = useMemo(() => {
     if (!effectiveGrouping) {
@@ -162,6 +189,31 @@ export function AppleFilesGrid({
     const direct: FileRecord[] = []
     const prefix = currentFolder ? `${currentFolder}/` : ''
 
+    const ensureChildFolder = (seg: string, fullPath: string) => {
+      if (!seg) return null
+      let entry = folderMap.get(fullPath)
+      if (!entry) {
+        entry = { name: seg, fullPath, itemCount: 0, totalSize: 0 }
+        folderMap.set(fullPath, entry)
+      }
+      return entry
+    }
+
+    // Seed explicit folders (including empty ones)
+    for (const raw of folders) {
+      const fp = normalizeFolder(raw)
+      if (!fp) continue
+      if (!currentFolder) {
+        const seg = fp.split('/')[0]
+        ensureChildFolder(seg, seg)
+      } else if (fp.startsWith(prefix)) {
+        const rest = fp.slice(prefix.length)
+        const seg = rest.split('/')[0]
+        ensureChildFolder(seg, `${prefix}${seg}`)
+      }
+    }
+
+    // Aggregate files into direct entries or child folder stats
     for (const rec of files) {
       const fp = normalizeFolder(rec.folder_path)
       if (!currentFolder) {
@@ -170,36 +222,20 @@ export function AppleFilesGrid({
           continue
         }
         const seg = fp.split('/')[0]
-        const prev = folderMap.get(seg)
-        if (prev) {
-          prev.itemCount += 1
-          prev.totalSize += rec.size || 0
-        } else {
-          folderMap.set(seg, {
-            name: seg,
-            fullPath: seg,
-            itemCount: 1,
-            totalSize: rec.size || 0,
-          })
+        const entry = ensureChildFolder(seg, seg)
+        if (entry) {
+          entry.itemCount += 1
+          entry.totalSize += rec.size || 0
         }
       } else if (fp === currentFolder) {
         direct.push(rec)
       } else if (fp.startsWith(prefix)) {
         const rest = fp.slice(prefix.length)
         const seg = rest.split('/')[0]
-        if (!seg) continue
-        const fullPath = `${prefix}${seg}`
-        const prev = folderMap.get(fullPath)
-        if (prev) {
-          prev.itemCount += 1
-          prev.totalSize += rec.size || 0
-        } else {
-          folderMap.set(fullPath, {
-            name: seg,
-            fullPath,
-            itemCount: 1,
-            totalSize: rec.size || 0,
-          })
+        const entry = ensureChildFolder(seg, `${prefix}${seg}`)
+        if (entry) {
+          entry.itemCount += 1
+          entry.totalSize += rec.size || 0
         }
       }
     }
@@ -208,7 +244,7 @@ export function AppleFilesGrid({
       a.name.localeCompare(b.name, 'zh-Hans-CN')
     )
     return { childFolders: sortedFolders, visibleFiles: direct }
-  }, [currentFolder, effectiveGrouping, files])
+  }, [currentFolder, effectiveGrouping, files, folders])
 
   const selectedFile = useMemo(
     () => visibleFiles.find((f) => f.id === selectedId) || null,
@@ -235,10 +271,13 @@ export function AppleFilesGrid({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isMobile, onInspectFile, onPreviewFile, selectedFile])
 
-  // Dismiss context menu on outside click or Escape
+  // Dismiss context menus on outside click or Escape
   useEffect(() => {
-    if (!contextMenu) return
-    const close = () => setContextMenu(null)
+    if (!contextMenu && !folderMenu) return
+    const close = () => {
+      setContextMenu(null)
+      setFolderMenu(null)
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close()
     }
@@ -250,7 +289,7 @@ export function AppleFilesGrid({
       window.removeEventListener('scroll', close, true)
       window.removeEventListener('keydown', onKey)
     }
-  }, [contextMenu])
+  }, [contextMenu, folderMenu])
 
   const breadcrumbs = useMemo(() => {
     if (!currentFolder) return [] as Array<{ label: string; path: string }>
@@ -265,12 +304,48 @@ export function AppleFilesGrid({
     e.preventDefault()
     e.stopPropagation()
     setSelectedId(rec.id)
-    const menuW = 216
-    const menuH = 260
+    setFolderMenu(null)
+    const menuW = 224
+    const menuH = 300
     const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8))
     const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8))
     setContextMenu({ rec, x, y })
   }
+
+  const openContextMenuForFolder = (e: React.MouseEvent, folder: AppleFolderEntry) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu(null)
+    const menuW = 216
+    const menuH = 220
+    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8))
+    const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8))
+    setFolderMenu({ folder, x, y })
+  }
+
+  const folderDragProps = (targetPath: string) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes('text/lfh-file-id')) return
+      e.preventDefault()
+      e.stopPropagation()
+      e.dataTransfer.dropEffect = 'move'
+      if (dropTargetFolder !== targetPath) setDropTargetFolder(targetPath)
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes('text/lfh-file-id')) return
+      e.stopPropagation()
+      if (dropTargetFolder === targetPath) setDropTargetFolder(null)
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes('text/lfh-file-id')) return
+      e.preventDefault()
+      e.stopPropagation()
+      setDropTargetFolder(null)
+      const fileId = e.dataTransfer.getData('text/lfh-file-id')
+      const dragged = files.find((f) => f.id === fileId)
+      if (dragged) onMoveFile(dragged, targetPath)
+    },
+  })
 
   const handleDeleteFromMenu = async (rec: FileRecord) => {
     setContextMenu(null)
@@ -296,121 +371,210 @@ export function AppleFilesGrid({
       onClick={() => {
         setSelectedId('')
         setContextMenu(null)
+        setFolderMenu(null)
       }}
     >
-      {/* Finder Breadcrumb Strip when inside subfolder */}
+      {/* Finder Breadcrumb Strip + Folder Management Actions when inside subfolder */}
       {effectiveGrouping && currentFolder !== '' && (
         <div
-          className="flex flex-wrap items-center gap-1.5 rounded-xl border border-border/70 bg-card/60 px-3 py-2 text-xs backdrop-blur-xs"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/70 bg-card/60 px-3 py-2 text-xs backdrop-blur-xs"
           onClick={(e) => e.stopPropagation()}
         >
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            onClick={() => {
-              const parts = currentFolder.split('/')
-              parts.pop()
-              setCurrentFolder(parts.join('/'))
-              setSelectedId('')
-            }}
-          >
-            <ChevronLeft className="h-3.5 w-3.5" />
-            <span>返回上级</span>
-          </Button>
-          <span className="h-3.5 w-px bg-border mx-0.5" />
-          <button
-            type="button"
-            onClick={() => {
-              setCurrentFolder('')
-              setSelectedId('')
-            }}
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer"
-          >
-            <Folder className="h-3 w-3 text-[#4aa1ec]" />
-            <span>全部文件</span>
-          </button>
-          {breadcrumbs.map((bc, idx) => {
-            const isLast = idx === breadcrumbs.length - 1
-            return (
-              <React.Fragment key={bc.path}>
-                <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCurrentFolder(bc.path)
-                    setSelectedId('')
-                  }}
-                  className={cn(
-                    'rounded px-1.5 py-0.5 cursor-pointer truncate max-w-[180px]',
-                    isLast
-                      ? 'font-semibold text-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-                  )}
-                >
-                  {bc.label}
-                </button>
-              </React.Fragment>
-            )
-          })}
-          <span className="ml-auto text-[11px] text-muted-foreground tabular-nums">
-            {childFolders.length + visibleFiles.length} 项
-          </span>
+          <div className="flex flex-wrap items-center gap-1 min-w-0">
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              onClick={() => {
+                const parts = currentFolder.split('/')
+                parts.pop()
+                onCurrentFolderChange(parts.join('/'))
+                setSelectedId('')
+              }}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              <span>返回上级</span>
+            </Button>
+            <span className="h-3.5 w-px bg-border mx-0.5" />
+            <button
+              type="button"
+              {...folderDragProps('')}
+              onClick={() => {
+                onCurrentFolderChange('')
+                setSelectedId('')
+              }}
+              className={cn(
+                'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer transition-colors',
+                dropTargetFolder === '' && 'ring-2 ring-[#007AFF] bg-[#007AFF]/10 text-foreground'
+              )}
+              title="回到根目录（支持将文件拖放到此）"
+            >
+              <Folder className="h-3 w-3 text-[#4aa1ec]" />
+              <span>全部文件</span>
+            </button>
+            {breadcrumbs.map((bc, idx) => {
+              const isLast = idx === breadcrumbs.length - 1
+              return (
+                <React.Fragment key={bc.path}>
+                  <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <button
+                    type="button"
+                    {...folderDragProps(bc.path)}
+                    onClick={() => {
+                      onCurrentFolderChange(bc.path)
+                      setSelectedId('')
+                    }}
+                    className={cn(
+                      'rounded px-1.5 py-0.5 cursor-pointer truncate max-w-[160px] transition-colors',
+                      isLast
+                        ? 'font-semibold text-foreground'
+                        : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                      dropTargetFolder === bc.path && 'ring-2 ring-[#007AFF] bg-[#007AFF]/10 text-foreground'
+                    )}
+                  >
+                    {bc.label}
+                  </button>
+                </React.Fragment>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1 shrink-0">
+            <span className="text-[11px] text-muted-foreground tabular-nums mr-1">
+              {childFolders.length + visibleFiles.length} 项
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => onCreateFolder(currentFolder)}
+              title="在当前目录下新建子文件夹"
+            >
+              <FolderPlus className="h-3 w-3 text-[#4aa1ec]" />
+              <span>新建子目录</span>
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              onClick={() => onRenameFolder(currentFolder)}
+              title="重命名或移动当前文件夹"
+            >
+              <Pencil className="h-3 w-3" />
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              className="text-destructive hover:text-destructive"
+              onClick={() => onDeleteFolder(currentFolder)}
+              title="删除当前文件夹"
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          </div>
         </div>
       )}
 
-      {/* Borderless Apple Files Icon Canvas */}
-      <div className={cn('grid items-start', gridColumnClasses(iconSize, isMobile))}>
-        {/* Virtual / Directory Folders */}
-        {childFolders.map((folder) => (
-          <button
-            key={`folder:${folder.fullPath}`}
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              setCurrentFolder(folder.fullPath)
-              setSelectedId('')
-              setContextMenu(null)
-            }}
-            className="group min-w-0 w-full flex flex-col items-center rounded-2xl px-1 py-1.5 sm:px-2 sm:py-2.5 text-center transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF] cursor-pointer"
-            title={`${folder.fullPath} (${folder.itemCount} 项 · ${formatSize(folder.totalSize)})`}
-          >
-            <div className={cn('flex w-full items-end justify-center', folderSlotHeightClasses(iconSize))}>
-              <AppleFolderIcon className={folderSvgSizeClasses(iconSize)} />
-            </div>
-            <div className="mt-2 w-full space-y-0.5">
-              <div className="line-clamp-2 break-all sm:break-words text-[12px] sm:text-[13px] font-medium leading-[1.3] text-foreground px-0.5">
-                {middleTruncateFileName(folder.name, maxChars)}
+      {/* Empty Folder State when inside an explicit empty directory */}
+      {effectiveGrouping && childFolders.length === 0 && visibleFiles.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-border bg-card/40 p-8 text-center text-xs text-muted-foreground space-y-2">
+          <div className="text-sm font-medium text-foreground">
+            {currentFolder ? `目录「${currentFolder}」暂无文件` : '暂无文件'}
+          </div>
+          <div>可直接将文件拖拽到此处上传，或点击上方「上传文件 / 新建 TXT / 新建文件夹」。</div>
+        </div>
+      ) : (
+        /* Borderless Apple Files Icon Canvas */
+        <div className={cn('grid items-start', gridColumnClasses(iconSize, isMobile))}>
+          {/* Virtual / Directory Folders */}
+          {childFolders.map((folder) => {
+            const isDropOver = dropTargetFolder === folder.fullPath
+            return (
+              <div
+                key={`folder:${folder.fullPath}`}
+                role="button"
+                tabIndex={0}
+                {...folderDragProps(folder.fullPath)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onCurrentFolderChange(folder.fullPath)
+                  setSelectedId('')
+                  setContextMenu(null)
+                  setFolderMenu(null)
+                }}
+                onContextMenu={(e) => openContextMenuForFolder(e, folder)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    onCurrentFolderChange(folder.fullPath)
+                  }
+                }}
+                className={cn(
+                  'group relative min-w-0 w-full flex flex-col items-center rounded-2xl px-1 py-1.5 sm:px-2 sm:py-2.5 text-center transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF] cursor-pointer',
+                  isDropOver && 'ring-2 ring-[#007AFF] bg-[#007AFF]/12'
+                )}
+                title={`${folder.fullPath} (${folder.itemCount} 项 · ${formatSize(folder.totalSize)}) · 右键可重命名/删除`}
+              >
+                <div className={cn('relative flex w-full items-end justify-center', folderSlotHeightClasses(iconSize))}>
+                  <AppleFolderIcon className={folderSvgSizeClasses(iconSize)} />
+                  <button
+                    type="button"
+                    aria-label="文件夹操作"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openContextMenuForFolder(e, folder)
+                    }}
+                    className={cn(
+                      'absolute right-0.5 bottom-0.5 flex h-5.5 w-5.5 items-center justify-center rounded-full border border-border/80 bg-card/90 text-muted-foreground shadow-xs backdrop-blur-xs transition-opacity',
+                      isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                    )}
+                    title="文件夹菜单"
+                  >
+                    <MoreHorizontal className="h-3 w-3" />
+                  </button>
+                </div>
+                <div className="mt-2 w-full space-y-0.5">
+                  <div className="line-clamp-2 break-all sm:break-words text-[12px] sm:text-[13px] font-medium leading-[1.3] text-foreground px-0.5">
+                    {middleTruncateFileName(folder.name, maxChars)}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground tabular-nums">
+                    {folder.itemCount} 项
+                  </div>
+                </div>
               </div>
-              <div className="text-[11px] text-muted-foreground tabular-nums">
-                {folder.itemCount} 项
-              </div>
-            </div>
-          </button>
-        ))}
+            )
+          })}
 
-        {/* Individual Files */}
-        {visibleFiles.map((rec) => {
-          const isSelected = selectedId === rec.id
-          const previewable = canPreviewFile(rec)
-          const editable = isEditableTextFile(rec, writableMountIds)
-          const displayName = middleTruncateFileName(rec.name, maxChars)
+          {/* Individual Files */}
+          {visibleFiles.map((rec) => {
+            const isSelected = selectedId === rec.id
+            const previewable = canPreviewFile(rec)
+            const editable = isEditableTextFile(rec, writableMountIds)
+            const displayName = middleTruncateFileName(rec.name, maxChars)
 
-          return (
-            <div
-              key={rec.id}
-              role="button"
-              tabIndex={0}
-              onClick={(e) => {
-                e.stopPropagation()
-                setContextMenu(null)
-                if (isMobile) {
-                  if (previewable) onPreviewFile(rec)
-                  else onInspectFile(rec)
-                  return
-                }
-                setSelectedId(rec.id)
-              }}
+            return (
+              <div
+                key={rec.id}
+                role="button"
+                tabIndex={0}
+                draggable={!isMobile}
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('text/lfh-file-id', rec.id)
+                  e.dataTransfer.effectAllowed = 'move'
+                }}
+                onDragEnd={() => setDropTargetFolder(null)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setContextMenu(null)
+                  setFolderMenu(null)
+                  if (isMobile) {
+                    if (previewable) onPreviewFile(rec)
+                    else onInspectFile(rec)
+                    return
+                  }
+                  setSelectedId(rec.id)
+                }}
               onDoubleClick={(e) => {
                 e.stopPropagation()
                 setContextMenu(null)
@@ -534,6 +698,7 @@ export function AppleFilesGrid({
           )
         })}
       </div>
+      )}
 
       {/* Desktop Apple-Style Frosted Right-Click Context Menu */}
       {contextMenu && (
@@ -616,6 +781,21 @@ export function AppleFilesGrid({
             )}
           </button>
 
+          {(user.role === 'admin' || contextMenu.rec.uploader === user.username) && !contextMenu.rec.mount_id && (
+            <button
+              type="button"
+              onClick={() => {
+                const target = contextMenu.rec
+                setContextMenu(null)
+                onMoveFile(target)
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
+            >
+              <FolderInput className="h-3.5 w-3.5" />
+              <span>移动到文件夹...</span>
+            </button>
+          )}
+
           {(user.role === 'admin' || contextMenu.rec.uploader === user.username) && (
             <>
               <div className="my-1 border-t border-border/60" />
@@ -629,6 +809,75 @@ export function AppleFilesGrid({
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Folder Context Menu */}
+      {folderMenu && (
+        <div
+          style={{ left: folderMenu.x, top: folderMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          className="fixed z-[80] w-52 rounded-xl border border-border/80 bg-card/95 p-1.5 text-xs shadow-2xl backdrop-blur-xl"
+        >
+          <div className="px-2.5 py-1.5 border-b border-border/60 mb-1">
+            <div className="font-semibold truncate text-foreground">{folderMenu.folder.name}</div>
+            <div className="text-[10px] text-muted-foreground truncate">
+              /{folderMenu.folder.fullPath} · {folderMenu.folder.itemCount} 项
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              const target = folderMenu.folder.fullPath
+              setFolderMenu(null)
+              onCurrentFolderChange(target)
+            }}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            <span>打开文件夹</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const target = folderMenu.folder.fullPath
+              setFolderMenu(null)
+              onCreateFolder(target)
+            }}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            <span>新建子文件夹</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const target = folderMenu.folder.fullPath
+              setFolderMenu(null)
+              onRenameFolder(target)
+            }}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#007AFF] hover:text-white cursor-pointer"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            <span>重命名 / 移动目录</span>
+          </button>
+
+          <div className="my-1 border-t border-border/60" />
+          <button
+            type="button"
+            onClick={() => {
+              const target = folderMenu.folder.fullPath
+              setFolderMenu(null)
+              onDeleteFolder(target)
+            }}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-destructive hover:bg-destructive hover:text-destructive-foreground cursor-pointer"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>删除文件夹...</span>
+          </button>
         </div>
       )}
     </div>

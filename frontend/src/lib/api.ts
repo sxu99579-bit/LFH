@@ -151,6 +151,32 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ allowed_users }),
     }),
+  moveFileToFolder: (id: string, folder_path: string) =>
+    apiFetch<{ file: FileRecord }>(`/api/files/${encodeURIComponent(id)}/folder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_path }),
+    }),
+  listFolders: () =>
+    apiFetch<{ ok: boolean; folders: string[] }>('/api/folders'),
+  createFolder: (path: string) =>
+    apiFetch<{ ok: boolean; path: string; folders: string[] }>('/api/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  renameFolder: (old_path: string, new_path: string) =>
+    apiFetch<{ ok: boolean; path: string; moved: number; folders: string[] }>('/api/folders', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_path, new_path }),
+    }),
+  deleteFolder: (path: string, mode: 'empty_only' | 'move_to_parent' | 'delete_files' = 'move_to_parent') =>
+    apiFetch<{ ok: boolean; affected: number; folders: string[] }>('/api/folders', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, mode }),
+    }),
   deleteFile: (id: string) => apiFetch(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   getFileVersions: (id: string) =>
