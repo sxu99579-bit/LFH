@@ -23,7 +23,7 @@
 Ships as a single binary with zero database setup required—ready for both Docker containers and native local deployment.
 
 <p align="center">
-  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="QuailNest Desktop and Mobile Workspaces" />
+  <img src="./assets/readme/quailnest-hero-workspace.jpg" width="900" alt="QuailNest Desktop and Mobile Workspaces" />
 </p>
 
 ## Key Features
@@ -72,6 +72,18 @@ Ships as a single binary with zero database setup required—ready for both Dock
 - **Zero-Downtime GitHub Self-Updater**: Checks the configured GitHub repository (`sxu99579-bit/QuailNest`) for new releases, verifies downloads, and swaps the running binary via graceful handoff.
 
 <table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./assets/readme/quailnest-agent-collab.jpg" alt="AI Task Board, 3-Layer Agent Badges & Native MCP" />
+      <br />
+      <sub><b>AI Task Board & Native MCP</b> · 25 tools, 3-layer Agent badges & zero-token workers</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./assets/readme/quailnest-apple-files.jpg" alt="Apple Files Grid, Folder Drag-Move, Day Filter & Super Clipboard" />
+      <br />
+      <sub><b>Apple Files UI & Super Clipboard</b> · Folder drag-move, PDF covers, exact day filter & instant sync</sub>
+    </td>
+  </tr>
   <tr>
     <td width="50%" align="center">
       <img src="./assets/readme/cluster-mesh.jpg" alt="Distributed Multi-Device LAN Storage Mesh" />

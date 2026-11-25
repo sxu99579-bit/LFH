@@ -23,7 +23,7 @@
 单二进制开箱即用，无外部数据库或第三方运行时依赖；支持 Docker 容器部署与本地一键运行。
 
 <p align="center">
-  <img src="./assets/readme/hero-workspace.jpg" width="900" alt="QuailNest 桌面端与移动端工作台概览" />
+  <img src="./assets/readme/quailnest-hero-workspace.jpg" width="900" alt="QuailNest 桌面端与移动端工作台概览" />
 </p>
 
 ## 核心特性
@@ -72,6 +72,18 @@
 - **GitHub 仓库版本检测与不停机升级**：管理面板可自动检查仓库新版本，支持后台下载校验并在热交接后完成不停机平滑更新。
 
 <table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./assets/readme/quailnest-agent-collab.jpg" alt="AI 协同任务板、三层卡通工牌与原生 MCP 25 项工具" />
+      <br />
+      <sub><b>AI 协同任务板 & 原生 MCP</b> · 25 项工具、三层工牌墙与零消耗后台值守</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./assets/readme/quailnest-apple-files.jpg" alt="Apple 图标视图、虚拟文件夹拖拽移动、精确日期筛选与超级剪贴板" />
+      <br />
+      <sub><b>Apple 图标视图 & 超级剪贴板</b> · 文件夹拖拽、PDF 封面、精确到日筛选与跨端同步</sub>
+    </td>
+  </tr>
   <tr>
     <td width="50%" align="center">
       <img src="./assets/readme/cluster-mesh.jpg" alt="分布式多节点统一存储池拓扑" />
