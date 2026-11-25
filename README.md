@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">问题反馈</a> · <code>V0.11.24.3</code>
+  <a href="./README.md">简体中文</a> · <a href="./README.en.md">English</a> · <a href="./LICENSE">MIT License</a> · <a href="https://github.com/sxu99579-bit/LFH/discussions">讨论与留言</a> · <a href="https://github.com/sxu99579-bit/LFH/issues">问题反馈</a> · <code>V0.11.24.4</code>
 </p>
 
 ---

@@ -2,7 +2,7 @@ import { api } from '@/lib/api'
 
 const MAX_PDF_CACHE = 120
 const MAX_SNIPPET_CACHE = 200
-const PDF_CONCURRENCY = 2
+const PDF_CONCURRENCY = 3
 const SNIPPET_CONCURRENCY = 4
 
 const pdfCache = new Map<string, string>()
@@ -126,7 +126,7 @@ export async function renderPdfThumbnail(
       const page = await pdf.getPage(1)
       const baseViewport = page.getViewport({ scale: 1 })
       const maxBase = Math.max(baseViewport.width, baseViewport.height, 1)
-      const scale = Math.min(2.0, 260 / maxBase)
+      const scale = Math.min(2.0, 240 / maxBase)
       const viewport = page.getViewport({ scale })
 
       const canvas = document.createElement('canvas')

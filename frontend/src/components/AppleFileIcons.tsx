@@ -111,12 +111,58 @@ export function AppleFolderIcon({ className = 'h-20 w-24' }: { className?: strin
   )
 }
 
+function sizeBoxClasses(size: AppleIconSize): string {
+  switch (size) {
+    case 'sm':
+      return 'h-[80px]'
+    case 'lg':
+      return 'h-[126px] sm:h-[144px]'
+    default:
+      return 'h-[100px] sm:h-[112px]'
+  }
+}
+
+function paperSheetSizeClasses(size: AppleIconSize): string {
+  switch (size) {
+    case 'sm':
+      return 'w-[58px] h-[78px] shrink-0'
+    case 'lg':
+      return 'w-[90px] h-[122px] sm:w-[104px] sm:h-[140px] shrink-0'
+    default:
+      return 'w-[72px] h-[98px] sm:w-[80px] sm:h-[108px] shrink-0'
+  }
+}
+
+function imageMaxSizeClasses(size: AppleIconSize): string {
+  switch (size) {
+    case 'sm':
+      return 'max-w-[76px] max-h-[78px]'
+    case 'lg':
+      return 'max-w-[116px] max-h-[122px] sm:max-w-[136px] sm:max-h-[140px]'
+    default:
+      return 'max-w-[92px] max-h-[98px] sm:max-w-[108px] sm:max-h-[108px]'
+  }
+}
+
+function videoBoxSizeClasses(size: AppleIconSize): string {
+  switch (size) {
+    case 'sm':
+      return 'w-[78px] h-[56px] shrink-0'
+    case 'lg':
+      return 'w-[118px] h-[82px] sm:w-[136px] sm:h-[94px] shrink-0'
+    default:
+      return 'w-[92px] h-[66px] sm:w-[112px] sm:h-[78px] shrink-0'
+  }
+}
+
 function FoldedDocSheet({
+  size,
   extLabel,
   accentClass,
   badgeClass,
   kind,
 }: {
+  size: AppleIconSize
   extLabel: string
   accentClass: string
   badgeClass: string
@@ -125,38 +171,39 @@ function FoldedDocSheet({
   return (
     <div
       className={cn(
-        'relative flex h-full aspect-[1/1.36] max-w-full flex-col items-center justify-between overflow-hidden rounded-[5px] bg-white p-2 text-slate-800',
+        'relative flex flex-col items-center justify-between overflow-hidden rounded-[5px] bg-white p-2 text-slate-800',
+        paperSheetSizeClasses(size),
         'ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.12),0_10px_20px_rgba(0,0,0,0.08)]',
         'transition-transform duration-200 group-hover:scale-[1.03]'
       )}
     >
       {/* Top folded corner */}
-      <div className="pointer-events-none absolute top-0 right-0 h-4 w-4 overflow-hidden">
+      <div className="pointer-events-none absolute top-0 right-0 h-3.5 w-3.5 overflow-hidden">
         <div className="h-full w-full bg-gradient-to-bl from-slate-200 via-slate-100 to-slate-200/80 shadow-[-1px_1px_2px_rgba(0,0,0,0.08)]" />
       </div>
 
       {/* Top accent strip */}
-      <div className={cn('h-1 w-8 self-start rounded-full', accentClass)} />
+      <div className={cn('h-1 w-6 self-start rounded-full', accentClass)} />
 
       {/* Center crisp icon */}
       <div className="flex flex-1 items-center justify-center">
         {kind === 'archive' ? (
-          <Archive className="h-7 w-7 text-amber-500" />
+          <Archive className="h-6 w-6 sm:h-7 sm:w-7 text-amber-500" />
         ) : kind === 'audio' ? (
-          <FileAudio className="h-7 w-7 text-pink-500" />
+          <FileAudio className="h-6 w-6 sm:h-7 sm:w-7 text-pink-500" />
         ) : kind === 'sheet' ? (
-          <FileSpreadsheet className="h-7 w-7 text-emerald-600" />
+          <FileSpreadsheet className="h-6 w-6 sm:h-7 sm:w-7 text-emerald-600" />
         ) : kind === 'slide' ? (
-          <Presentation className="h-7 w-7 text-orange-500" />
+          <Presentation className="h-6 w-6 sm:h-7 sm:w-7 text-orange-500" />
         ) : (
-          <File className={cn('h-7 w-7', kind === 'pdf' ? 'text-rose-500' : 'text-slate-400')} />
+          <File className={cn('h-6 w-6 sm:h-7 sm:w-7', kind === 'pdf' ? 'text-rose-500' : 'text-slate-400')} />
         )}
       </div>
 
       {/* Bottom type label */}
       <span
         className={cn(
-          'inline-flex items-center justify-center rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase',
+          'inline-flex items-center justify-center rounded px-1.5 py-0.5 text-[8.5px] sm:text-[9px] font-bold tracking-wider uppercase',
           badgeClass
         )}
       >
@@ -164,17 +211,6 @@ function FoldedDocSheet({
       </span>
     </div>
   )
-}
-
-function sizeBoxClasses(size: AppleIconSize): string {
-  switch (size) {
-    case 'sm':
-      return 'h-20'
-    case 'lg':
-      return 'h-32 sm:h-36'
-    default:
-      return 'h-24 sm:h-28'
-  }
 }
 
 export function AppleFileThumbnail({
@@ -294,6 +330,7 @@ export function AppleFileThumbnail({
     if (isPdf) {
       return (
         <FoldedDocSheet
+          size={size}
           extLabel="PDF"
           accentClass="bg-rose-500"
           badgeClass="bg-rose-500/12 text-rose-600"
@@ -304,6 +341,7 @@ export function AppleFileThumbnail({
     if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') {
       return (
         <FoldedDocSheet
+          size={size}
           extLabel={extLabel}
           accentClass="bg-emerald-500"
           badgeClass="bg-emerald-500/12 text-emerald-700"
@@ -314,6 +352,7 @@ export function AppleFileThumbnail({
     if (ext === 'pptx' || ext === 'ppt') {
       return (
         <FoldedDocSheet
+          size={size}
           extLabel={extLabel}
           accentClass="bg-orange-500"
           badgeClass="bg-orange-500/12 text-orange-600"
@@ -324,6 +363,7 @@ export function AppleFileThumbnail({
     if (ext === 'docx' || ext === 'doc') {
       return (
         <FoldedDocSheet
+          size={size}
           extLabel={extLabel}
           accentClass="bg-blue-500"
           badgeClass="bg-blue-500/12 text-blue-600"
@@ -334,6 +374,7 @@ export function AppleFileThumbnail({
     if (rec.category === 'archive') {
       return (
         <FoldedDocSheet
+          size={size}
           extLabel={extLabel}
           accentClass="bg-amber-500"
           badgeClass="bg-amber-500/12 text-amber-700"
@@ -344,6 +385,7 @@ export function AppleFileThumbnail({
     if (rec.category === 'audio') {
       return (
         <FoldedDocSheet
+          size={size}
           extLabel={extLabel}
           accentClass="bg-pink-500"
           badgeClass="bg-pink-500/12 text-pink-600"
@@ -353,6 +395,7 @@ export function AppleFileThumbnail({
     }
     return (
       <FoldedDocSheet
+        size={size}
         extLabel={extLabel}
         accentClass="bg-slate-400"
         badgeClass="bg-slate-100 text-slate-600"
@@ -369,148 +412,169 @@ export function AppleFileThumbnail({
         sizeBoxClasses(size)
       )}
     >
-      {/* 1. Image with pure-Go thumb + crisp white photo paper frame */}
-      {(isServerThumbImage || isRawImage) && canStream && !imgFailed ? (
-        <img
-          src={imgSrc}
-          alt={rec.name}
-          loading="lazy"
-          decoding="async"
-          onError={() => {
-            if (isServerThumbImage && !rawFallback) {
-              setRawFallback(true)
-            } else {
-              setImgFailed(true)
-            }
-          }}
-          className="max-h-full max-w-full w-auto h-auto rounded-[4px] bg-white p-[2px] object-contain ring-1 ring-black/10 dark:ring-white/15 shadow-[0_2px_6px_rgba(0,0,0,0.12),0_10px_20px_rgba(0,0,0,0.08)] transition-transform duration-200 group-hover:scale-[1.03]"
-        />
-      ) : isVideo && canStream && !imgFailed ? (
-        /* 2. Video frame */
-        <div className="relative h-full w-full max-w-[132px] overflow-hidden rounded-[8px] bg-black/90 ring-1 ring-black/15 shadow-[0_3px_10px_rgba(0,0,0,0.18)] transition-transform duration-200 group-hover:scale-[1.03]">
-          <video
-            src={`/api/files/${encodeURIComponent(rec.id)}/raw?v=${ver}#t=0.5`}
-            preload="metadata"
-            muted
-            playsInline
-            onError={() => setImgFailed(true)}
-            className="h-full w-full object-cover"
+      <div className="relative inline-flex items-end justify-center shrink-0">
+        {/* 1. Image with pure-Go thumb + crisp white photo paper frame */}
+        {(isServerThumbImage || isRawImage) && canStream && !imgFailed ? (
+          <img
+            src={imgSrc}
+            alt={rec.name}
+            loading="lazy"
+            decoding="async"
+            onError={() => {
+              if (isServerThumbImage && !rawFallback) {
+                setRawFallback(true)
+              } else {
+                setImgFailed(true)
+              }
+            }}
+            className={cn(
+              'block w-auto h-auto rounded-[4px] bg-white p-[2px] object-contain ring-1 ring-black/10 dark:ring-white/15 shadow-[0_2px_6px_rgba(0,0,0,0.12),0_10px_20px_rgba(0,0,0,0.08)] transition-transform duration-200 group-hover:scale-[1.03]',
+              imageMaxSizeClasses(size)
+            )}
           />
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20">
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/85 text-slate-900 shadow-md backdrop-blur-xs">
-              <Play className="h-3.5 w-3.5 ml-0.5 fill-current" />
+        ) : isVideo && canStream && !imgFailed ? (
+          /* 2. Video frame */
+          <div
+            className={cn(
+              'relative overflow-hidden rounded-[8px] bg-black/90 ring-1 ring-black/15 shadow-[0_3px_10px_rgba(0,0,0,0.18)] transition-transform duration-200 group-hover:scale-[1.03]',
+              videoBoxSizeClasses(size)
+            )}
+          >
+            <video
+              src={`/api/files/${encodeURIComponent(rec.id)}/raw?v=${ver}#t=0.5`}
+              preload="metadata"
+              muted
+              playsInline
+              onError={() => setImgFailed(true)}
+              className="h-full w-full object-cover"
+            />
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/85 text-slate-900 shadow-md backdrop-blur-xs">
+                <Play className="h-3.5 w-3.5 ml-0.5 fill-current" />
+              </span>
+            </div>
+            <span className="pointer-events-none absolute right-1.5 bottom-1.5 rounded bg-black/65 px-1 py-0.5 text-[9px] font-semibold tracking-wider text-white">
+              {extLabel}
             </span>
           </div>
-          <span className="pointer-events-none absolute right-1.5 bottom-1.5 rounded bg-black/65 px-1 py-0.5 text-[9px] font-semibold tracking-wider text-white">
-            {extLabel}
-          </span>
-        </div>
-      ) : isPdf && canStream && !pdfFailed ? (
-        /* 3. PDF Page 1 genuine paper sheet */
-        pdfThumb ? (
-          <div className="relative h-full aspect-[1/1.36] max-w-full overflow-hidden rounded-[4px] bg-white ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.14),0_10px_22px_rgba(0,0,0,0.08)] transition-transform duration-200 group-hover:scale-[1.03]">
-            <img
-              src={pdfThumb}
-              alt={rec.name}
-              className="h-full w-full object-cover object-top bg-white"
+        ) : isPdf && canStream && !pdfFailed ? (
+          /* 3. PDF Page 1 genuine paper sheet */
+          pdfThumb ? (
+            <div
+              className={cn(
+                'relative overflow-hidden rounded-[4px] bg-white ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.14),0_10px_22px_rgba(0,0,0,0.08)] transition-transform duration-200 group-hover:scale-[1.03]',
+                paperSheetSizeClasses(size)
+              )}
+            >
+              <img
+                src={pdfThumb}
+                alt={rec.name}
+                className="h-full w-full object-cover object-top bg-white"
+              />
+            </div>
+          ) : (
+            <div
+              className={cn(
+                'relative flex flex-col justify-between overflow-hidden rounded-[4px] bg-white p-2 ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.1),0_8px_16px_rgba(0,0,0,0.06)]',
+                paperSheetSizeClasses(size)
+              )}
+            >
+              <div className="space-y-1.5 animate-pulse">
+                <div className="h-1.5 w-3/4 rounded bg-slate-200" />
+                <div className="h-1 w-full rounded bg-slate-100" />
+                <div className="h-1 w-5/6 rounded bg-slate-100" />
+                <div className="h-1 w-4/6 rounded bg-slate-100" />
+              </div>
+              <span className="self-end rounded bg-rose-500/12 px-1 py-0.5 text-[8px] font-bold tracking-wider text-rose-600">
+                PDF
+              </span>
+            </div>
+          )
+        ) : (isTextSnippet || isOfficeSnippet) && canStream && !snippetFailed && snippetLines && snippetLines.length > 0 ? (
+          /* 4. Authentic miniature paper typography preview for Text / Code / Office */
+          <div
+            className={cn(
+              'relative overflow-hidden rounded-[4px] bg-white p-2 text-left text-slate-700',
+              paperSheetSizeClasses(size),
+              'ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.12),0_10px_20px_rgba(0,0,0,0.07)]',
+              'transition-transform duration-200 group-hover:scale-[1.03]'
+            )}
+          >
+            <div
+              className={cn(
+                'mb-1 h-0.5 w-6 rounded-full',
+                ext === 'docx'
+                  ? 'bg-blue-500'
+                  : ext === 'xlsx'
+                  ? 'bg-emerald-500'
+                  : ext === 'pptx'
+                  ? 'bg-orange-500'
+                  : 'bg-slate-400'
+              )}
             />
+            <div
+              className={cn(
+                'space-y-[1.5px] text-[5.5px] leading-[1.35] break-all overflow-hidden',
+                isTextSnippet && ext !== 'md' && ext !== 'markdown' && ext !== 'txt' ? 'font-mono text-slate-600' : 'text-slate-700'
+              )}
+            >
+              {snippetLines.slice(0, 12).map((line, i) => (
+                <div key={i} className="truncate">
+                  {line || ' '}
+                </div>
+              ))}
+            </div>
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-white via-white/85 to-transparent" />
+            <span
+              className={cn(
+                'pointer-events-none absolute right-1.5 bottom-1 rounded px-1 py-[1px] text-[7.5px] font-bold tracking-wider uppercase',
+                ext === 'docx'
+                  ? 'bg-blue-500/12 text-blue-600'
+                  : ext === 'xlsx'
+                  ? 'bg-emerald-500/12 text-emerald-700'
+                  : ext === 'pptx'
+                  ? 'bg-orange-500/12 text-orange-600'
+                  : 'bg-slate-100 text-slate-600'
+              )}
+            >
+              {extLabel.slice(0, 5)}
+            </span>
           </div>
         ) : (
-          <div className="relative flex h-full aspect-[1/1.36] max-w-full flex-col justify-between overflow-hidden rounded-[4px] bg-white p-2 ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.1),0_8px_16px_rgba(0,0,0,0.06)]">
-            <div className="space-y-1.5 animate-pulse">
-              <div className="h-1.5 w-3/4 rounded bg-slate-200" />
-              <div className="h-1 w-full rounded bg-slate-100" />
-              <div className="h-1 w-5/6 rounded bg-slate-100" />
-              <div className="h-1 w-4/6 rounded bg-slate-100" />
-            </div>
-            <span className="self-end rounded bg-rose-500/12 px-1 py-0.5 text-[8px] font-bold tracking-wider text-rose-600">
-              PDF
-            </span>
-          </div>
-        )
-      ) : (isTextSnippet || isOfficeSnippet) && canStream && !snippetFailed && snippetLines && snippetLines.length > 0 ? (
-        /* 4. Authentic miniature paper typography preview for Text / Code / Office */
-        <div
-          className={cn(
-            'relative h-full aspect-[1/1.36] max-w-full overflow-hidden rounded-[4px] bg-white p-2 text-left text-slate-700',
-            'ring-1 ring-black/10 shadow-[0_2px_6px_rgba(0,0,0,0.12),0_10px_20px_rgba(0,0,0,0.07)]',
-            'transition-transform duration-200 group-hover:scale-[1.03]'
-          )}
-        >
-          <div
-            className={cn(
-              'mb-1 h-0.5 w-6 rounded-full',
-              ext === 'docx'
-                ? 'bg-blue-500'
-                : ext === 'xlsx'
-                ? 'bg-emerald-500'
-                : ext === 'pptx'
-                ? 'bg-orange-500'
-                : 'bg-slate-400'
-            )}
-          />
-          <div
-            className={cn(
-              'space-y-[1.5px] text-[5.5px] leading-[1.35] break-all overflow-hidden',
-              isTextSnippet && ext !== 'md' && ext !== 'markdown' && ext !== 'txt' ? 'font-mono text-slate-600' : 'text-slate-700'
-            )}
-          >
-            {snippetLines.slice(0, 12).map((line, i) => (
-              <div key={i} className="truncate">
-                {line || ' '}
-              </div>
-            ))}
-          </div>
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-white via-white/85 to-transparent" />
-          <span
-            className={cn(
-              'pointer-events-none absolute right-1.5 bottom-1 rounded px-1 py-[1px] text-[7.5px] font-bold tracking-wider uppercase',
-              ext === 'docx'
-                ? 'bg-blue-500/12 text-blue-600'
-                : ext === 'xlsx'
-                ? 'bg-emerald-500/12 text-emerald-700'
-                : ext === 'pptx'
-                ? 'bg-orange-500/12 text-orange-600'
-                : 'bg-slate-100 text-slate-600'
-            )}
-          >
-            {extLabel.slice(0, 5)}
-          </span>
-        </div>
-      ) : (
-        /* 5. Clean Apple folded paper icon fallback */
-        renderPaperFallback()
-      )}
+          /* 5. Clean Apple folded paper icon fallback */
+          renderPaperFallback()
+        )}
 
-      {/* Restrained 16px corner badges ONLY for special state */}
-      {(restricted || fromAgent || rec.source_missing || rec.node_online === false) && (
-        <div className="pointer-events-none absolute -top-1 right-1 flex items-center gap-1">
-          {restricted && (
-            <span
-              className="flex h-4.5 w-4.5 items-center justify-center rounded-full border border-border bg-card/90 text-amber-500 shadow-xs backdrop-blur-xs"
-              title="限定成员可见"
-            >
-              <Lock className="h-2.5 w-2.5" />
-            </span>
-          )}
-          {fromAgent && (
-            <span
-              className="flex h-4.5 w-4.5 items-center justify-center rounded-full border border-border bg-card/90 text-primary shadow-xs backdrop-blur-xs"
-              title="Agent 上传"
-            >
-              <Bot className="h-2.5 w-2.5" />
-            </span>
-          )}
-          {(rec.source_missing || rec.node_online === false) && (
-            <span
-              className="flex h-4.5 w-4.5 items-center justify-center rounded-full border border-border bg-card/90 text-destructive shadow-xs backdrop-blur-xs"
-              title={rec.source_missing ? '源文件丢失' : '节点离线'}
-            >
-              <AlertTriangle className="h-2.5 w-2.5" />
-            </span>
-          )}
-        </div>
-      )}
+        {/* Restrained 16px corner badges hugging the actual thumbnail corner */}
+        {(restricted || fromAgent || rec.source_missing || rec.node_online === false) && (
+          <div className="pointer-events-none absolute -top-1.5 -right-1.5 flex items-center gap-0.5">
+            {restricted && (
+              <span
+                className="flex h-4 w-4 items-center justify-center rounded-full border border-border bg-card/95 text-amber-500 shadow-xs backdrop-blur-xs"
+                title="限定成员可见"
+              >
+                <Lock className="h-2.5 w-2.5" />
+              </span>
+            )}
+            {fromAgent && (
+              <span
+                className="flex h-4 w-4 items-center justify-center rounded-full border border-border bg-card/95 text-primary shadow-xs backdrop-blur-xs"
+                title="Agent 上传"
+              >
+                <Bot className="h-2.5 w-2.5" />
+              </span>
+            )}
+            {(rec.source_missing || rec.node_online === false) && (
+              <span
+                className="flex h-4 w-4 items-center justify-center rounded-full border border-border bg-card/95 text-destructive shadow-xs backdrop-blur-xs"
+                title={rec.source_missing ? '源文件丢失' : '节点离线'}
+              >
+                <AlertTriangle className="h-2.5 w-2.5" />
+              </span>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

@@ -53,9 +53,9 @@ interface AppleFilesGridProps {
 
 function gridColumnClasses(size: AppleIconSize, isMobile: boolean): string {
   if (isMobile) {
-    if (size === 'sm') return 'grid-cols-4 gap-x-2 gap-y-4'
-    if (size === 'lg') return 'grid-cols-2 gap-x-4 gap-y-5'
-    return 'grid-cols-3 gap-x-3 gap-y-5'
+    if (size === 'sm') return 'grid-cols-4 gap-x-1.5 gap-y-3.5'
+    if (size === 'lg') return 'grid-cols-2 gap-x-3 gap-y-5'
+    return 'grid-cols-3 gap-x-2 gap-y-4'
   }
   switch (size) {
     case 'sm':
@@ -70,22 +70,22 @@ function gridColumnClasses(size: AppleIconSize, isMobile: boolean): string {
 function folderSvgSizeClasses(size: AppleIconSize): string {
   switch (size) {
     case 'sm':
-      return 'h-16 w-20'
+      return 'w-[66px] h-[54px] shrink-0'
     case 'lg':
-      return 'h-24 w-28 sm:h-28 sm:w-32'
+      return 'w-[102px] h-[84px] sm:w-[114px] sm:h-[94px] shrink-0'
     default:
-      return 'h-20 w-24 sm:h-22 sm:w-26'
+      return 'w-[82px] h-[68px] sm:w-[92px] sm:h-[76px] shrink-0'
   }
 }
 
 function folderSlotHeightClasses(size: AppleIconSize): string {
   switch (size) {
     case 'sm':
-      return 'h-20'
+      return 'h-[80px]'
     case 'lg':
-      return 'h-32 sm:h-36'
+      return 'h-[126px] sm:h-[144px]'
     default:
-      return 'h-24 sm:h-28'
+      return 'h-[100px] sm:h-[112px]'
   }
 }
 
@@ -372,14 +372,14 @@ export function AppleFilesGrid({
               setSelectedId('')
               setContextMenu(null)
             }}
-            className="group flex flex-col items-center rounded-2xl px-2 py-2.5 text-center transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF] cursor-pointer"
+            className="group min-w-0 w-full flex flex-col items-center rounded-2xl px-1 py-1.5 sm:px-2 sm:py-2.5 text-center transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF] cursor-pointer"
             title={`${folder.fullPath} (${folder.itemCount} 项 · ${formatSize(folder.totalSize)})`}
           >
             <div className={cn('flex w-full items-end justify-center', folderSlotHeightClasses(iconSize))}>
               <AppleFolderIcon className={folderSvgSizeClasses(iconSize)} />
             </div>
             <div className="mt-2 w-full space-y-0.5">
-              <div className="line-clamp-2 break-words text-[12px] sm:text-[13px] font-medium leading-[1.3] text-foreground px-1">
+              <div className="line-clamp-2 break-all sm:break-words text-[12px] sm:text-[13px] font-medium leading-[1.3] text-foreground px-0.5">
                 {middleTruncateFileName(folder.name, maxChars)}
               </div>
               <div className="text-[11px] text-muted-foreground tabular-nums">
@@ -426,7 +426,7 @@ export function AppleFilesGrid({
                 }
               }}
               className={cn(
-                'group relative flex flex-col items-center rounded-2xl px-2 py-2.5 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF] cursor-pointer',
+                'group relative min-w-0 w-full flex flex-col items-center rounded-2xl px-1 py-1.5 sm:px-2 sm:py-2.5 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF] cursor-pointer',
                 isSelected ? 'bg-[#007AFF]/8 dark:bg-[#007AFF]/15' : 'hover:bg-accent/45',
                 deletingId === rec.id && 'opacity-50 pointer-events-none'
               )}
@@ -436,7 +436,7 @@ export function AppleFilesGrid({
               <div className="relative flex w-full items-end justify-center">
                 <div
                   className={cn(
-                    'rounded-[8px] p-1 transition-all',
+                    'w-full flex items-end justify-center rounded-[10px] p-1 transition-all',
                     isSelected && 'bg-black/6 dark:bg-white/10'
                   )}
                 >
@@ -452,9 +452,9 @@ export function AppleFilesGrid({
                       e.stopPropagation()
                       onInspectFile(rec)
                     }}
-                    className="absolute right-0 bottom-0 flex h-6 w-6 items-center justify-center rounded-full border border-border/80 bg-card/90 text-muted-foreground shadow-xs backdrop-blur-xs"
+                    className="absolute right-0.5 bottom-0.5 flex h-5.5 w-5.5 items-center justify-center rounded-full border border-border/80 bg-card/90 text-muted-foreground shadow-xs backdrop-blur-xs"
                   >
-                    <MoreHorizontal className="h-3.5 w-3.5" />
+                    <MoreHorizontal className="h-3 w-3" />
                   </button>
                 )}
 
@@ -509,7 +509,7 @@ export function AppleFilesGrid({
                 <div className="flex justify-center">
                   <span
                     className={cn(
-                      'inline-block max-w-full break-words rounded-[5px] px-1.5 py-[1px] text-[12px] sm:text-[13px] font-medium leading-[1.3] transition-colors',
+                      'inline-block max-w-full line-clamp-2 break-all sm:break-words rounded-[5px] px-1.5 py-[1px] text-[12px] sm:text-[13px] font-medium leading-[1.3] transition-colors',
                       isSelected
                         ? 'bg-[#007AFF] text-white shadow-xs'
                         : 'text-foreground'

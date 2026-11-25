@@ -455,7 +455,31 @@ export function FilesPage({
                 <span>{groupByFolder && !hasActiveFilter ? '按目录' : '平铺'}</span>
               </Button>
 
-              {!isMobile && (
+              {isMobile ? (
+                <div className="flex items-center rounded-md border border-border p-0.5 text-[11px]">
+                  {(
+                    [
+                      { id: 'md', label: '3列' },
+                      { id: 'lg', label: '2列' },
+                    ] as Array<{ id: AppleIconSize; label: string }>
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setIconSize(opt.id)}
+                      className={cn(
+                        'rounded px-2 py-1 cursor-pointer transition-colors',
+                        (iconSize === opt.id || (iconSize === 'sm' && opt.id === 'md'))
+                          ? 'bg-accent text-accent-foreground font-medium'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                      title={`切换为每行 ${opt.label}`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
                 <div className="flex items-center rounded-md border border-border p-0.5 text-[11px]">
                   {(
                     [
